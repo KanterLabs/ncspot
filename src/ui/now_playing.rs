@@ -16,6 +16,8 @@ use crate::spotify::{PlayerEvent, Spotify};
 use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
 use crate::ui::album::AlbumView;
 use crate::ui::artist::ArtistView;
+use crate::ui::contextmenu::ContextMenu;
+use crate::ui::queue::QueueView;
 use crate::utils::ms_to_hms;
 
 #[derive(Clone, Copy)]
@@ -427,11 +429,45 @@ impl ViewExt for NowPlayingView {
         "Now Playing".to_string()
     }
 
-    fn on_command(&mut self, _s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
+    fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
         match cmd {
+            Command::Play => {
+                self.queue.toggleplayback();
+            }
+            Command::Queue => {
+                if let Some(mut playable) = self.queue.get_current() {
+                    playable.queue(&self.queue);
+                }
+            }
+            Command::PlayNext => {
+                if let Some(mut playable) = self.queue.get_current() {
+                    playable.play_next(&self.queue);
+                }
+            }
             Command::Save => {
                 if let Some(mut playable) = self.queue.get_current() {
                     playable.save(&self.library);
+                }
+            }
+            Command::SaveQueue => {
+                s.add_layer(QueueView::save_dialog(
+                    self.queue.clone(),
+                    self.library.clone(),
+                ));
+            }
+            Command::Add => {
+                if let Some(track) = self
+                    .queue
+                    .get_current()
+                    .and_then(|playable| playable.track())
+                {
+                    return Ok(CommandResult::Modal(Box::new(
+                        ContextMenu::add_track_dialog(
+                            self.library.clone(),
+                            self.queue.get_spotify(),
+                            track,
+                        ),
+                    )));
                 }
             }
             Command::Delete => {
@@ -449,6 +485,21 @@ impl ViewExt for NowPlayingView {
                     crate::sharing::write_share(url).ok();
                 }
                 return Ok(CommandResult::Consumed(None));
+            }
+            Command::Open(_) => {
+                if let Some(playable) = self.queue.get_current() {
+                    let target = playable.as_listitem();
+                    let queue = self.queue.clone();
+                    let library = self.library.clone();
+                    if let Some(view) = target.open(queue.clone(), library.clone()) {
+                        return Ok(CommandResult::View(view));
+                    }
+                    return Ok(CommandResult::Modal(Box::new(ContextMenu::new(
+                        target.as_ref(),
+                        queue,
+                        library,
+                    ))));
+                }
             }
             Command::Goto(mode) => {
                 if let Some(playable) = self.queue.get_current() {
@@ -475,6 +526,23 @@ impl ViewExt for NowPlayingView {
                     }
                 }
             }
+            Command::ShowRecommendations(_) => {
+                if let Some(playable) = self.queue.get_current() {
+                    let mut target = playable.as_listitem();
+                    if let Some(view) =
+                        target.open_recommendations(self.queue.clone(), self.library.clone())
+                    {
+                        return Ok(CommandResult::View(view));
+                    }
+                }
+            }
+            // A single-item dashboard has no selection to move, search, sort, or shift. Treat
+            // these list-only commands as successful no-ops so shared keybindings remain quiet.
+            Command::Move(_, _)
+            | Command::Shift(_, _)
+            | Command::Jump(_)
+            | Command::Insert(_)
+            | Command::Sort(_, _) => {}
             _ => return Ok(CommandResult::Ignored),
         }
 

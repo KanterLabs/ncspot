@@ -65,7 +65,7 @@ impl QueueView {
         }
     }
 
-    fn save_dialog(queue: Arc<Queue>, library: Arc<Library>) -> Modal<Dialog> {
+    pub(crate) fn save_dialog(queue: Arc<Queue>, library: Arc<Library>) -> Modal<Dialog> {
         let mut list_select: SelectView<Option<String>> = SelectView::new().autojump();
         list_select.add_item("[Create new]", None);
 
