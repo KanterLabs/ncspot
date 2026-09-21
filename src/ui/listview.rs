@@ -336,11 +336,11 @@ impl<I: ListItem + Clone> ListView<I> {
 
 impl<I: ListItem + Clone> View for ListView<I> {
     fn draw(&self, printer: &Printer<'_, '_>) {
-        let content = self.content.read().unwrap();
+        let content_len = self.content_len(false);
 
         scroll::draw_lines(self, printer, |_, printer, i| {
             // draw paginator after content
-            if i == content.len() && self.can_paginate() {
+            if i == content_len && self.can_paginate() {
                 let style = ColorStyle::secondary();
 
                 let max = self.pagination.max_content().unwrap();
@@ -348,8 +348,14 @@ impl<I: ListItem + Clone> View for ListView<I> {
                 printer.with_color(style, |printer| {
                     printer.print((0, 0), &buf);
                 });
-            } else if i < content.len() {
-                let item = &content[i];
+            } else if i < content_len {
+                // Do not keep the content lock while rendering a row. Queue rows consult the
+                // queue again in `is_playing`; recursively acquiring an `RwLock` read guard can
+                // deadlock when an MPRIS writer is waiting for the outer guard.
+                let item = self.content.read().unwrap().get(i).cloned();
+                let Some(item) = item else {
+                    return;
+                };
                 let currently_playing =
                     item.is_playing(&self.queue) && self.queue.get_current_index() == Some(i);
                 let is_local = item.track().map(|t| t.is_local).unwrap_or_default();

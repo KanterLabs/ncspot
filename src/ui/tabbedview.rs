@@ -87,7 +87,7 @@ impl TabbedView {
 
     /// Move the focus to the last tab.
     pub fn select_last(&mut self) {
-        self.selected = self.len() - 1;
+        self.selected = self.len().saturating_sub(1);
     }
 
     /// Return whether we are on the first tab.
@@ -97,7 +97,7 @@ impl TabbedView {
 
     /// Return whether we are on the last tab.
     pub fn on_last_tab(&mut self) -> bool {
-        self.selected == self.len() - 1
+        self.selected == self.len().saturating_sub(1)
     }
 
     /// Return the width of a single tab.
@@ -105,7 +105,10 @@ impl TabbedView {
     /// Keep in mind that this is an average. It's only provided to make sure all functions use the
     /// same calculation for tab width to prevent off-by-one errors.
     pub fn tab_width(&self) -> usize {
-        self.last_layout_size.x / self.len()
+        self.last_layout_size
+            .x
+            .checked_div(self.len())
+            .unwrap_or_default()
     }
 }
 
@@ -140,7 +143,7 @@ impl View for TabbedView {
         if let Some(tab) = self.tabs.get(self.selected) {
             let printer = printer
                 .offset((0, 1))
-                .cropped((printer.size.x, printer.size.y - 1));
+                .cropped((printer.size.x, printer.size.y.saturating_sub(1)));
 
             tab.draw(&printer);
         }
@@ -149,7 +152,7 @@ impl View for TabbedView {
     fn layout(&mut self, size: Vec2) {
         self.last_layout_size = size;
         if let Some(tab) = self.tab_mut(self.selected) {
-            tab.layout((size.x, size.y - 1).into())
+            tab.layout((size.x, size.y.saturating_sub(1)).into())
         }
     }
 
@@ -213,5 +216,21 @@ impl ViewExt for TabbedView {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TabbedView;
+
+    #[test]
+    fn empty_tabs_have_safe_navigation_and_width() {
+        let mut tabs = TabbedView::new();
+
+        tabs.select_last();
+
+        assert!(tabs.on_first_tab());
+        assert!(tabs.on_last_tab());
+        assert_eq!(tabs.tab_width(), 0);
     }
 }
