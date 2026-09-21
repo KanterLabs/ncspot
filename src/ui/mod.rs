@@ -10,6 +10,7 @@ pub mod layout;
 pub mod library;
 pub mod listview;
 pub mod modal;
+pub mod now_playing;
 pub mod pagination;
 pub mod playlist;
 pub mod playlists;

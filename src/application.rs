@@ -197,6 +197,8 @@ impl Application {
 
         let queueview = ui::queue::QueueView::new(queue.clone(), library.clone());
 
+        let nowplayingview = ui::now_playing::NowPlayingView::new(queue.clone(), library.clone());
+
         #[cfg(feature = "cover")]
         let coverview = ui::cover::CoverView::new(queue.clone(), library.clone(), &configuration);
 
@@ -206,7 +208,8 @@ impl Application {
             ui::layout::Layout::new(status, &event_manager, theme, Arc::clone(&configuration))
                 .screen("search", search.with_name("search"))
                 .screen("library", libraryview.with_name("library"))
-                .screen("queue", queueview);
+                .screen("queue", queueview)
+                .screen("playing", nowplayingview);
 
         #[cfg(feature = "cover")]
         layout.add_screen("cover", coverview.with_name("cover"));
