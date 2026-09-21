@@ -76,16 +76,56 @@ impl NowPlayingView {
         printer.with_color(style, |printer| printer.print((offset, y), &text));
     }
 
+    /// Draw differently styled runs of text as one centered line, so key hints can
+    /// highlight the key without splitting the line into separately aligned pieces.
+    fn draw_centered_segments(
+        printer: &Printer<'_, '_>,
+        y: usize,
+        segments: &[(String, ColorStyle)],
+        max_width: usize,
+    ) {
+        if y >= printer.size.y || printer.size.x == 0 {
+            return;
+        }
+
+        let total: usize = segments.iter().map(|(text, _)| text.width()).sum();
+        if total > min(max_width, printer.size.x) {
+            let flattened: String = segments.iter().map(|(text, _)| text.as_str()).collect();
+            let style = segments.first().map(|(_, style)| *style);
+            Self::draw_centered(
+                printer,
+                y,
+                &flattened,
+                max_width,
+                style.unwrap_or_else(ColorStyle::primary),
+            );
+            return;
+        }
+
+        let mut x = HAlign::Center.get_offset(total, printer.size.x);
+        for (text, style) in segments {
+            printer.with_color(*style, |printer| printer.print((x, y), text));
+            x += text.width();
+        }
+    }
+
     fn draw_empty(&self, printer: &Printer<'_, '_>) {
         let middle = printer.size.y / 2;
         let accent = Self::accent_style(printer);
-        Self::draw_centered(printer, middle.saturating_sub(1), "◇", 1, accent);
+        Self::draw_centered(printer, middle.saturating_sub(2), "◇", 1, accent);
+        Self::draw_centered(
+            printer,
+            middle.saturating_sub(1),
+            &"▁".repeat(min(9, printer.size.x)),
+            printer.size.x,
+            ColorStyle::secondary(),
+        );
         Self::draw_centered(
             printer,
             middle.saturating_add(1),
             "Nothing playing yet",
             printer.size.x.saturating_sub(2),
-            ColorStyle::primary(),
+            ColorStyle::title_primary(),
         );
         Self::draw_centered(
             printer,
@@ -141,20 +181,64 @@ impl NowPlayingView {
         }
     }
 
-    fn equalizer(&self, width: usize, elapsed_ms: u128) -> String {
-        const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-        let playing = matches!(self.spotify.get_current_status(), PlayerEvent::Playing(_));
+    fn is_playing(&self) -> bool {
+        matches!(self.spotify.get_current_status(), PlayerEvent::Playing(_))
+    }
+
+    /// Per-column bar heights (0..=7) of the decorative spectrum. Layered sine waves
+    /// under a centered envelope read as a plausible spectrum rather than a sawtooth,
+    /// and playback time drives the animation so it freezes while paused.
+    fn equalizer(&self, width: usize, elapsed_ms: u128) -> Vec<usize> {
+        if width == 0 {
+            return Vec::new();
+        }
+        if !self.is_playing() {
+            return vec![0; width];
+        }
+
+        let time = elapsed_ms as f64 / 1000.0;
+        let center = (width as f64 - 1.0) / 2.0;
         (0..width)
             .map(|column| {
-                if playing {
-                    let phase = (elapsed_ms / 240) as usize;
-                    let wave = (column * 5 + phase * 3) % 14;
-                    BARS[min(wave, 14 - wave)]
-                } else {
-                    BARS[1]
-                }
+                let x = column as f64;
+                let envelope = 1.0 - 0.6 * ((x - center) / (center + 1.0)).powi(2);
+                let wave = 0.5 * (x * 0.55 + time * 5.1).sin()
+                    + 0.3 * (x * 1.31 - time * 3.3).sin()
+                    + 0.2 * (x * 0.23 + time * 7.9).sin();
+                let level = (wave * 0.5 + 0.5) * envelope * 7.0;
+                level.round().clamp(0.0, 7.0) as usize
             })
             .collect()
+    }
+
+    fn draw_equalizer(
+        &self,
+        printer: &Printer<'_, '_>,
+        row: usize,
+        width: usize,
+        elapsed_ms: u128,
+    ) {
+        const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let levels = self.equalizer(width, elapsed_ms);
+        if levels.is_empty() || row >= printer.size.y {
+            return;
+        }
+
+        let accent = Self::accent_style(printer);
+        let playing = Self::playing_style(printer);
+        let quiet = ColorStyle::secondary();
+        let origin = HAlign::Center.get_offset(levels.len(), printer.size.x);
+        for (offset, level) in levels.into_iter().enumerate() {
+            let x = origin + offset;
+            let style = match level {
+                0..=2 => quiet,
+                3..=5 => accent,
+                _ => playing,
+            };
+            printer.with_color(style, |printer| {
+                printer.print((x, row), &BARS[level].to_string());
+            });
+        }
     }
 
     fn draw_compact(&self, printer: &Printer<'_, '_>, playable: &Playable) {
@@ -162,14 +246,16 @@ impl NowPlayingView {
         let elapsed = self.spotify.get_current_progress().as_millis();
         let (icon, state) = self.status();
         let width = printer.size.x.saturating_sub(2);
-        let start_y = printer.size.y.saturating_sub(6) / 2;
+        let start_y = printer.size.y.saturating_sub(7) / 2;
 
-        Self::draw_centered(
+        Self::draw_centered_segments(
             printer,
             start_y,
-            &format!("{icon}  {state}"),
+            &[
+                (format!("{icon}  "), Self::playing_style(printer)),
+                (state.to_string(), ColorStyle::secondary()),
+            ],
             width,
-            Self::playing_style(printer),
         );
         Self::draw_centered(
             printer,
@@ -194,14 +280,16 @@ impl NowPlayingView {
                 ColorStyle::secondary(),
             );
         }
+        let progress_row = start_y.saturating_add(6);
         self.draw_progress(
             printer,
-            start_y.saturating_add(6),
+            progress_row,
             1,
             width,
             elapsed,
             playable.duration(),
         );
+        self.draw_times(printer, progress_row + 1, 1, width, elapsed, playable);
     }
 
     fn draw_progress(
@@ -218,35 +306,78 @@ impl NowPlayingView {
             return;
         }
 
+        const PARTIALS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
         let width = min(width, printer.size.x - start);
-        let filled = progress_width(elapsed_ms, duration_ms, width);
+        let eighths = progress_eighths(elapsed_ms, duration_ms, width);
+        let filled = eighths / 8;
+        let remainder = eighths % 8;
         let accent = Self::accent_style(printer);
+
         printer.with_color(ColorStyle::secondary(), |printer| {
-            printer.print((start, row), &"━".repeat(width));
+            printer.print((start, row), &"┈".repeat(width));
         });
-        if filled > 0 {
-            printer.with_color(accent, |printer| {
-                printer.print((start, row), &"━".repeat(filled));
+        printer.with_color(accent, |printer| {
+            if filled > 0 {
+                printer.print((start, row), &"█".repeat(filled));
+            }
+            if remainder > 0 && filled < width {
+                printer.print((start + filled, row), &PARTIALS[remainder - 1].to_string());
+            }
+        });
+        // A playhead makes the seek target obvious, and marks where a click will land.
+        if width > 1 {
+            let head = min(filled, width - 1);
+            printer.with_color(Self::playing_style(printer), |printer| {
+                printer.print((start + head, row), "●");
             });
         }
+
         *self.progress_hitbox.write().unwrap() = Some(ProgressHitbox { row, start, width });
     }
 
-    fn draw_dashboard(&self, printer: &Printer<'_, '_>, playable: &Playable) {
-        let (title, byline, album, kind) = Self::metadata(playable);
-        let elapsed = self.spotify.get_current_progress().as_millis();
-        let duration = playable.duration();
-        let available_width = printer.size.x.saturating_sub(4);
-        let card_width = min(78, available_width);
-        let card_height = min(17, printer.size.y.saturating_sub(1));
-        let left = printer.size.x.saturating_sub(card_width) / 2;
-        let top = printer.size.y.saturating_sub(card_height) / 2;
-        let inner_width = card_width.saturating_sub(4);
-        let right = left.saturating_add(card_width).saturating_sub(1);
-        let bottom = top.saturating_add(card_height).saturating_sub(1);
-        let border_style = Self::accent_style(printer);
+    fn draw_times(
+        &self,
+        printer: &Printer<'_, '_>,
+        row: usize,
+        start: usize,
+        width: usize,
+        elapsed_ms: u128,
+        playable: &Playable,
+    ) {
+        if row >= printer.size.y || width == 0 || start >= printer.size.x {
+            return;
+        }
 
-        printer.with_color(border_style, |printer| {
+        let width = min(width, printer.size.x - start);
+        let elapsed_label = ms_to_hms(elapsed_ms.try_into().unwrap_or(u32::MAX));
+        let duration_label = playable.duration_str();
+        let percent = percent_complete(elapsed_ms, playable.duration());
+
+        printer.with_color(ColorStyle::secondary(), |printer| {
+            printer.print((start, row), &elapsed_label);
+            let duration_x = start
+                .saturating_add(width)
+                .saturating_sub(duration_label.width());
+            printer.print((duration_x, row), &duration_label);
+        });
+
+        let percent_label = format!("{percent}%");
+        let used = elapsed_label.width() + duration_label.width() + percent_label.width() + 4;
+        if used <= width {
+            let offset = start + (width - percent_label.width()) / 2;
+            printer.with_color(Self::accent_style(printer), |printer| {
+                printer.print((offset, row), &percent_label);
+            });
+        }
+    }
+
+    /// Rounded card with the transport state inlaid into the top border.
+    fn draw_card(&self, printer: &Printer<'_, '_>, rect: (usize, usize, usize, usize), chip: &str) {
+        let (left, top, right, bottom) = rect;
+        let card_width = right.saturating_sub(left) + 1;
+        let border = Self::accent_style(printer);
+
+        printer.with_color(border, |printer| {
             printer.print((left, top), "╭");
             if card_width > 2 {
                 printer.print((left + 1, top), &"─".repeat(card_width - 2));
@@ -263,32 +394,60 @@ impl NowPlayingView {
             printer.print((right, bottom), "╯");
         });
 
+        let chip = truncate(chip, card_width.saturating_sub(8));
+        if !chip.is_empty() && card_width > chip.width() + 8 {
+            let offset = left + (card_width - chip.width() - 2) / 2;
+            printer.with_color(border, |printer| {
+                printer.print((offset, top), " ");
+                printer.print((offset + chip.width() + 1, top), " ");
+            });
+            printer.with_color(Self::playing_style(printer), |printer| {
+                printer.print((offset + 1, top), &chip);
+            });
+        }
+    }
+
+    fn draw_rule(&self, printer: &Printer<'_, '_>, row: usize, left: usize, right: usize) {
+        if row >= printer.size.y || right <= left + 1 {
+            return;
+        }
+        printer.with_color(ColorStyle::secondary(), |printer| {
+            printer.print((left, row), "├");
+            printer.print((left + 1, row), &"─".repeat(right - left - 1));
+            printer.print((right, row), "┤");
+        });
+    }
+
+    fn draw_dashboard(&self, printer: &Printer<'_, '_>, playable: &Playable) {
+        let (title, byline, album, kind) = Self::metadata(playable);
+        let elapsed = self.spotify.get_current_progress().as_millis();
+        let available_width = printer.size.x.saturating_sub(4);
+        let card_width = min(78, available_width);
+        let card_height = min(17, printer.size.y.saturating_sub(1));
+        let left = printer.size.x.saturating_sub(card_width) / 2;
+        let top = printer.size.y.saturating_sub(card_height) / 2;
+        let inner_width = card_width.saturating_sub(4);
+        let right = left.saturating_add(card_width).saturating_sub(1);
+        let bottom = top.saturating_add(card_height).saturating_sub(1);
+
         let (icon, state) = self.status();
-        let header = format!("{icon}  {state}  •  {kind}");
-        Self::draw_centered(
+        self.draw_card(
             printer,
-            top + 1,
-            &header,
-            inner_width,
-            Self::playing_style(printer),
+            (left, top, right, bottom),
+            &format!("{icon}  {state}"),
         );
+
+        self.draw_equalizer(printer, top + 2, min(31, inner_width), elapsed);
         Self::draw_centered(
             printer,
-            top + 3,
-            &self.equalizer(min(31, inner_width), elapsed),
-            inner_width,
-            border_style,
-        );
-        Self::draw_centered(
-            printer,
-            top + 5,
+            top + 4,
             &title,
             inner_width,
             ColorStyle::title_primary(),
         );
         Self::draw_centered(
             printer,
-            top + 6,
+            top + 5,
             &byline,
             inner_width,
             ColorStyle::primary(),
@@ -296,12 +455,25 @@ impl NowPlayingView {
         if !album.is_empty() {
             Self::draw_centered(
                 printer,
-                top + 7,
+                top + 6,
                 &album,
                 inner_width,
                 ColorStyle::secondary(),
             );
         }
+
+        let saved = if self.library.is_saved_track(playable) {
+            "  •  ♥ saved"
+        } else {
+            ""
+        };
+        Self::draw_centered(
+            printer,
+            top + 8,
+            &format!("{kind}{saved}"),
+            inner_width,
+            ColorStyle::secondary(),
+        );
 
         let progress_start = left.saturating_add(3);
         let progress_width = card_width.saturating_sub(6);
@@ -312,43 +484,64 @@ impl NowPlayingView {
             progress_start,
             progress_width,
             elapsed,
-            duration,
+            playable.duration(),
         );
-        let elapsed_label = ms_to_hms(elapsed.try_into().unwrap_or(u32::MAX));
-        let duration_label = playable.duration_str();
-        printer.with_color(ColorStyle::secondary(), |printer| {
-            printer.print((progress_start, progress_row + 1), &elapsed_label);
-            let duration_x = progress_start
-                .saturating_add(progress_width)
-                .saturating_sub(duration_label.width());
-            printer.print((duration_x, progress_row + 1), &duration_label);
-        });
+        self.draw_times(
+            printer,
+            progress_row + 1,
+            progress_start,
+            progress_width,
+            elapsed,
+            playable,
+        );
 
-        let repeat = match self.queue.get_repeat() {
-            RepeatSetting::None => "repeat off",
-            RepeatSetting::RepeatPlaylist => "repeat all",
-            RepeatSetting::RepeatTrack => "repeat one",
-        };
-        let shuffle = if self.queue.get_shuffle() {
-            "shuffle on"
-        } else {
-            "shuffle off"
-        };
-        let volume = (self.spotify.volume() as f64 / u16::MAX as f64 * 100.0).round() as u16;
-        Self::draw_centered(
+        self.draw_rule(printer, top + 12, left, right);
+        Self::draw_centered_segments(
             printer,
             top + 13,
-            &format!("{repeat}   •   {shuffle}   •   volume {volume}%"),
+            &self.transport_segments(printer),
             inner_width,
-            ColorStyle::secondary(),
         );
-        Self::draw_centered(
+        Self::draw_centered_segments(
             printer,
             top + 15,
-            "< previous     Shift+P play / pause     > next",
+            &[
+                ("<".to_string(), Self::accent_style(printer)),
+                (" previous     ".to_string(), ColorStyle::secondary()),
+                ("Shift+P".to_string(), Self::accent_style(printer)),
+                (" play / pause     ".to_string(), ColorStyle::secondary()),
+                (">".to_string(), Self::accent_style(printer)),
+                (" next".to_string(), ColorStyle::secondary()),
+            ],
             inner_width,
-            ColorStyle::primary(),
         );
+    }
+
+    /// Repeat / shuffle / volume, with active toggles highlighted.
+    fn transport_segments(&self, printer: &Printer<'_, '_>) -> Vec<(String, ColorStyle)> {
+        let on = Self::playing_style(printer);
+        let off = ColorStyle::secondary();
+        let separator = ("   •   ".to_string(), ColorStyle::secondary());
+
+        let (repeat, repeat_style) = match self.queue.get_repeat() {
+            RepeatSetting::None => ("repeat off", off),
+            RepeatSetting::RepeatPlaylist => ("repeat all", on),
+            RepeatSetting::RepeatTrack => ("repeat one", on),
+        };
+        let (shuffle, shuffle_style) = if self.queue.get_shuffle() {
+            ("shuffle on", on)
+        } else {
+            ("shuffle off", off)
+        };
+        let volume = (self.spotify.volume() as f64 / u16::MAX as f64 * 100.0).round() as u16;
+
+        vec![
+            (repeat.to_string(), repeat_style),
+            separator.clone(),
+            (shuffle.to_string(), shuffle_style),
+            separator,
+            (format!("volume {volume}%"), Self::accent_style(printer)),
+        ]
     }
 }
 
@@ -550,14 +743,22 @@ impl ViewExt for NowPlayingView {
     }
 }
 
-fn progress_width(elapsed_ms: u128, duration_ms: u32, width: usize) -> usize {
+/// Progress in eighths of a cell, so the bar can render sub-cell partial blocks.
+fn progress_eighths(elapsed_ms: u128, duration_ms: u32, width: usize) -> usize {
     if duration_ms == 0 || width == 0 {
         return 0;
     }
     min(
-        width,
-        (elapsed_ms.saturating_mul(width as u128) / duration_ms as u128) as usize,
+        width * 8,
+        (elapsed_ms.saturating_mul(width as u128 * 8) / duration_ms as u128) as usize,
     )
+}
+
+fn percent_complete(elapsed_ms: u128, duration_ms: u32) -> u8 {
+    if duration_ms == 0 {
+        return 0;
+    }
+    min(100, elapsed_ms.saturating_mul(100) / duration_ms as u128) as u8
 }
 
 fn truncate(text: &str, max_width: usize) -> String {
@@ -585,14 +786,27 @@ fn truncate(text: &str, max_width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{progress_width, truncate};
+    use super::{percent_complete, progress_eighths, truncate};
 
     #[test]
     fn progress_is_clamped_and_handles_empty_duration() {
-        assert_eq!(progress_width(500, 1000, 20), 10);
-        assert_eq!(progress_width(2000, 1000, 20), 20);
-        assert_eq!(progress_width(500, 0, 20), 0);
-        assert_eq!(progress_width(500, 1000, 0), 0);
+        assert_eq!(progress_eighths(500, 1000, 20), 80);
+        assert_eq!(progress_eighths(2000, 1000, 20), 160);
+        assert_eq!(progress_eighths(500, 0, 20), 0);
+        assert_eq!(progress_eighths(500, 1000, 0), 0);
+    }
+
+    #[test]
+    fn progress_resolves_below_a_single_cell() {
+        // A third of the way into the first of 20 cells: two eighths, no full cell.
+        assert_eq!(progress_eighths(17, 1000, 20), 2);
+    }
+
+    #[test]
+    fn percent_is_clamped_and_handles_empty_duration() {
+        assert_eq!(percent_complete(500, 1000), 50);
+        assert_eq!(percent_complete(5000, 1000), 100);
+        assert_eq!(percent_complete(500, 0), 0);
     }
 
     #[test]
