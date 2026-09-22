@@ -1,0 +1,114 @@
+name: Fedora
+
+# Builds an ncspot binary against Fedora's own glibc and system libraries, which
+# the generic linux-x86_64 release asset cannot be relied on to match. Runs on the
+# KanterLabs homelab fleet: `homelab-heavy`, because this is a sustained Rust build.
+#
+# A binary built on Fedora N runs on N and newer, so build on the oldest Fedora
+# release you still need to run on and bump `fedora_version` as those go EOL.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      fedora_version:
+        description: "Fedora release to build against"
+        required: false
+        default: "43"
+
+env:
+  CARGO_TERM_COLOR: always
+  TERM: xterm
+
+concurrency:
+  group: fedora-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+jobs:
+  build:
+    name: Building for Fedora ${{ inputs.fedora_version || '43' }}
+    runs-on: homelab-heavy
+    permissions:
+      contents: write
+    container:
+      image: registry.fedoraproject.org/fedora:${{ inputs.fedora_version || '43' }}
+    steps:
+      # Before checkout: the base image has no git, and actions/checkout would
+      # otherwise fall back to a tarball with no repository metadata.
+      - name: Install build dependencies
+        run: |
+          dnf --assumeyes --setopt=install_weak_deps=False install \
+            binutils \
+            dbus-devel \
+            gcc \
+            gcc-c++ \
+            git \
+            gzip \
+            libxcb-devel \
+            make \
+            ncurses-devel \
+            openssl-devel \
+            pkgconf-pkg-config \
+            pulseaudio-libs-devel \
+            python3 \
+            tar \
+            xz \
+            zstd
+
+      - uses: actions/checkout@v7
+        name: Checkout src
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: fedora${{ inputs.fedora_version || '43' }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: fedora${{ inputs.fedora_version || '43' }}-cargo-
+
+      - name: Resolve release name
+        id: name
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+          else
+            version="$(git rev-parse --short HEAD)"
+          fi
+          fedora="${{ inputs.fedora_version || '43' }}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "asset=ncspot-${version}-fedora${fedora}-x86_64" >> "$GITHUB_OUTPUT"
+
+      - name: Running cargo build
+        run: cargo build --release --locked
+
+      - name: Packaging assets
+        working-directory: target/release
+        run: |
+          asset="${{ steps.name.outputs.asset }}"
+          strip ncspot
+          tar czvf "${asset}.tar.gz" ncspot
+          sha256sum "${asset}.tar.gz" > "${asset}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.name.outputs.asset }}
+          path: target/release/${{ steps.name.outputs.asset }}.*
+          if-no-files-found: error
+
+      - name: Releasing assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: target/release/${{ steps.name.outputs.asset }}.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
