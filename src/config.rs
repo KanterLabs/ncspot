@@ -103,6 +103,7 @@ pub struct ConfigValues {
     /// Frames per second the now playing visualizer animates at. `0` turns the
     /// animation off, leaving the rest of the screen updating as usual.
     pub visualizer_fps: Option<u32>,
+    pub cover_accent: Option<bool>,
     pub ap_port: Option<u16>,
 }
 

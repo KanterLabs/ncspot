@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use std::{env, fmt};
 
+use crate::audio_tap::{AudioTap, TapSink};
 use futures::channel::oneshot;
 use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
@@ -62,6 +63,8 @@ pub struct Spotify {
     since: Arc<RwLock<Option<SystemTime>>>,
     /// Channel to send commands to the worker thread.
     channel: Arc<RwLock<Option<mpsc::UnboundedSender<WorkerCommand>>>>,
+    /// The audio on its way to the speakers, for the visualizer to read.
+    tap: Arc<AudioTap>,
 }
 
 impl Spotify {
@@ -81,6 +84,7 @@ impl Spotify {
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),
+            tap: AudioTap::new(),
         };
 
         let (user_tx, user_rx) = oneshot::channel();
@@ -115,7 +119,13 @@ impl Spotify {
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),
+            tap: AudioTap::new(),
         }
+    }
+
+    /// The tap on the playback sink, which the visualizer reads its spectrum from.
+    pub fn audio_tap(&self) -> Arc<AudioTap> {
+        self.tap.clone()
     }
 
     /// Start the worker thread. If `user_tx` is given, it will receive the username of the logged
@@ -142,6 +152,7 @@ impl Spotify {
             user_tx,
             volume,
             backend,
+            self.tap.clone(),
         ));
         Ok(())
     }
@@ -246,6 +257,7 @@ impl Spotify {
         user_tx: Option<oneshot::Sender<String>>,
         volume: u16,
         backend: SinkBuilder,
+        tap: Arc<AudioTap>,
     ) {
         let bitrate_str = cfg.values().bitrate.unwrap_or(320).to_string();
         let bitrate = Bitrate::from_str(&bitrate_str);
@@ -277,7 +289,14 @@ impl Spotify {
             player_config,
             session.clone(),
             mixer.get_soft_volume(),
-            move || (backend)(cfg.values().backend_device.clone(), audio_format),
+            move || {
+                // Everything the player writes passes through the tap on its way to
+                // the real sink, so the visualizer sees the audio actually playing.
+                Box::new(TapSink::new(
+                    (backend)(cfg.values().backend_device.clone(), audio_format),
+                    tap.clone(),
+                ))
+            },
         );
         let player_events = player.get_player_event_channel();
 

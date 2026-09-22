@@ -74,6 +74,7 @@ playback depending on your desktop environment settings. Have a look at the
 | <kbd>F3</kbd>     | Library (See [specific commands](#library)).                                  |
 | <kbd>F4</kbd>     | Now Playing.                                                                  |
 | <kbd>F8</kbd>     | Album Art (if built with the `cover` feature).                                |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> | Open quick search (See [Now Playing](#now-playing)).               |
 | <kbd>/</kbd>      | Open a Vim-like search bar (See [specific commands](#vim-like-search-bar)).   |
 | <kbd>:</kbd>      | Open a Vim-like command prompt (See [specific commands](#vim-like-commands)). |
 | <kbd>Escape</kbd> | Close Vim-like search bar, command prompt, or Search screen.                  |
@@ -144,6 +145,12 @@ When pressing <kbd>O</kbd>:
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the current queue.              |
 
 ### Now Playing
+The visualizer shows the spectrum of the audio actually playing, read from the
+playback sink and split into bands by frequency. When nothing is coming through
+it falls back to an animated band so the view still has some life in it, and
+`visualizer_fps = 0` turns it off entirely. The card is also tinted with the
+album cover's own colour, which `cover_accent = false` turns off.
+
 The card is clickable: the transport buttons, the progress bar, the repeat and
 shuffle toggles and the volume meter all respond to a click, and scrolling over
 the volume meter or progress bar adjusts them. Cover art is drawn beside the
@@ -154,6 +161,7 @@ a font that carries them (most monospace fonts do) gives the most detail.
 | Key                                         | Command                                              |
 |---------------------------------------------|------------------------------------------------------|
 | <kbd>/</kbd>                                 | Open quick search (see below).                       |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd>                 | Open quick search, from any view.                    |
 | <kbd>1</kbd> - <kbd>4</kbd>                  | Pick the result with that number.                    |
 | <kbd>Enter</kbd>                             | Pick the first result.                               |
 | <kbd>1</kbd> / <kbd>2</kbd> (after picking)  | Play the result next / play it now.                  |
@@ -161,7 +169,9 @@ a font that carries them (most monospace fonts do) gives the most detail.
 | <kbd>Alt</kbd>+digit                         | Type a digit into the query instead of picking.      |
 | <kbd>Escape</kbd>                            | Back to the query, or close quick search.            |
 
-Quick search runs a Spotify track search as you type and shows the top four
+Quick search is bound to <kbd>/</kbd> here and to <kbd>Ctrl</kbd>+<kbd>F</kbd>
+everywhere; it is also available as the `quicksearch` command, so it can be
+rebound like any other. It runs a Spotify track search as you type and shows the top four
 matches. Choosing and playing is always two keys: a digit picks the result it
 numbers, then <kbd>1</kbd> queues it after the current track, <kbd>2</kbd>
 plays it immediately, or <kbd>3</kbd> starts a radio from it: the track plays
@@ -299,6 +309,7 @@ Possible configuration values are:
 | `hide_display_names`            | Hides spotify usernames in the library header and on playlists | `true`, `false`                                                                       | `false`             |
 | `statusbar_format`              | Formatting for tracks in the statusbar                         | See [track_formatting](#track-formatting)                                             | `%artists - %track` |
 | `visualizer_fps`                | Frame rate of the now playing visualizer, `0` to disable it    | `0` - `60`                                                                            | `20`                |
+| `cover_accent`                  | Tint the now playing card with the album cover's own colour    | `true`, `false`                                                                       | `true`              |
 | `[track_format]`                | Set active fields shown in Library/Queue views                 | See [track formatting](#track-formatting)                                             |                     |
 | `[notification_format]`         | Set the text displayed in notifications<sup>[4]</sup>          | See [notification formatting](#notification-formatting)                               |                     |
 | `[theme]`                       | Custom theme                                                   | See [custom theme](#theming)                                                          |                     |

@@ -145,6 +145,8 @@ pub enum Command {
     Move(MoveMode, MoveAmount),
     Shift(ShiftMode, Option<i32>),
     Search(String),
+    /// Open the quick search overlay.
+    QuickSearch,
     Jump(JumpMode),
     Help,
     ReloadConfig,
@@ -220,6 +222,7 @@ impl fmt::Display for Command {
             | Self::ReloadConfig
             | Self::Noop
             | Self::Logout
+            | Self::QuickSearch
             | Self::Reconnect
             | Self::Redraw => vec![],
         };
@@ -261,6 +264,7 @@ impl Command {
             Self::Move(_, _) => "move",
             Self::Shift(_, _) => "shift",
             Self::Search(_) => "search",
+            Self::QuickSearch => "quicksearch",
             Self::Jump(JumpMode::Previous) => "jumpprevious",
             Self::Jump(JumpMode::Next) => "jumpnext",
             Self::Jump(JumpMode::Query(_)) => "jump",
@@ -683,6 +687,7 @@ pub fn parse(input: &str) -> Result<Vec<Command>, CommandParseError> {
                     Command::Shift(shift_dir, amount)
                 }
                 "search" => Command::Search(args.join(" ")),
+                "quicksearch" => Command::QuickSearch,
                 "jump" => Command::Jump(JumpMode::Query(args.join(" "))),
                 "jumpnext" => Command::Jump(JumpMode::Next),
                 "jumpprevious" => Command::Jump(JumpMode::Previous),

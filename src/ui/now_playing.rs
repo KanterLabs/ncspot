@@ -23,7 +23,6 @@ use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
 use crate::ui::album::AlbumView;
 use crate::ui::artist::ArtistView;
 use crate::ui::contextmenu::ContextMenu;
-use crate::ui::modal::Modal;
 use crate::ui::queue::QueueView;
 use crate::ui::quick_search::QuickSearch;
 use crate::utils::ms_to_hms;
@@ -437,11 +436,31 @@ impl NowPlayingView {
         )
     }
 
-    fn accent_style(printer: &Printer<'_, '_>) -> ColorStyle {
+    /// The colour the card highlights with: the cover's own, when it has one worth
+    /// using, and the theme's progress colour otherwise.
+    fn accent_style(&self, printer: &Printer<'_, '_>) -> ColorStyle {
+        let colour = self
+            .cover_accent()
+            .unwrap_or(*printer.theme.palette.custom("statusbar_progress").unwrap());
         ColorStyle::new(
-            ColorType::Color(*printer.theme.palette.custom("statusbar_progress").unwrap()),
+            ColorType::Color(colour),
             ColorType::Palette(PaletteColor::Background),
         )
+    }
+
+    /// The playing cover's own colour, unless the user would rather keep the theme.
+    #[cfg(feature = "album_art")]
+    fn cover_accent(&self) -> Option<cursive::theme::Color> {
+        if !self.library.cfg.values().cover_accent.unwrap_or(true) {
+            return None;
+        }
+        let url = self.queue.get_current()?.cover_url()?;
+        self.art.accent(&url)
+    }
+
+    #[cfg(not(feature = "album_art"))]
+    fn cover_accent(&self) -> Option<cursive::theme::Color> {
+        None
     }
 
     fn draw_line(
@@ -598,11 +617,45 @@ impl NowPlayingView {
     /// beat pulse makes the whole band pump. Playback time drives it, so pausing
     /// freezes the pattern in place and ducks it to a low idle band. `seed` shifts the
     /// pattern per track, so two tracks never animate identically.
+    /// The level each bar is heading for, in eighths of a row.
+    ///
+    /// Taken from the audio actually playing when the sink has any to hand, and
+    /// otherwise from a synthesized band, so the view still has something to show
+    /// when playback is paused or a backend gives us nothing to look at.
     fn spectrum_targets(&self, width: usize, rows: usize, elapsed_ms: u128, seed: f64) -> Vec<f64> {
         if width == 0 || rows == 0 {
             return Vec::new();
         }
+        if let Some(targets) = self.audio_targets(width, (rows * 8) as f64) {
+            return targets;
+        }
+        self.synthetic_targets(width, rows, elapsed_ms, seed)
+    }
 
+    /// The spectrum of what is coming out of the speakers, scaled to the band.
+    fn audio_targets(&self, width: usize, ceiling: f64) -> Option<Vec<f64>> {
+        let bands = self.spotify.audio_tap().bands(width)?;
+        Some(
+            bands
+                .iter()
+                .map(|level| {
+                    // Lifted a little so quiet detail is still visible, and driven
+                    // past the top so loud peaks pin the way a meter does.
+                    let level = (*level as f64).powf(0.8) * 1.2;
+                    (level * ceiling).clamp(0.0, ceiling)
+                })
+                .collect(),
+        )
+    }
+
+    /// A band made up out of nothing, for when there is no audio to read.
+    fn synthetic_targets(
+        &self,
+        width: usize,
+        rows: usize,
+        elapsed_ms: u128,
+        seed: f64,
+    ) -> Vec<f64> {
         let gain = if self.is_playing() { 1.0 } else { 0.45 };
         let time = elapsed_ms as f64 / 1000.0;
         let ceiling = (rows * 8) as f64;
@@ -659,7 +712,7 @@ impl NowPlayingView {
         let mut state = self.spectrum.write().unwrap();
         state.step(&targets);
 
-        let accent = Self::accent_style(printer);
+        let accent = self.accent_style(printer);
         let playing = Self::playing_style(printer);
         let quiet = ColorStyle::secondary();
         let playing_now = self.is_playing();
@@ -733,7 +786,7 @@ impl NowPlayingView {
         let eighths = progress_eighths(elapsed_ms, duration_ms, width);
         let filled = eighths / 8;
         let remainder = eighths % 8;
-        let accent = Self::accent_style(printer);
+        let accent = self.accent_style(printer);
 
         printer.with_color(ColorStyle::secondary(), |printer| {
             printer.print((start, row), &"┈".repeat(width));
@@ -798,7 +851,7 @@ impl NowPlayingView {
             .find(|label| label.width() + edges <= width);
         if let Some(label) = center {
             let x = region.center(label.width());
-            printer.with_color(Self::accent_style(printer), |printer| {
+            printer.with_color(self.accent_style(printer), |printer| {
                 printer.print((x, row), &label);
             });
         }
@@ -816,7 +869,7 @@ impl NowPlayingView {
     ) {
         let (left, top, right, bottom) = rect;
         let card_width = right.saturating_sub(left) + 1;
-        let border = Self::accent_style(printer);
+        let border = self.accent_style(printer);
 
         printer.with_color(border, |printer| {
             printer.print((left, top), "╭");
@@ -951,7 +1004,7 @@ impl NowPlayingView {
             Segment::new(volume_icon, ColorStyle::secondary()),
             Segment::button(
                 volume_meter(volume, VOLUME_METER_CELLS),
-                Self::accent_style(printer),
+                self.accent_style(printer),
                 Control::Volume,
             ),
             Segment::new(format!(" {volume}%"), ColorStyle::secondary()),
@@ -982,7 +1035,7 @@ impl NowPlayingView {
             }
         };
         let gap = || Segment::new("  ", ColorStyle::secondary());
-        let accent = Self::accent_style(printer);
+        let accent = self.accent_style(printer);
 
         vec![
             Segment::button(label(previous, "<"), accent, Control::Previous),
@@ -1046,7 +1099,7 @@ impl NowPlayingView {
             if let Some(next) = self.next_up() {
                 blocks.push(Block::new(
                     BlockKind::Segments(vec![
-                        Segment::new("next up  ", Self::accent_style(printer)),
+                        Segment::new("next up  ", self.accent_style(printer)),
                         Segment::new(next, ColorStyle::secondary()),
                     ]),
                     7,
@@ -1213,7 +1266,7 @@ impl NowPlayingView {
             "◇"
         };
         let blocks = vec![
-            Block::line(glyph, Self::accent_style(printer), 4),
+            Block::line(glyph, self.accent_style(printer), 4),
             Block::blank(),
             Block::title("Nothing playing yet"),
             Block::line(
@@ -1361,12 +1414,12 @@ impl View for NowPlayingView {
             let library = self.library.clone();
             let events = self.events.clone();
             return EventResult::with_cb(move |s| {
-                s.add_layer(Modal::new(QuickSearch::new(
+                s.add_layer(QuickSearch::layer(
                     spotify.clone(),
                     queue.clone(),
                     library.clone(),
                     events.clone(),
-                )));
+                ));
             });
         }
 

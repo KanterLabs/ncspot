@@ -259,6 +259,15 @@ impl CommandManager {
                 });
                 Ok(None)
             }
+            Command::QuickSearch => {
+                s.add_layer(crate::ui::quick_search::QuickSearch::layer(
+                    self.spotify.clone(),
+                    self.queue.clone(),
+                    self.library.clone(),
+                    self.events.clone(),
+                ));
+                Ok(None)
+            }
             Command::Logout => {
                 self.spotify.shutdown();
 
@@ -473,6 +482,7 @@ impl CommandManager {
         kb.insert("F4".into(), vec![Command::Focus("playing".into())]);
         #[cfg(feature = "cover")]
         kb.insert("F8".into(), vec![Command::Focus("cover".into())]);
+        kb.insert("Ctrl+f".into(), vec![Command::QuickSearch]);
         kb.insert("?".into(), vec![Command::Help]);
         kb.insert("Esc".into(), vec![Command::Back]);
         kb.insert("Backspace".into(), vec![Command::Back]);

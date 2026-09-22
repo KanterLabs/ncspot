@@ -22,6 +22,8 @@ const QUADRANTS: [&str; 16] = [
 struct Loaded {
     url: String,
     image: image::RgbImage,
+    /// The cover's own colour, for tinting the card it is drawn in.
+    accent: Option<Color>,
 }
 
 /// One printed cell: a block glyph and the two colours it is drawn in.
@@ -92,6 +94,18 @@ impl AlbumArt {
             }
         }
         true
+    }
+
+    /// The cover's own colour, once it is loaded: the most present colour that is
+    /// vivid enough to read as a highlight. None for a cover with no such colour,
+    /// so the caller keeps its theme colour.
+    pub fn accent(&self, url: &str) -> Option<Color> {
+        self.loaded
+            .read()
+            .unwrap()
+            .as_ref()
+            .filter(|loaded| loaded.url == url)
+            .and_then(|loaded| loaded.accent)
     }
 
     /// Whether a cover for `url` is already loaded, scaling it to `size` if needed.
@@ -171,6 +185,7 @@ impl AlbumArt {
             if let Some(image) = image {
                 *loaded.write().unwrap() = Some(Loaded {
                     url: url.clone(),
+                    accent: accent_of(&image),
                     image,
                 });
                 events.trigger();
@@ -184,9 +199,87 @@ impl AlbumArt {
     pub fn load_for_test(&self, url: &str, image: image::RgbImage) {
         *self.loaded.write().unwrap() = Some(Loaded {
             url: url.to_string(),
+            accent: accent_of(&image),
             image,
         });
     }
+}
+
+/// Sizes the cover is reduced to before its colours are counted. Small enough to
+/// be quick, big enough that a detail like a jacket does not vanish.
+const ACCENT_SAMPLE: u32 = 48;
+/// Colours are counted in a coarse cube, so near enough shades land together.
+const ACCENT_BINS: u32 = 6;
+
+/// The colour to tint a card with, drawn from the cover itself.
+///
+/// Shades are counted in a coarse colour cube and each bin is scored on how much
+/// of the cover it covers and how vivid it is, so a cover's one bright colour wins
+/// over the grey or black that usually covers more of it. Covers with nothing
+/// vivid in them give None rather than a muddy tint.
+fn accent_of(image: &image::RgbImage) -> Option<Color> {
+    let sample = image::imageops::resize(image, ACCENT_SAMPLE, ACCENT_SAMPLE, FilterType::Triangle);
+
+    let bins = (ACCENT_BINS * ACCENT_BINS * ACCENT_BINS) as usize;
+    let mut counts = vec![0u32; bins];
+    let mut sums = vec![[0u32; 3]; bins];
+    for pixel in sample.pixels() {
+        let [r, g, b] = pixel.0;
+        let bin = |channel: u8| (channel as u32 * ACCENT_BINS / 256).min(ACCENT_BINS - 1);
+        let index = (bin(r) * ACCENT_BINS * ACCENT_BINS + bin(g) * ACCENT_BINS + bin(b)) as usize;
+        counts[index] += 1;
+        for (channel, value) in [r, g, b].into_iter().enumerate() {
+            sums[index][channel] += value as u32;
+        }
+    }
+
+    let mut best: Option<(f32, [u8; 3])> = None;
+    for (index, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let mean = [0, 1, 2].map(|channel| (sums[index][channel] / count) as u8);
+        let (saturation, value) = saturation_and_value(mean);
+        // Black, white and washed out shades make poor highlights whatever their
+        // share of the cover.
+        if saturation < 0.28 || !(0.12..=0.97).contains(&value) {
+            continue;
+        }
+        let share = (count as f32).sqrt();
+        let score = share * saturation * (0.4 + 0.6 * value);
+        if best.is_none_or(|(previous, _)| score > previous) {
+            best = Some((score, mean));
+        }
+    }
+
+    let (_, colour) = best?;
+    Some(readable(colour))
+}
+
+/// How colourful a pixel is and how bright, both 0 to 1.
+fn saturation_and_value(colour: [u8; 3]) -> (f32, f32) {
+    let channels = colour.map(|channel| channel as f32 / 255.0);
+    let high = channels.iter().cloned().fold(0.0f32, f32::max);
+    let low = channels.iter().cloned().fold(1.0f32, f32::min);
+    let saturation = if high <= 0.0 {
+        0.0
+    } else {
+        (high - low) / high
+    };
+    (saturation, high)
+}
+
+/// Lift a colour until it reads against a dark terminal, keeping its hue.
+fn readable(colour: [u8; 3]) -> Color {
+    const FLOOR: f32 = 0.62;
+    let (_, value) = saturation_and_value(colour);
+    let lifted = if value < FLOOR && value > 0.0 {
+        let scale = FLOOR / value;
+        colour.map(|channel| ((channel as f32 * scale).min(255.0)) as u8)
+    } else {
+        colour
+    };
+    Color::Rgb(lifted[0], lifted[1], lifted[2])
 }
 
 /// Pick the block glyph and the two colours that best stand in for a cell's four
@@ -418,6 +511,38 @@ mod tests {
             grey > 180,
             "linear 0.5 should encode well above 128, got {grey}"
         );
+    }
+
+    #[test]
+    fn the_accent_is_the_covers_vivid_colour_not_its_biggest_one() {
+        // Mostly dark grey with a band of orange: the orange is what a card wants.
+        let cover = image::RgbImage::from_fn(32, 32, |_, y| {
+            if y < 26 {
+                image::Rgb([40, 40, 42])
+            } else {
+                image::Rgb([230, 120, 20])
+            }
+        });
+        let [r, g, b] = channels(super::accent_of(&cover).expect("a vivid colour is there"));
+        assert!(r > g && g > b, "expected an orange accent, got {r},{g},{b}");
+    }
+
+    #[test]
+    fn a_colourless_cover_keeps_the_theme() {
+        let cover = image::RgbImage::from_fn(32, 32, |_, y| {
+            let shade = 30 + (y as u8 * 4);
+            image::Rgb([shade, shade, shade])
+        });
+        assert!(super::accent_of(&cover).is_none());
+    }
+
+    #[test]
+    fn a_dim_accent_is_lifted_until_it_reads() {
+        // A deep, dark blue cover still has to give a colour you can see on a card.
+        let cover = image::RgbImage::from_fn(32, 32, |_, _| image::Rgb([10, 14, 60]));
+        let [r, g, b] = channels(super::accent_of(&cover).expect("a colour is there"));
+        assert!(b > 150, "the accent should be lifted, got {r},{g},{b}");
+        assert!(b > r && b > g, "the hue should survive the lift");
     }
 
     #[test]

@@ -96,6 +96,16 @@ impl QuickSearch {
         }
     }
 
+    /// The overlay wrapped in its modal, ready to be pushed onto the screen.
+    pub fn layer(
+        spotify: Spotify,
+        queue: Arc<Queue>,
+        library: Arc<Library>,
+        events: EventManager,
+    ) -> crate::ui::modal::Modal<Self> {
+        crate::ui::modal::Modal::new(Self::new(spotify, queue, library, events))
+    }
+
     /// Tracks in the saved library that match `query`, best match first.
     ///
     /// This needs no network at all: the library is already in memory, restored
