@@ -60,7 +60,7 @@ const VOLUME_METER_CELLS: usize = 8;
 /// Cover art sizing, in cells: never taller than this, never shown below it, and
 /// never at the cost of leaving the text column narrower than it needs.
 #[cfg(feature = "album_art")]
-const ART_MAX_HEIGHT: usize = 14;
+const ART_MAX_HEIGHT: usize = 18;
 #[cfg(feature = "album_art")]
 const ART_MIN_HEIGHT: usize = 5;
 /// The text column never gets narrower than the transport line, so the controls
@@ -1614,6 +1614,8 @@ mod tests {
     use crate::queue::{Queue, RepeatSetting};
     use crate::spotify::{PlayerEvent, Spotify};
 
+    #[cfg(feature = "album_art")]
+    use super::ART_MIN_HEIGHT;
     use super::{
         Block, BlockKind, NowPlayingView, SPECTRUM_MAX_HEIGHT, SpectrumState, ViewExt,
         blocks_height, fit_blocks, percent_complete, progress_eighths, remaining_label, truncate,
@@ -1891,12 +1893,32 @@ mod tests {
             .collect()
     }
 
+    /// Where the cover starts, found by its block glyphs. Any of them can come up,
+    /// since each cell takes the shape that fits the image best, so the cover is
+    /// picked out by its height instead: it is always taller than the visualizer,
+    /// which is the only other thing on screen drawn in blocks.
+    #[cfg(feature = "album_art")]
+    fn find_art(screen: &ObservedScreen) -> Option<Vec2> {
+        const BLOCKS: &str = "\u{2580}\u{2584}\u{2588}\u{258c}\u{2590}\u{2596}\u{2597}\u{2598}\u{2599}\u{259a}\u{259b}\u{259c}\u{259d}\u{259e}\u{259f}";
+        let block_at = |position: Vec2| match &screen[position] {
+            Some(cell) if !cell.letter.is_continuation() => BLOCKS.contains(&cell.letter.unwrap()),
+            _ => false,
+        };
+        for y in 0..screen.size().y.saturating_sub(ART_MIN_HEIGHT) {
+            for x in 0..screen.size().x {
+                if (0..ART_MIN_HEIGHT).all(|offset| block_at(Vec2::new(x, y + offset))) {
+                    return Some(Vec2::new(x, y));
+                }
+            }
+        }
+        None
+    }
+
     #[cfg(feature = "album_art")]
     #[test]
     fn a_wide_card_puts_the_cover_beside_the_metadata() {
         let screen = render(Vec2::new(96, 30), queued(), Some(0));
-        let art = find_text(&screen, "\u{2580}\u{2580}\u{2580}\u{2580}")
-            .expect("the cover is drawn as half blocks");
+        let art = find_art(&screen).expect("the cover is drawn as block glyphs");
         let title = find_text(&screen, "Solaris").expect("the title is drawn");
         // The text column sits to the right of the cover, and the transport line
         // survives intact so its buttons stay clickable.
@@ -1911,7 +1933,7 @@ mod tests {
     #[test]
     fn a_narrow_card_drops_the_cover_rather_than_the_text() {
         let screen = render(Vec2::new(64, 24), queued(), Some(0));
-        assert!(find_text(&screen, "\u{2580}\u{2580}\u{2580}\u{2580}").is_none());
+        assert!(find_art(&screen).is_none());
         assert!(find_text(&screen, "Solaris").is_some());
     }
 

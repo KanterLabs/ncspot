@@ -148,7 +148,8 @@ The card is clickable: the transport buttons, the progress bar, the repeat and
 shuffle toggles and the volume meter all respond to a click, and scrolling over
 the volume meter or progress bar adjusts them. Cover art is drawn beside the
 metadata when the terminal is wide enough and `ncspot` was built with the
-`album_art` feature (on by default).
+`album_art` feature (on by default). It is drawn with quadrant block glyphs, so
+a font that carries them (most monospace fonts do) gives the most detail.
 
 | Key                                         | Command                                              |
 |---------------------------------------------|------------------------------------------------------|

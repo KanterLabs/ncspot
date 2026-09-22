@@ -9,9 +9,14 @@ use log::debug;
 
 use crate::events::EventManager;
 
-/// Upper half block: the cell's foreground is the top pixel and its background the
-/// bottom one, which doubles the vertical resolution of the art.
-const HALF: &str = "▀";
+/// The quadrant blocks, indexed by which of a cell's four subpixels take the
+/// foreground colour: bit 0 is top left, 1 top right, 2 bottom left, 3 bottom
+/// right. Every way of splitting a cell in two is in here, so a cell can carry
+/// four subpixels in two colours instead of the two a half block manages.
+const QUADRANTS: [&str; 16] = [
+    " ", "\u{2598}", "\u{259d}", "\u{2580}", "\u{2596}", "\u{258c}", "\u{259e}", "\u{259b}",
+    "\u{2597}", "\u{259a}", "\u{2590}", "\u{259c}", "\u{2584}", "\u{2599}", "\u{259f}", "\u{2588}",
+];
 
 /// A decoded cover, kept around so a resize does not have to hit the disk again.
 struct Loaded {
@@ -19,12 +24,20 @@ struct Loaded {
     image: image::RgbImage,
 }
 
+/// One printed cell: a block glyph and the two colours it is drawn in.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Cell {
+    glyph: &'static str,
+    foreground: Color,
+    background: Color,
+}
+
 /// A cover scaled to an exact cell grid, ready to print.
 struct Scaled {
     url: String,
     size: Vec2,
-    /// Top and bottom pixel of every cell, row major.
-    cells: Vec<(Color, Color)>,
+    /// Every cell of the grid, row major.
+    cells: Vec<Cell>,
 }
 
 /// Album art for the now playing card.
@@ -68,10 +81,13 @@ impl AlbumArt {
         };
         for row in 0..size.y {
             for column in 0..size.x {
-                let (top, bottom) = scaled.cells[row * size.x + column];
-                let style = ColorStyle::new(ColorType::Color(top), ColorType::Color(bottom));
+                let cell = scaled.cells[row * size.x + column];
+                let style = ColorStyle::new(
+                    ColorType::Color(cell.foreground),
+                    ColorType::Color(cell.background),
+                );
                 printer.with_color(style, |printer| {
-                    printer.print((offset.x + column, offset.y + row), HALF);
+                    printer.print((offset.x + column, offset.y + row), cell.glyph);
                 });
             }
         }
@@ -104,22 +120,27 @@ impl AlbumArt {
             return false;
         };
 
-        // Two stacked half blocks per cell, so the pixel grid is twice as tall.
+        // Four subpixels per cell, and the scaling is done in linear light so that
+        // shrinking a cover does not wash its colours out the way averaging gamma
+        // encoded values does.
+        let linear = to_linear(&loaded.image);
         let scaled = image::imageops::resize(
-            &loaded.image,
-            size.x as u32,
+            &linear,
+            (size.x * 2) as u32,
             (size.y * 2) as u32,
-            FilterType::Triangle,
+            FilterType::Lanczos3,
         );
         let cells = (0..size.y)
             .flat_map(|row| {
                 let scaled = &scaled;
                 (0..size.x).map(move |column| {
-                    let pixel = |y: usize| {
-                        let [r, g, b] = scaled.get_pixel(column as u32, y as u32).0;
-                        Color::Rgb(r, g, b)
-                    };
-                    (pixel(row * 2), pixel(row * 2 + 1))
+                    let (x, y) = ((column * 2) as u32, (row * 2) as u32);
+                    quantize([
+                        scaled.get_pixel(x, y).0,
+                        scaled.get_pixel(x + 1, y).0,
+                        scaled.get_pixel(x, y + 1).0,
+                        scaled.get_pixel(x + 1, y + 1).0,
+                    ])
                 })
             })
             .collect();
@@ -166,6 +187,100 @@ impl AlbumArt {
             image,
         });
     }
+}
+
+/// Pick the block glyph and the two colours that best stand in for a cell's four
+/// subpixels, ordered top left, top right, bottom left, bottom right.
+///
+/// Every split of the four is tried and the one whose two colours sit closest to
+/// the subpixels they cover wins, so an edge running through a cell is drawn as an
+/// edge rather than smeared into an average.
+fn quantize(subpixels: [[f32; 3]; 4]) -> Cell {
+    // The solid block is the starting point, so a cell with nothing to split stays
+    // one glyph instead of an arbitrary quarter.
+    let mut best = (f32::MAX, 15usize, [0.0; 3], [0.0; 3]);
+    for mask in (1..16usize).rev() {
+        let mut sums = [[0.0f32; 3]; 2];
+        let mut counts = [0.0f32; 2];
+        for (index, subpixel) in subpixels.iter().enumerate() {
+            let group = usize::from(mask >> index & 1 == 0);
+            counts[group] += 1.0;
+            for channel in 0..3 {
+                sums[group][channel] += subpixel[channel];
+            }
+        }
+        let mean = |group: usize| {
+            let filled = if counts[group] > 0.0 {
+                group
+            } else {
+                1 - group
+            };
+            let mut mean = [0.0f32; 3];
+            for channel in 0..3 {
+                mean[channel] = sums[filled][channel] / counts[filled];
+            }
+            mean
+        };
+        let (foreground, background) = (mean(0), mean(1));
+
+        let mut cost = 0.0;
+        for (index, subpixel) in subpixels.iter().enumerate() {
+            let target = if mask >> index & 1 == 1 {
+                foreground
+            } else {
+                background
+            };
+            for channel in 0..3 {
+                let difference = subpixel[channel] - target[channel];
+                cost += difference * difference;
+            }
+        }
+        if cost < best.0 {
+            best = (cost, mask, foreground, background);
+        }
+    }
+
+    let (_, mask, foreground, background) = best;
+    Cell {
+        glyph: QUADRANTS[mask],
+        foreground: to_color(foreground),
+        background: to_color(background),
+    }
+}
+
+/// The image with its channels in linear light, where averaging is meaningful.
+fn to_linear(image: &image::RgbImage) -> image::ImageBuffer<image::Rgb<f32>, Vec<f32>> {
+    image::ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
+        let [r, g, b] = image.get_pixel(x, y).0;
+        image::Rgb([srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)])
+    })
+}
+
+fn srgb_to_linear(value: u8) -> f32 {
+    let value = value as f32 / 255.0;
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(value: f32) -> u8 {
+    let value = value.clamp(0.0, 1.0);
+    let encoded = if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
+}
+
+fn to_color(linear: [f32; 3]) -> Color {
+    Color::Rgb(
+        linear_to_srgb(linear[0]),
+        linear_to_srgb(linear[1]),
+        linear_to_srgb(linear[2]),
+    )
 }
 
 /// Warm the on-disk cover cache for `urls`, so art for a result that gets played
@@ -240,8 +355,15 @@ mod tests {
         })
     }
 
+    fn channels(colour: Color) -> [u8; 3] {
+        let Color::Rgb(r, g, b) = colour else {
+            panic!("expected an rgb colour");
+        };
+        [r, g, b]
+    }
+
     #[test]
-    fn each_cell_takes_two_stacked_pixels() {
+    fn each_cell_carries_four_subpixels() {
         let art = AlbumArt::new(EventManager::new_for_test());
         art.load_for_test("cover", image());
 
@@ -251,14 +373,51 @@ mod tests {
         assert_eq!(scaled.size, Vec2::new(2, 2));
         assert_eq!(scaled.cells.len(), 4);
 
-        // Top left cell: red, and its background is the row below it, so darker.
-        let (top, bottom) = scaled.cells[0];
-        let (Color::Rgb(tr, _, _), Color::Rgb(br, _, _)) = (top, bottom) else {
-            panic!("expected rgb cells");
-        };
-        assert!(tr > br, "the lower pixel should be the darker one");
-        // Top right cell is the blue column.
-        assert!(matches!(scaled.cells[1].0, Color::Rgb(0, 0, _)));
+        // The left column of the cover is red and the right one blue, whichever way
+        // round a cell happens to assign its two colours.
+        let [r, _, b] = channels(scaled.cells[0].foreground);
+        assert!(r > b, "the left cell should be red, got {r} vs {b}");
+        let [r, _, b] = channels(scaled.cells[1].foreground);
+        assert!(b > r, "the right cell should be blue, got {r} vs {b}");
+    }
+
+    #[test]
+    fn an_edge_through_a_cell_is_drawn_as_an_edge() {
+        // A cell split down the middle: the two colours have to survive whole
+        // rather than be averaged into one muddy block.
+        let cell = super::quantize([
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]);
+        // Left half in one colour: either the left block or its complement.
+        assert!(
+            ["\u{258c}", "\u{2590}"].contains(&cell.glyph),
+            "expected a vertical split, got {}",
+            cell.glyph
+        );
+        let mut colours = [channels(cell.foreground), channels(cell.background)];
+        colours.sort();
+        assert_eq!(colours, [[0, 0, 255], [255, 0, 0]]);
+    }
+
+    #[test]
+    fn a_flat_cell_is_one_solid_block() {
+        let cell = super::quantize([[0.5, 0.5, 0.5]; 4]);
+        assert_eq!(cell.glyph, "\u{2588}");
+        assert_eq!(cell.foreground, cell.background);
+    }
+
+    #[test]
+    fn colours_are_averaged_in_linear_light() {
+        // Averaging in gamma encoded values would give 128 for half intensity;
+        // linear light encodes it to the perceptually correct, lighter mid grey.
+        let [grey, _, _] = channels(super::quantize([[0.5; 3]; 4]).foreground);
+        assert!(
+            grey > 180,
+            "linear 0.5 should encode well above 128, got {grey}"
+        );
     }
 
     #[test]
