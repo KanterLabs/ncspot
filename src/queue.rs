@@ -49,6 +49,25 @@ pub struct Queue {
 }
 
 impl Queue {
+    /// Build a queue with a fixed state, bypassing the persisted queue state.
+    #[cfg(test)]
+    pub fn new_for_test(
+        tracks: Vec<Playable>,
+        current: Option<usize>,
+        spotify: Spotify,
+        cfg: Arc<Config>,
+        library: Arc<Library>,
+    ) -> Self {
+        Self {
+            queue: Arc::new(RwLock::new(tracks)),
+            random_order: RwLock::new(None),
+            current_track: RwLock::new(current),
+            spotify,
+            cfg,
+            library,
+        }
+    }
+
     pub fn new(spotify: Spotify, cfg: Arc<Config>, library: Arc<Library>) -> Self {
         let queue_state = cfg.state().queuestate.clone();
 
@@ -283,7 +302,10 @@ impl Queue {
             index = rng.random_range(0..queue_length);
         }
 
-        if let Some(track) = &self.queue.read().unwrap().get(index) {
+        // Clone the item out rather than holding the read guard across `load`, which
+        // reaches into the player and the MPRIS thread and can come back here.
+        let track = self.queue.read().unwrap().get(index).cloned();
+        if let Some(track) = track.as_ref() {
             self.spotify.load(track, true, 0);
             let mut current = self.current_track.write().unwrap();
             current.replace(index);
@@ -351,13 +373,22 @@ impl Queue {
     /// used, and the next track will actually be played. This should be used
     /// when going to the next entry in the queue is the wanted behavior.
     pub fn next(&self, manual: bool) {
-        let q = self.queue.read().unwrap();
         let current = *self.current_track.read().unwrap();
         let repeat = self.cfg.state().repeat;
+        // Read what this needs out of the queue and drop the guard before going on:
+        // `next_index` and `play` take the same lock again, and a recursive read
+        // deadlocks whenever a writer on another thread is already queued behind us.
+        let (current_playable, any_playable) = {
+            let q = self.queue.read().unwrap();
+            (
+                current.is_some_and(|index| q.get(index).is_some_and(|track| track.is_playable())),
+                q.iter().any(|track| track.is_playable()),
+            )
+        };
 
         if repeat == RepeatSetting::RepeatTrack && !manual {
             if let Some(index) = current
-                && q[index].is_playable()
+                && current_playable
             {
                 self.play(index, false, false);
             }
@@ -366,16 +397,15 @@ impl Queue {
             if repeat == RepeatSetting::RepeatTrack && manual {
                 self.set_repeat(RepeatSetting::RepeatPlaylist);
             }
-        } else if repeat == RepeatSetting::RepeatPlaylist
-            && !q.is_empty()
-            && q.iter().any(|track| track.is_playable())
-        {
-            let random_order = self.random_order.read().unwrap();
-            self.play(
-                random_order.as_ref().map(|o| o[0]).unwrap_or(0),
-                false,
-                false,
-            );
+        } else if repeat == RepeatSetting::RepeatPlaylist && any_playable {
+            let first = self
+                .random_order
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|order| order[0])
+                .unwrap_or(0);
+            self.play(first, false, false);
         } else {
             self.spotify.stop();
         }
@@ -383,23 +413,26 @@ impl Queue {
 
     /// Play the previous item in the queue.
     pub fn previous(&self) {
-        let q = self.queue.read().unwrap();
         let current = *self.current_track.read().unwrap();
         let repeat = self.cfg.state().repeat;
+        // As in `next`: take the length and release the lock, so the `play` call
+        // below is not a recursive read on `self.queue`.
+        let length = self.queue.read().unwrap().len();
 
         if let Some(index) = self.previous_index() {
             self.play(index, false, false);
-        } else if repeat == RepeatSetting::RepeatPlaylist && !q.is_empty() {
-            if self.get_shuffle() {
-                let random_order = self.random_order.read().unwrap();
-                self.play(
-                    random_order.as_ref().map(|o| o[q.len() - 1]).unwrap_or(0),
-                    false,
-                    false,
-                );
+        } else if repeat == RepeatSetting::RepeatPlaylist && length > 0 {
+            let last = if self.get_shuffle() {
+                self.random_order
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|order| order[length - 1])
+                    .unwrap_or(0)
             } else {
-                self.play(q.len() - 1, false, false);
-            }
+                length - 1
+            };
+            self.play(last, false, false);
         } else if let Some(index) = current {
             self.play(index, false, false);
         }
@@ -517,7 +550,6 @@ pub fn send_notification(summary_txt: &str, body_txt: &str, cover_url: Option<St
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, RwLock};
 
     use super::*;
     use crate::config::Config;
@@ -561,14 +593,7 @@ mod tests {
         let ev = EventManager::new_for_test();
         let spotify = Spotify::new_for_test(cfg.clone(), ev.clone());
         let library = Library::new_for_test(ev, spotify.clone(), cfg.clone());
-        Queue {
-            queue: Arc::new(RwLock::new(tracks)),
-            random_order: RwLock::new(None),
-            current_track: RwLock::new(current),
-            spotify,
-            cfg,
-            library,
-        }
+        Queue::new_for_test(tracks, current, spotify, cfg, library)
     }
 
     // --- next_index / previous_index ---
