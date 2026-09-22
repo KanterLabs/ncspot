@@ -31,12 +31,12 @@ const FETCH: u32 = 20;
 const LOCAL_SLOTS: usize = 2;
 const WIDTH: usize = 62;
 
-/// What the next keypress means. Digits pick a result, so the query can only take
-/// them while it is being typed: pressing Enter hands the digits over to the list.
+/// What the next keypress means. Digits always pick a result the moment there is
+/// one to pick, so choosing and playing is two keys and never more; a digit that
+/// belongs in the query goes in with Alt held.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Stage {
     Typing,
-    Picking,
     /// A result is chosen and is waiting for an action key.
     Acting(usize),
 }
@@ -315,8 +315,7 @@ impl QuickSearch {
     fn draw_hint(&self, printer: &Printer<'_, '_>, row: usize) {
         let hint = match self.stage {
             Stage::Typing if self.tracks().is_empty() => "Esc  close",
-            Stage::Typing => "Enter  pick a result     Esc  close",
-            Stage::Picking => "1-4  choose     type to edit     Esc  back",
+            Stage::Typing => "1-4  pick     Alt+digit  type it     Esc  close",
             Stage::Acting(_) => "1  play next     2  play now     Esc  back",
         };
         printer.with_color(ColorStyle::secondary(), |printer| {
@@ -362,12 +361,8 @@ impl View for QuickSearch {
         match (self.stage, event) {
             (_, Event::Key(Key::Esc)) => match self.stage {
                 Stage::Typing => close(),
-                Stage::Picking => {
-                    self.stage = Stage::Typing;
-                    EventResult::consumed()
-                }
                 Stage::Acting(_) => {
-                    self.stage = Stage::Picking;
+                    self.stage = Stage::Typing;
                     EventResult::consumed()
                 }
             },
@@ -379,8 +374,22 @@ impl View for QuickSearch {
             }
             (Stage::Typing, Event::Key(Key::Enter)) => {
                 if !self.tracks().is_empty() {
-                    self.stage = Stage::Picking;
+                    self.stage = Stage::Acting(0);
                 }
+                EventResult::consumed()
+            }
+            // A digit picks the result it numbers. With nothing to pick yet it is
+            // just a character, so a query that starts with a number still types.
+            (Stage::Typing, Event::Char(digit @ '1'..='4'))
+                if (digit as usize - '1' as usize) < self.tracks().len() =>
+            {
+                self.stage = Stage::Acting(digit as usize - '1' as usize);
+                EventResult::consumed()
+            }
+            // The way to put a digit in the query once results are up.
+            (Stage::Typing, Event::AltChar(character)) => {
+                self.query.push(character);
+                self.schedule_search();
                 EventResult::consumed()
             }
             (Stage::Typing, Event::Char(character)) => {
@@ -389,25 +398,17 @@ impl View for QuickSearch {
                 EventResult::consumed()
             }
 
-            (Stage::Picking, Event::Char(digit @ '1'..='4')) => {
-                let index = digit as usize - '1' as usize;
-                if index < self.tracks().len() {
-                    self.stage = Stage::Acting(index);
-                }
-                EventResult::consumed()
+            (Stage::Acting(index), Event::Char(action @ ('1' | '2'))) => {
+                self.act(index, action == '2');
+                close()
             }
-            // Anything else typed goes back to editing, so a mistyped digit does not
-            // strand you in the list.
-            (Stage::Picking, Event::Char(character)) => {
+            // Anything else typed goes back to editing, so a mistyped key does not
+            // strand you on a result.
+            (Stage::Acting(_), Event::Char(character)) => {
                 self.query.push(character);
                 self.stage = Stage::Typing;
                 self.schedule_search();
                 EventResult::consumed()
-            }
-
-            (Stage::Acting(index), Event::Char(action @ ('1' | '2'))) => {
-                self.act(index, action == '2');
-                close()
             }
 
             _ => EventResult::Ignored,
@@ -564,19 +565,36 @@ mod tests {
     }
 
     #[test]
-    fn digits_stay_in_the_query_until_a_pick_is_asked_for() {
-        // "blink 182" has to be typeable, so digits only select once Enter is pressed.
+    fn a_digit_picks_the_result_it_numbers() {
         let (mut search, _) = overlay(RESULTS);
-        for character in "blink 182".chars() {
-            press(&mut search, Event::Char(character));
-        }
-        assert_eq!(search.query, "blink 182");
-
-        seed(&search, RESULTS);
-        press(&mut search, Event::Key(Key::Enter));
-        assert_eq!(search.stage, Stage::Picking);
         press(&mut search, Event::Char('2'));
         assert_eq!(search.stage, Stage::Acting(1));
+        // The digit chose a result rather than being typed.
+        assert!(search.query.is_empty());
+    }
+
+    #[test]
+    fn a_digit_types_when_there_is_nothing_to_pick() {
+        // A query can still start with a number, because nothing is numbered yet.
+        let (mut search, _) = overlay(0);
+        press(&mut search, Event::Char('9'));
+        press(&mut search, Event::Char('9'));
+        assert_eq!(search.query, "99");
+        assert_eq!(search.stage, Stage::Typing);
+    }
+
+    #[test]
+    fn alt_types_a_digit_that_would_otherwise_pick() {
+        let (mut search, _) = overlay(RESULTS);
+        for character in "blink ".chars() {
+            press(&mut search, Event::Char(character));
+        }
+        seed(&search, RESULTS);
+        for character in "182".chars() {
+            press(&mut search, Event::AltChar(character));
+        }
+        assert_eq!(search.query, "blink 182");
+        assert_eq!(search.stage, Stage::Typing);
     }
 
     #[test]
@@ -587,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_in_pick_mode_returns_to_the_query() {
+    fn typing_on_a_chosen_result_returns_to_the_query() {
         let (mut search, _) = overlay(RESULTS);
         press(&mut search, Event::Key(Key::Enter));
         press(&mut search, Event::Char('x'));
@@ -596,13 +614,10 @@ mod tests {
     }
 
     #[test]
-    fn escape_walks_back_one_stage_at_a_time() {
+    fn escape_walks_back_to_the_query_before_closing() {
         let (mut search, _) = overlay(RESULTS);
-        press(&mut search, Event::Key(Key::Enter));
         press(&mut search, Event::Char('1'));
         assert_eq!(search.stage, Stage::Acting(0));
-        press(&mut search, Event::Key(Key::Esc));
-        assert_eq!(search.stage, Stage::Picking);
         press(&mut search, Event::Key(Key::Esc));
         assert_eq!(search.stage, Stage::Typing);
     }
@@ -679,7 +694,6 @@ mod tests {
     #[test]
     fn play_next_inserts_after_the_current_item() {
         let (mut search, queue) = overlay(RESULTS);
-        press(&mut search, Event::Key(Key::Enter));
         press(&mut search, Event::Char('3'));
         press(&mut search, Event::Char('1'));
 
@@ -693,7 +707,6 @@ mod tests {
     #[test]
     fn play_now_starts_the_chosen_result() {
         let (mut search, queue) = overlay(RESULTS);
-        press(&mut search, Event::Key(Key::Enter));
         press(&mut search, Event::Char('1'));
         press(&mut search, Event::Char('2'));
 

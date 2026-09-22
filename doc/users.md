@@ -150,16 +150,21 @@ the volume meter or progress bar adjusts them. Cover art is drawn beside the
 metadata when the terminal is wide enough and `ncspot` was built with the
 `album_art` feature (on by default).
 
-| Key                                                     | Command                                       |
-|---------------------------------------------------------|-----------------------------------------------|
-| <kbd>/</kbd>                                             | Open quick search (see below).                |
-| <kbd>1</kbd> - <kbd>4</kbd>                              | Pick one of the quick search results.         |
-| <kbd>1</kbd> / <kbd>2</kbd> (after picking)              | Play the result next / play it now.           |
-| <kbd>Escape</kbd>                                        | Step back one stage, or close quick search.   |
+| Key                                         | Command                                              |
+|---------------------------------------------|------------------------------------------------------|
+| <kbd>/</kbd>                                 | Open quick search (see below).                       |
+| <kbd>1</kbd> - <kbd>4</kbd>                  | Pick the result with that number.                    |
+| <kbd>Enter</kbd>                             | Pick the first result.                               |
+| <kbd>1</kbd> / <kbd>2</kbd> (after picking)  | Play the result next / play it now.                  |
+| <kbd>Alt</kbd>+digit                         | Type a digit into the query instead of picking.      |
+| <kbd>Escape</kbd>                            | Back to the query, or close quick search.            |
 
 Quick search runs a Spotify track search as you type and shows the top four
-matches. Press <kbd>Enter</kbd> or a digit to choose one, then <kbd>1</kbd> to
-queue it after the current track or <kbd>2</kbd> to play it immediately.
+matches. Choosing and playing is always two keys: a digit picks the result it
+numbers, then <kbd>1</kbd> queues it after the current track or <kbd>2</kbd>
+plays it immediately. A digit only picks once there is a result to pick, so a
+query can still start with a number; to type a digit after results are up, hold
+<kbd>Alt</kbd>.
 
 Results appear before the network answers: matches from your saved library are
 shown on the keystroke itself, and previous searches are remembered in
