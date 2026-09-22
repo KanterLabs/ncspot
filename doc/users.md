@@ -157,13 +157,15 @@ a font that carries them (most monospace fonts do) gives the most detail.
 | <kbd>1</kbd> - <kbd>4</kbd>                  | Pick the result with that number.                    |
 | <kbd>Enter</kbd>                             | Pick the first result.                               |
 | <kbd>1</kbd> / <kbd>2</kbd> (after picking)  | Play the result next / play it now.                  |
+| <kbd>3</kbd> (after picking)                 | Play it now and queue similar tracks behind it.      |
 | <kbd>Alt</kbd>+digit                         | Type a digit into the query instead of picking.      |
 | <kbd>Escape</kbd>                            | Back to the query, or close quick search.            |
 
 Quick search runs a Spotify track search as you type and shows the top four
 matches. Choosing and playing is always two keys: a digit picks the result it
-numbers, then <kbd>1</kbd> queues it after the current track or <kbd>2</kbd>
-plays it immediately. A digit only picks once there is a result to pick, so a
+numbers, then <kbd>1</kbd> queues it after the current track, <kbd>2</kbd>
+plays it immediately, or <kbd>3</kbd> starts a radio from it: the track plays
+at once and tracks like it fill the queue behind it. A digit only picks once there is a result to pick, so a
 query can still start with a number; to type a digit after results are up, hold
 <kbd>Alt</kbd>.
 

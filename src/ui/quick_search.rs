@@ -9,6 +9,8 @@ use cursive::{Printer, Vec2, View};
 use rspotify::model::{SearchResult, SearchType};
 use unicode_width::UnicodeWidthStr;
 
+use log::debug;
+
 use crate::events::EventManager;
 use crate::library::Library;
 use crate::model::playable::Playable;
@@ -48,6 +50,15 @@ struct Results {
     tracks: Vec<Track>,
     searching: bool,
     failed: bool,
+}
+
+/// What a chosen result can be turned into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Action {
+    PlayNext,
+    PlayNow,
+    /// Play it now, then fill the queue behind it with tracks like it.
+    Radio,
 }
 
 /// A search overlay for the now playing screen: type, pick one of the top results
@@ -195,18 +206,51 @@ impl QuickSearch {
         self.results.read().unwrap().tracks.clone()
     }
 
-    /// Act on the chosen result. `immediately` plays it now; otherwise it goes in
-    /// right after the current item.
-    fn act(&self, index: usize, immediately: bool) {
+    /// Act on the chosen result.
+    fn act(&self, index: usize, action: Action) {
         let Some(track) = self.tracks().get(index).cloned() else {
             return;
         };
-        let mut playable = Playable::Track(track);
-        if immediately {
-            playable.play(&self.queue);
-        } else {
-            playable.play_next(&self.queue);
+        match action {
+            Action::PlayNext => Playable::Track(track).play_next(&self.queue),
+            Action::PlayNow => Playable::Track(track).play(&self.queue),
+            Action::Radio => self.start_radio(track),
         }
+    }
+
+    /// Play `track` now and queue tracks like it behind it.
+    ///
+    /// The seed plays straight away so the key press is felt at once; the rest of
+    /// the station arrives behind it when Spotify answers.
+    fn start_radio(&self, track: Track) {
+        let seed = track.uri.clone();
+        let id = track.id.clone();
+        Playable::Track(track).play(&self.queue);
+
+        let Some(id) = id else {
+            return;
+        };
+        let spotify = self.spotify.clone();
+        let queue = self.queue.clone();
+        let events = self.events.clone();
+        thread::spawn(move || {
+            let Ok(found) = spotify.api.recommendations(None, None, Some(vec![&id])) else {
+                debug!("no recommendations for {id}");
+                return;
+            };
+            let station: Vec<Playable> = found
+                .tracks
+                .iter()
+                .map(Track::from)
+                // The seed is already playing, so it does not want queueing again.
+                .filter(|track| track.uri != seed)
+                .map(Playable::Track)
+                .collect();
+            if !station.is_empty() {
+                queue.append_next(&station);
+            }
+            events.trigger();
+        });
     }
 
     fn draw_frame(&self, printer: &Printer<'_, '_>) {
@@ -316,7 +360,7 @@ impl QuickSearch {
         let hint = match self.stage {
             Stage::Typing if self.tracks().is_empty() => "Esc  close",
             Stage::Typing => "1-4  pick     Alt+digit  type it     Esc  close",
-            Stage::Acting(_) => "1  play next     2  play now     Esc  back",
+            Stage::Acting(_) => "1  play next     2  play now     3  radio     Esc  back",
         };
         printer.with_color(ColorStyle::secondary(), |printer| {
             printer.print((2, row), hint);
@@ -398,8 +442,13 @@ impl View for QuickSearch {
                 EventResult::consumed()
             }
 
-            (Stage::Acting(index), Event::Char(action @ ('1' | '2'))) => {
-                self.act(index, action == '2');
+            (Stage::Acting(index), Event::Char(key @ ('1' | '2' | '3'))) => {
+                let action = match key {
+                    '1' => Action::PlayNext,
+                    '2' => Action::PlayNow,
+                    _ => Action::Radio,
+                };
+                self.act(index, action);
                 close()
             }
             // Anything else typed goes back to editing, so a mistyped key does not
@@ -702,6 +751,19 @@ mod tests {
         assert_eq!(items[1].id(), Some("result 2".to_string()));
         // Playback did not move off the current item.
         assert_eq!(queue.get_current_index(), Some(0));
+    }
+
+    #[test]
+    fn radio_starts_the_chosen_result_straight_away() {
+        let (mut search, queue) = overlay(RESULTS);
+        press(&mut search, Event::Char('2'));
+        press(&mut search, Event::Char('3'));
+
+        // The station is fetched in the background, but the seed plays at once.
+        assert_eq!(
+            queue.get_current().and_then(|item| item.id()),
+            Some("result 1".to_string())
+        );
     }
 
     #[test]
