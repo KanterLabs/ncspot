@@ -22,6 +22,7 @@ mod library;
 mod model;
 mod panic;
 mod queue;
+mod search_cache;
 mod serialization;
 mod sharing;
 mod spotify;

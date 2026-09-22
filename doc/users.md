@@ -161,6 +161,13 @@ Quick search runs a Spotify track search as you type and shows the top four
 matches. Press <kbd>Enter</kbd> or a digit to choose one, then <kbd>1</kbd> to
 queue it after the current track or <kbd>2</kbd> to play it immediately.
 
+Results appear before the network answers: matches from your saved library are
+shown on the keystroke itself, and previous searches are remembered in
+`searches.db` in the cache directory, so a repeated query needs no request at
+all and a growing one keeps the previous prefix's results on screen instead of
+blanking. Covers for the results are fetched in the background, so art for a
+track you play is already on disk.
+
 ### Library
 | Key          | Command                                 |
 |--------------|-----------------------------------------|

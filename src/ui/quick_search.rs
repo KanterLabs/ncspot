@@ -14,14 +14,21 @@ use crate::library::Library;
 use crate::model::playable::Playable;
 use crate::model::track::Track;
 use crate::queue::Queue;
+use crate::search_cache::{self, SearchCache};
 use crate::spotify::Spotify;
 use crate::traits::ListItem;
 
 /// Results shown, and the number of digit keys that pick one.
 const RESULTS: usize = 4;
 /// How long typing has to pause before a query is sent, so a fast typist makes
-/// one request rather than one per keystroke.
-const DEBOUNCE: Duration = Duration::from_millis(220);
+/// one request rather than one per keystroke. Short, because the list is filled
+/// from the library and the cache while the request is in flight.
+const DEBOUNCE: Duration = Duration::from_millis(120);
+/// Results asked of Spotify. More than are shown, so the cache is worth reusing
+/// for the next keystroke and costs no extra round trip.
+const FETCH: u32 = 20;
+/// How many library hits can take the top of the list before catalogue results.
+const LOCAL_SLOTS: usize = 2;
 const WIDTH: usize = 62;
 
 /// What the next keypress means. Digits pick a result, so the query can only take
@@ -55,6 +62,7 @@ pub struct QuickSearch {
     results: Arc<RwLock<Results>>,
     /// Bumped on every keystroke; a search only lands if it is still the newest.
     generation: Arc<AtomicU64>,
+    cache: Arc<SearchCache>,
 }
 
 impl QuickSearch {
@@ -73,7 +81,50 @@ impl QuickSearch {
             stage: Stage::Typing,
             results: Arc::default(),
             generation: Arc::new(AtomicU64::new(0)),
+            cache: search_cache::shared(),
         }
+    }
+
+    /// Tracks in the saved library that match `query`, best match first.
+    ///
+    /// This needs no network at all: the library is already in memory, restored
+    /// from its own disk cache at startup, so these land on the very keystroke.
+    fn local_matches(&self, query: &str) -> Vec<Track> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return vec![];
+        }
+        let tracks = self.library.tracks.read().unwrap();
+        let mut scored: Vec<(u8, &Track)> = tracks
+            .iter()
+            .filter_map(|track| local_score(track, &needle).map(|score| (score, track)))
+            .collect();
+        scored.sort_by_key(|(score, _)| *score);
+        scored
+            .into_iter()
+            .take(LOCAL_SLOTS)
+            .map(|(_, track)| track.clone())
+            .collect()
+    }
+
+    /// Fill the list from what is already known, so it is never empty while a
+    /// request is out: library hits first, then the results of this query or of
+    /// the longest prefix of it that was searched before.
+    fn show_known(&self, query: &str) -> bool {
+        let local = self.local_matches(query);
+        let remembered = self.cache.fresh(query);
+        let known = merge(
+            local,
+            remembered
+                .clone()
+                .unwrap_or_else(|| self.cache.best_effort(query)),
+        );
+
+        let mut results = self.results.write().unwrap();
+        results.query = query.to_string();
+        results.failed = false;
+        results.tracks = known;
+        remembered.is_some()
     }
 
     /// Queue a search for the current query, replacing any pending one.
@@ -85,12 +136,22 @@ impl QuickSearch {
             *self.results.write().unwrap() = Results::default();
             return;
         }
+
+        // Everything already on hand goes up immediately; a fresh cache hit means
+        // there is nothing left to ask for.
+        if self.show_known(&query) {
+            self.results.write().unwrap().searching = false;
+            prefetch_covers(&self.tracks());
+            return;
+        }
         self.results.write().unwrap().searching = true;
 
         let spotify = self.spotify.clone();
         let results = self.results.clone();
         let events = self.events.clone();
         let current = self.generation.clone();
+        let cache = self.cache.clone();
+        let local = self.local_matches(&query);
         thread::spawn(move || {
             thread::sleep(DEBOUNCE);
             // Another keystroke landed while we waited: that search supersedes this one.
@@ -98,28 +159,34 @@ impl QuickSearch {
                 return;
             }
 
-            let found = spotify
-                .api
-                .search(SearchType::Track, &query, RESULTS as u32, 0);
+            let found = spotify.api.search(SearchType::Track, &query, FETCH, 0);
             if current.load(Ordering::SeqCst) != generation {
                 return;
             }
 
             let mut results = results.write().unwrap();
             results.searching = false;
-            results.query = query;
+            results.query = query.clone();
             match found {
                 Ok(SearchResult::Tracks(page)) => {
+                    let fetched: Vec<Track> = page.items.iter().map(Track::from).collect();
                     results.failed = false;
-                    results.tracks = page.items.iter().map(Track::from).collect();
+                    results.tracks = merge(local, fetched.clone());
+                    let shown = results.tracks.clone();
+                    drop(results);
+
+                    // Remember the whole page, not just what is shown, so the next
+                    // keystroke has something to fall back on.
+                    cache.store(&query, fetched);
+                    cache.save();
+                    prefetch_covers(&shown);
                 }
                 Ok(_) => {}
                 Err(()) => {
-                    results.failed = true;
-                    results.tracks.clear();
+                    // Keep whatever was already on screen rather than blanking it.
+                    results.failed = results.tracks.is_empty();
                 }
             }
-            drop(results);
             events.trigger();
         });
     }
@@ -348,6 +415,58 @@ impl View for QuickSearch {
     }
 }
 
+/// How well a saved track matches, lower being better. `None` means it does not.
+fn local_score(track: &Track, needle: &str) -> Option<u8> {
+    let title = track.title.to_lowercase();
+    if title.starts_with(needle) {
+        return Some(0);
+    }
+    let artists = track.artists.join(", ").to_lowercase();
+    if artists.starts_with(needle) {
+        return Some(1);
+    }
+    if title.contains(needle) {
+        return Some(2);
+    }
+    if artists.contains(needle) {
+        return Some(3);
+    }
+    let album = track.album.as_deref().unwrap_or_default().to_lowercase();
+    if album.contains(needle) {
+        return Some(4);
+    }
+    None
+}
+
+/// Library hits ahead of catalogue results, without repeating a track that is in
+/// both, trimmed to what the overlay can show.
+fn merge(local: Vec<Track>, remote: Vec<Track>) -> Vec<Track> {
+    let mut merged: Vec<Track> = Vec::with_capacity(RESULTS);
+    for track in local.into_iter().chain(remote) {
+        if merged.len() == RESULTS {
+            break;
+        }
+        if !merged.iter().any(|kept| kept.uri == track.uri) {
+            merged.push(track);
+        }
+    }
+    merged
+}
+
+/// Warm the cover cache for what is on screen, so art for a track that gets played
+/// is already on disk.
+fn prefetch_covers(tracks: &[Track]) {
+    #[cfg(feature = "album_art")]
+    crate::ui::album_art::prefetch_covers(
+        tracks
+            .iter()
+            .filter_map(|track| track.cover_url.clone())
+            .collect(),
+    );
+    #[cfg(not(feature = "album_art"))]
+    let _ = tracks;
+}
+
 fn truncate(text: &str, max_width: usize) -> String {
     if text.width() <= max_width {
         return text.to_string();
@@ -415,9 +534,15 @@ mod tests {
             library.clone(),
         ));
         let search = QuickSearch::new(spotify, queue.clone(), library, ev);
+        seed(&search, found);
+        (search, queue)
+    }
+
+    /// Put results on screen, as a landed search would. Typing clears them, so a
+    /// test that types first has to seed again afterwards.
+    fn seed(search: &QuickSearch, found: usize) {
         search.results.write().unwrap().tracks =
             (0..found).map(|i| track(&format!("result {i}"))).collect();
-        (search, queue)
     }
 
     fn press(search: &mut QuickSearch, event: Event) {
@@ -447,6 +572,7 @@ mod tests {
         }
         assert_eq!(search.query, "blink 182");
 
+        seed(&search, RESULTS);
         press(&mut search, Event::Key(Key::Enter));
         assert_eq!(search.stage, Stage::Picking);
         press(&mut search, Event::Char('2'));
@@ -479,6 +605,75 @@ mod tests {
         assert_eq!(search.stage, Stage::Picking);
         press(&mut search, Event::Key(Key::Esc));
         assert_eq!(search.stage, Stage::Typing);
+    }
+
+    #[test]
+    fn library_hits_land_on_the_keystroke() {
+        let (mut search, _) = overlay(0);
+        search
+            .library
+            .tracks
+            .write()
+            .unwrap()
+            .push(track("Solaris"));
+
+        for character in "sol".chars() {
+            press(&mut search, Event::Char(character));
+        }
+        // No request has had time to land, so this can only have come from the
+        // library that was already in memory.
+        assert_eq!(
+            search.tracks().first().map(|found| found.title.clone()),
+            Some("Solaris".to_string())
+        );
+    }
+
+    #[test]
+    fn a_remembered_query_is_served_without_searching() {
+        let (mut search, _) = overlay(0);
+        search.cache.store("sol", vec![track("Cached")]);
+
+        for character in "sol".chars() {
+            press(&mut search, Event::Char(character));
+        }
+        assert_eq!(
+            search.tracks().first().map(|found| found.title.clone()),
+            Some("Cached".to_string())
+        );
+        assert!(!search.results.read().unwrap().searching);
+    }
+
+    #[test]
+    fn a_prefix_fills_the_list_while_the_next_query_is_out() {
+        let (mut search, _) = overlay(0);
+        search.cache.store("sol", vec![track("Cached")]);
+
+        for character in "solar".chars() {
+            press(&mut search, Event::Char(character));
+        }
+        // The longer query is not cached, so its results are still coming, but the
+        // prefix's keep the list from going blank.
+        assert_eq!(
+            search.tracks().first().map(|found| found.title.clone()),
+            Some("Cached".to_string())
+        );
+        assert!(search.results.read().unwrap().searching);
+    }
+
+    #[test]
+    fn merging_keeps_library_hits_first_and_drops_repeats() {
+        let merged = super::merge(
+            vec![track("Owned")],
+            vec![
+                track("Owned"),
+                track("Found"),
+                track("Other"),
+                track("More"),
+                track("Extra"),
+            ],
+        );
+        let titles: Vec<String> = merged.iter().map(|found| found.title.clone()).collect();
+        assert_eq!(titles, ["Owned", "Found", "Other", "More"]);
     }
 
     #[test]

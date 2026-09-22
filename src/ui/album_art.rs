@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 
 use cursive::theme::{Color, ColorStyle, ColorType};
@@ -166,6 +166,34 @@ impl AlbumArt {
             image,
         });
     }
+}
+
+/// Warm the on-disk cover cache for `urls`, so art for a result that gets played
+/// is already there. Downloads happen on one background thread, newest first, and
+/// anything already cached or already queued is skipped.
+pub fn prefetch_covers(urls: Vec<String>) {
+    static QUEUED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let queued = QUEUED.get_or_init(Mutex::default);
+
+    let wanted: Vec<String> = {
+        let mut queued = queued.lock().unwrap();
+        urls.into_iter()
+            .filter(|url| queued.insert(url.clone()))
+            .collect()
+    };
+    if wanted.is_empty() {
+        return;
+    }
+    thread::spawn(move || {
+        for url in wanted {
+            let path = crate::utils::cache_path_for_url(url.clone());
+            if !path.exists()
+                && let Err(e) = crate::utils::download(url.clone(), path)
+            {
+                debug!("could not prefetch cover {url}: {e}");
+            }
+        }
+    });
 }
 
 /// Read the cover from the shared cover cache, downloading it first if needed.
