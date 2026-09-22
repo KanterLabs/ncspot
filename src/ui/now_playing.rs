@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use cursive::align::HAlign;
 use cursive::event::{Event, EventResult, MouseButton, MouseEvent};
-use cursive::theme::{ColorStyle, ColorType, Effect, PaletteColor};
+use cursive::theme::{Color, ColorStyle, ColorType, Effect, PaletteColor};
 use cursive::{Cursive, Printer, Vec2, View};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -51,6 +51,27 @@ const DEFAULT_FPS: u32 = 20;
 const FPS_RANGE: std::ops::RangeInclusive<u32> = 1..=60;
 /// How often the animation thread re-checks an idle view.
 const IDLE_INTERVAL: Duration = Duration::from_millis(250);
+/// Move `colour` this much of the way to white on the hardest beat.
+const BEAT_LIFT: f32 = 0.35;
+
+/// `colour` moved `amount` of the way towards white, hue intact. Colours that are
+/// not given as components are left alone, since there is nothing to brighten.
+fn lift(colour: Color, amount: f32) -> Color {
+    if amount <= 0.0 {
+        return colour;
+    }
+    let towards = |channel: u8, ceiling: f32| {
+        (channel as f32 + (ceiling - channel as f32) * amount).round() as u8
+    };
+    match colour {
+        Color::Rgb(r, g, b) => Color::Rgb(towards(r, 255.0), towards(g, 255.0), towards(b, 255.0)),
+        Color::RgbLowRes(r, g, b) => {
+            Color::RgbLowRes(towards(r, 5.0), towards(g, 5.0), towards(b, 5.0))
+        }
+        other => other,
+    }
+}
+
 /// A view drawn this recently is assumed to still be on screen.
 const VISIBLE_FOR: Duration = Duration::from_millis(500);
 /// How long frames keep being drawn after playback stops, so the band can settle.
@@ -429,11 +450,22 @@ impl NowPlayingView {
         self.library.cfg.values().use_nerdfont.unwrap_or(false)
     }
 
-    fn playing_style(printer: &Printer<'_, '_>) -> ColorStyle {
+    fn playing_style(&self, printer: &Printer<'_, '_>) -> ColorStyle {
         ColorStyle::new(
-            ColorType::Color(*printer.theme.palette.custom("playing").unwrap()),
+            ColorType::Color(self.on_beat(*printer.theme.palette.custom("playing").unwrap())),
             ColorType::Palette(PaletteColor::Background),
         )
+    }
+
+    /// Brighten a colour with the beat, so the card pulses in time with the music.
+    ///
+    /// Only the brightness moves; sizes and shapes stay put, which is the
+    /// difference between a card that breathes and one that twitches.
+    fn on_beat(&self, colour: Color) -> Color {
+        if !self.library.cfg.values().beat_pulse.unwrap_or(true) {
+            return colour;
+        }
+        lift(colour, BEAT_LIFT * self.spotify.audio_tap().pulse())
     }
 
     /// The colour the card highlights with: the cover's own, when it has one worth
@@ -443,7 +475,7 @@ impl NowPlayingView {
             .cover_accent()
             .unwrap_or(*printer.theme.palette.custom("statusbar_progress").unwrap());
         ColorStyle::new(
-            ColorType::Color(colour),
+            ColorType::Color(self.on_beat(colour)),
             ColorType::Palette(PaletteColor::Background),
         )
     }
@@ -713,7 +745,7 @@ impl NowPlayingView {
         state.step(&targets);
 
         let accent = self.accent_style(printer);
-        let playing = Self::playing_style(printer);
+        let playing = self.playing_style(printer);
         let quiet = ColorStyle::secondary();
         let playing_now = self.is_playing();
         let baseline = top + rows - 1;
@@ -802,7 +834,7 @@ impl NowPlayingView {
         // A playhead makes the seek target obvious, and marks where a click will land.
         if width > 1 {
             let head = min(filled, width - 1);
-            printer.with_color(Self::playing_style(printer), |printer| {
+            printer.with_color(self.playing_style(printer), |printer| {
                 printer.print((start + head, row), "●");
             });
         }
@@ -898,7 +930,7 @@ impl NowPlayingView {
                 offset,
                 top,
                 &chip,
-                Self::playing_style(printer),
+                self.playing_style(printer),
                 border,
             );
         }
@@ -911,7 +943,7 @@ impl NowPlayingView {
                     start,
                     top,
                     badge,
-                    Self::playing_style(printer),
+                    self.playing_style(printer),
                     border,
                 );
             }
@@ -963,7 +995,7 @@ impl NowPlayingView {
     /// Repeat / shuffle / volume, with active toggles highlighted. Each one is a
     /// click target: the labels are the controls, not just a readout.
     fn transport_segments(&self, printer: &Printer<'_, '_>) -> Vec<Segment> {
-        let on = Self::playing_style(printer);
+        let on = self.playing_style(printer);
         let off = ColorStyle::secondary();
         let separator = || Segment::new("   •   ", ColorStyle::secondary());
         let nerdfont = self.use_nerdfont();
@@ -1042,7 +1074,7 @@ impl NowPlayingView {
             gap(),
             Segment::button(
                 label(play_glyph, play_key),
-                Self::playing_style(printer),
+                self.playing_style(printer),
                 Control::PlayPause,
             ),
             gap(),
@@ -1062,7 +1094,7 @@ impl NowPlayingView {
         } else {
             blocks.push(Block::new(
                 BlockKind::Segments(vec![
-                    Segment::new(format!("{icon}  "), Self::playing_style(printer)),
+                    Segment::new(format!("{icon}  "), self.playing_style(printer)),
                     Segment::new(state, ColorStyle::secondary()),
                 ]),
                 5,
@@ -2206,6 +2238,20 @@ mod tests {
         let playing = view.spectrum_targets(48, SPECTRUM_MAX_HEIGHT, 4_000, 1.3);
         let total = |levels: &[f64]| levels.iter().sum::<f64>();
         assert!(total(&paused) < total(&playing) * 0.6);
+    }
+
+    #[test]
+    fn a_beat_brightens_a_colour_without_shifting_its_hue() {
+        use cursive::theme::Color;
+
+        let dim = Color::Rgb(40, 20, 10);
+        let Color::Rgb(r, g, b) = super::lift(dim, 0.35) else {
+            panic!("expected an rgb colour");
+        };
+        assert!(r > 40 && g > 20 && b > 10, "the colour should brighten");
+        assert!(r > g && g > b, "the hue should survive the lift");
+        // With no beat there is nothing to lift, so the colour is left alone.
+        assert_eq!(super::lift(dim, 0.0), dim);
     }
 
     #[test]

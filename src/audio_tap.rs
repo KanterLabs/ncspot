@@ -18,6 +18,22 @@ const LOW_HZ: f32 = 40.0;
 const HIGH_HZ: f32 = 15_000.0;
 const SAMPLE_RATE: f32 = 44_100.0;
 
+/// Where the beat detector stops listening. Kick drums and bass notes live below
+/// this; everything above is what the rest of the mix is doing.
+const BASS_HZ: f32 = 160.0;
+/// How much louder than its own recent average the bass has to get to count as a
+/// beat. Relative rather than absolute, so a quiet track still pulses.
+const BEAT_SENSITIVITY: f32 = 1.5;
+/// Bass this quiet is silence or hiss, whatever the recent average says.
+const BEAT_FLOOR: f32 = 1e-5;
+/// How fast the running average of bass energy forgets, roughly in seconds.
+const ENERGY_MEMORY: f32 = 1.5;
+/// The shortest gap between beats, which caps detection at about 270 BPM and stops
+/// one kick being counted twice.
+const REFRACTORY: Duration = Duration::from_millis(220);
+/// How long a beat takes to fade out of the card.
+const PULSE_DECAY: Duration = Duration::from_millis(180);
+
 /// The most recent audio on its way to the speakers.
 ///
 /// The playback sink is wrapped so that every packet is seen on its way through;
@@ -28,6 +44,22 @@ pub struct AudioTap {
     samples: Mutex<Window>,
     /// When the last packet came through, if one ever has.
     last_packet: Mutex<Option<Instant>>,
+    beat: Mutex<BeatDetector>,
+}
+
+/// Finds the beat in the bass, packet by packet.
+///
+/// Onsets are looked for on the audio thread rather than while drawing, because
+/// packets arrive steadily and frames do not; a dropped frame would otherwise cost
+/// a beat. The work is a filter and a sum over each packet, no transform.
+#[derive(Default)]
+struct BeatDetector {
+    /// Carried between packets so the filter does not restart at every boundary.
+    filtered: f32,
+    /// The running average of recent bass energy, which a beat has to beat.
+    average: f32,
+    last_beat: Option<Instant>,
+    strength: f32,
 }
 
 /// A fixed window of mono samples, overwritten oldest first.
@@ -72,6 +104,20 @@ impl AudioTap {
         }
         drop(window);
         *self.last_packet.lock().unwrap() = Some(Instant::now());
+        self.beat.lock().unwrap().feed(samples);
+    }
+
+    /// How hard the music is hitting right now, 0 to 1.
+    ///
+    /// Rises on a beat and falls away over the following fraction of a second, so
+    /// drawing it straight onto a colour makes the card pulse in time.
+    pub fn pulse(&self) -> f32 {
+        let beat = self.beat.lock().unwrap();
+        let Some(last) = beat.last_beat else {
+            return 0.0;
+        };
+        let elapsed = last.elapsed().as_secs_f32() / PULSE_DECAY.as_secs_f32();
+        (beat.strength * (-elapsed).exp()).clamp(0.0, 1.0)
     }
 
     /// Whether audio has arrived recently enough to be worth drawing.
@@ -125,6 +171,45 @@ impl AudioTap {
             bands.push(((decibels - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0));
         }
         Some(bands)
+    }
+}
+
+impl BeatDetector {
+    /// Take in a packet and decide whether a beat just landed in it.
+    fn feed(&mut self, samples: &[f64]) {
+        let frames = samples.as_chunks::<2>().0;
+        if frames.is_empty() {
+            return;
+        }
+
+        // A one pole low pass, so only the bass reaches the energy sum.
+        let coefficient = 1.0 - (-std::f32::consts::TAU * BASS_HZ / SAMPLE_RATE).exp();
+        let mut sum = 0.0;
+        for frame in frames {
+            let mono = ((frame[0] + frame[1]) / 2.0) as f32;
+            self.filtered += coefficient * (mono - self.filtered);
+            sum += self.filtered * self.filtered;
+        }
+        // Mean rather than total, so packet size does not change what a beat is.
+        let energy = sum / frames.len() as f32;
+
+        let beat = energy > BEAT_FLOOR
+            && self.average > 0.0
+            && energy > self.average * BEAT_SENSITIVITY
+            && self
+                .last_beat
+                .is_none_or(|last| last.elapsed() >= REFRACTORY);
+        if beat {
+            // How far past the average it got, so a gentle beat pulses gently.
+            self.strength =
+                ((energy / self.average - BEAT_SENSITIVITY) / BEAT_SENSITIVITY).clamp(0.35, 1.0);
+            self.last_beat = Some(Instant::now());
+        }
+
+        // The average follows the music, so loud and quiet passages both pulse.
+        let seconds = frames.len() as f32 / SAMPLE_RATE;
+        let weight = (seconds / ENERGY_MEMORY).clamp(0.0, 1.0);
+        self.average += weight * (energy - self.average);
     }
 }
 
@@ -231,7 +316,8 @@ impl Sink for TapSink {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioTap, HIGH_HZ, LOW_HZ, SAMPLE_RATE, WINDOW};
+    use super::{AudioTap, BeatDetector, HIGH_HZ, LOW_HZ, SAMPLE_RATE, WINDOW};
+    use std::time::Duration;
 
     /// Interleaved stereo of a sine at `hz`, long enough to fill the window.
     fn tone(hz: f32, amplitude: f32) -> Vec<f64> {
@@ -300,5 +386,90 @@ mod tests {
         // analyse without reading the silence it was made with.
         tap.push(&tone(1000.0, 0.5)[..64]);
         assert!(tap.bands(24).is_none());
+    }
+
+    /// A detector that has heard `packets` of a tone at `amplitude`, with the gap
+    /// between beats cleared each time so only the loudness test is in play.
+    fn detector_fed(packets: usize, amplitude: f32) -> BeatDetector {
+        let mut detector = BeatDetector::default();
+        for _ in 0..packets {
+            detector.last_beat = None;
+            detector.feed(&tone(60.0, amplitude));
+        }
+        detector
+    }
+
+    #[test]
+    fn a_kick_after_a_quiet_passage_registers() {
+        let mut detector = detector_fed(40, 0.03);
+        detector.last_beat = None;
+        detector.feed(&tone(60.0, 0.9));
+
+        assert!(detector.last_beat.is_some(), "a kick should read as a beat");
+        assert!(
+            detector.strength > 0.5,
+            "a loud kick should pulse hard, got {}",
+            detector.strength
+        );
+    }
+
+    #[test]
+    fn a_steady_tone_stops_registering_beats() {
+        // The first moments of any sound are a jump from nothing, but once the
+        // average has caught up an unchanging tone is not a beat any more.
+        let mut detector = detector_fed(200, 0.5);
+        detector.last_beat = None;
+        detector.feed(&tone(60.0, 0.5));
+        assert!(detector.last_beat.is_none());
+    }
+
+    #[test]
+    fn what_happens_above_the_bass_is_not_a_beat() {
+        // A loud hi-hat is not a kick: the low pass is what tells them apart.
+        let mut detector = detector_fed(40, 0.03);
+        detector.last_beat = None;
+        detector.feed(&tone(8000.0, 0.9));
+        assert!(detector.last_beat.is_none());
+    }
+
+    #[test]
+    fn a_second_kick_too_soon_is_ignored() {
+        let tap = AudioTap::new();
+        for _ in 0..40 {
+            tap.push(&tone(60.0, 0.03));
+        }
+        tap.push(&tone(60.0, 0.9));
+        let first = tap.beat.lock().unwrap().last_beat;
+        assert!(first.is_some());
+
+        tap.push(&tone(60.0, 0.9));
+        assert_eq!(
+            tap.beat.lock().unwrap().last_beat,
+            first,
+            "one kick should not be counted twice"
+        );
+    }
+
+    #[test]
+    fn the_pulse_rises_on_a_beat_and_fades_after_it() {
+        let tap = AudioTap::new();
+        assert_eq!(tap.pulse(), 0.0, "nothing has been heard yet");
+
+        for _ in 0..40 {
+            tap.push(&tone(60.0, 0.03));
+        }
+        tap.push(&tone(60.0, 0.9));
+        let immediate = tap.pulse();
+        assert!(
+            immediate > 0.4,
+            "the beat should land hard, got {immediate}"
+        );
+
+        std::thread::sleep(Duration::from_millis(120));
+        let later = tap.pulse();
+        assert!(
+            later < immediate * 0.8,
+            "the pulse should be fading: {immediate} then {later}"
+        );
     }
 }

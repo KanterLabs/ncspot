@@ -149,7 +149,8 @@ The visualizer shows the spectrum of the audio actually playing, read from the
 playback sink and split into bands by frequency. When nothing is coming through
 it falls back to an animated band so the view still has some life in it, and
 `visualizer_fps = 0` turns it off entirely. The card is also tinted with the
-album cover's own colour, which `cover_accent = false` turns off.
+album cover's own colour, which `cover_accent = false` turns off, and it
+brightens in time with the beat, which `beat_pulse = false` turns off.
 
 The card is clickable: the transport buttons, the progress bar, the repeat and
 shuffle toggles and the volume meter all respond to a click, and scrolling over
@@ -310,6 +311,7 @@ Possible configuration values are:
 | `statusbar_format`              | Formatting for tracks in the statusbar                         | See [track_formatting](#track-formatting)                                             | `%artists - %track` |
 | `visualizer_fps`                | Frame rate of the now playing visualizer, `0` to disable it    | `0` - `60`                                                                            | `20`                |
 | `cover_accent`                  | Tint the now playing card with the album cover's own colour    | `true`, `false`                                                                       | `true`              |
+| `beat_pulse`                    | Brighten the now playing card in time with the beat            | `true`, `false`                                                                       | `true`              |
 | `[track_format]`                | Set active fields shown in Library/Queue views                 | See [track formatting](#track-formatting)                                             |                     |
 | `[notification_format]`         | Set the text displayed in notifications<sup>[4]</sup>          | See [notification formatting](#notification-formatting)                               |                     |
 | `[theme]`                       | Custom theme                                                   | See [custom theme](#theming)                                                          |                     |
