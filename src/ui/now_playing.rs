@@ -23,7 +23,9 @@ use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
 use crate::ui::album::AlbumView;
 use crate::ui::artist::ArtistView;
 use crate::ui::contextmenu::ContextMenu;
+use crate::ui::modal::Modal;
 use crate::ui::queue::QueueView;
+use crate::ui::quick_search::QuickSearch;
 use crate::utils::ms_to_hms;
 
 /// Eighth-block glyphs, used both for the spectrum and for sub-cell progress.
@@ -55,6 +57,16 @@ const VISIBLE_FOR: Duration = Duration::from_millis(500);
 /// How long frames keep being drawn after playback stops, so the band can settle.
 const SETTLE_FOR: Duration = Duration::from_millis(900);
 const VOLUME_METER_CELLS: usize = 8;
+/// Cover art sizing, in cells: never taller than this, never shown below it, and
+/// never at the cost of leaving the text column narrower than it needs.
+#[cfg(feature = "album_art")]
+const ART_MAX_HEIGHT: usize = 14;
+#[cfg(feature = "album_art")]
+const ART_MIN_HEIGHT: usize = 5;
+/// The text column never gets narrower than the transport line, so the controls
+/// stay whole and clickable however big the cover is.
+#[cfg(feature = "album_art")]
+const ART_MIN_TEXT_WIDTH: usize = 48;
 /// Smallest terminal that still gets the full card; anything smaller is laid out flat.
 const CARD_MIN_WIDTH: usize = 40;
 const CARD_MIN_HEIGHT: usize = 15;
@@ -389,20 +401,28 @@ pub struct NowPlayingView {
     hitboxes: RwLock<Vec<Hitbox>>,
     spectrum: RwLock<SpectrumState>,
     animator: Arc<Animator>,
+    events: EventManager,
+    #[cfg(feature = "album_art")]
+    art: crate::ui::album_art::AlbumArt,
 }
 
 impl NowPlayingView {
     pub fn new(queue: Arc<Queue>, library: Arc<Library>, events: EventManager) -> Self {
         let spotify = queue.get_spotify();
         let fps = library.cfg.values().visualizer_fps.unwrap_or(DEFAULT_FPS);
-        let animator = Animator::spawn(events, spotify.clone(), fps);
+        let animator = Animator::spawn(events.clone(), spotify.clone(), fps);
+        #[cfg(feature = "album_art")]
+        let events_for_art = events.clone();
         Self {
             queue,
             spotify,
             library,
+            events,
             hitboxes: RwLock::new(Vec::new()),
             spectrum: RwLock::new(SpectrumState::default()),
             animator,
+            #[cfg(feature = "album_art")]
+            art: crate::ui::album_art::AlbumArt::new(events_for_art),
         }
     }
 
@@ -1087,6 +1107,56 @@ impl NowPlayingView {
         }
     }
 
+    /// Install a decoded cover so tests can lay out the two column card.
+    #[cfg(all(test, feature = "album_art"))]
+    fn load_art_for_test(&self, url: &str, image: image::RgbImage) {
+        self.art.load_for_test(url, image);
+    }
+
+    /// The cover to draw and the cells it gets, when the card can spare the width
+    /// and the image is already loaded. Kicks off the fetch when it is not.
+    #[cfg(feature = "album_art")]
+    fn art_layout(
+        &self,
+        playable: Option<&Playable>,
+        card_width: usize,
+        content: usize,
+    ) -> Option<(String, Vec2)> {
+        let url = playable?.cover_url()?;
+        // Terminal cells are about twice as tall as they are wide, and half blocks
+        // split each one vertically, so a square cover wants twice as many columns.
+        let by_width = card_width.saturating_sub(ART_MIN_TEXT_WIDTH + 9) / 2;
+        let height = min(min(content, ART_MAX_HEIGHT), by_width);
+        if height < ART_MIN_HEIGHT {
+            return None;
+        }
+        let width = height * 2;
+
+        if !self.art.is_ready(&url) {
+            self.art.prefetch(&url);
+            return None;
+        }
+        Some((url, Vec2::new(width, height)))
+    }
+
+    #[cfg(not(feature = "album_art"))]
+    fn art_layout(
+        &self,
+        _playable: Option<&Playable>,
+        _card_width: usize,
+        _content: usize,
+    ) -> Option<(String, Vec2)> {
+        None
+    }
+
+    #[cfg(feature = "album_art")]
+    fn draw_art(&self, printer: &Printer<'_, '_>, offset: Vec2, size: Vec2, url: &str) {
+        self.art.draw(printer, offset, size, url);
+    }
+
+    #[cfg(not(feature = "album_art"))]
+    fn draw_art(&self, _printer: &Printer<'_, '_>, _offset: Vec2, _size: Vec2, _url: &str) {}
+
     /// Draw `blocks` inside a centered card, sized to whatever the terminal allows.
     fn draw_card_layout(
         &self,
@@ -1099,7 +1169,6 @@ impl NowPlayingView {
         let card_width = min(CARD_MAX_WIDTH, printer.size.x.saturating_sub(4));
         let left = printer.size.x.saturating_sub(card_width) / 2;
         let right = left + card_width.saturating_sub(1);
-        let region = Region::new(left + 3, card_width.saturating_sub(6));
 
         // Reserve the borders and one padding row at each end, fit the content into
         // what is left, then size the card to the content so it stays centered.
@@ -1110,15 +1179,29 @@ impl NowPlayingView {
         let card_height = min(printer.size.y, content + 2 * padding + 2);
         let top = printer.size.y.saturating_sub(card_height) / 2;
         let bottom = top + card_height.saturating_sub(1);
+        let content_top = top + 1 + padding;
 
         self.draw_card(printer, (left, top, right, bottom), chip, badge, footer);
 
         let playable = self.queue.get_current();
+        // With a cover loaded the card goes two column: art on the left, everything
+        // else centered in what is left. Without one it stays a single column.
+        let mut region = Region::new(left + 3, card_width.saturating_sub(6));
+        // A rule spanning the whole card would cut across the art, so the two column
+        // layout separates its sections with space instead.
+        let mut edges = Some((left, right));
+        if let Some((url, size)) = self.art_layout(playable.as_ref(), card_width, content) {
+            let offset = Vec2::new(left + 3, content_top + (content - size.y) / 2);
+            self.draw_art(printer, offset, size, &url);
+            region = Region::new(left + 3 + size.x + 3, card_width.saturating_sub(9 + size.x));
+            edges = None;
+        }
+
         let frame = Frame {
-            top: top + 1 + padding,
+            top: content_top,
             height: content,
             region,
-            edges: Some((left, right)),
+            edges,
         };
         self.draw_blocks(printer, blocks, frame, playable.as_ref());
     }
@@ -1270,6 +1353,23 @@ impl View for NowPlayingView {
     }
 
     fn on_event(&mut self, event: Event) -> EventResult {
+        // `/` is the jump key elsewhere, but a single item dashboard has no list to
+        // jump through, so it is free here and keeps its "search" meaning.
+        if event == Event::Char('/') {
+            let spotify = self.spotify.clone();
+            let queue = self.queue.clone();
+            let library = self.library.clone();
+            let events = self.events.clone();
+            return EventResult::with_cb(move |s| {
+                s.add_layer(Modal::new(QuickSearch::new(
+                    spotify.clone(),
+                    queue.clone(),
+                    library.clone(),
+                    events.clone(),
+                )));
+            });
+        }
+
         let Event::Mouse {
             offset,
             position,
@@ -1534,7 +1634,7 @@ mod tests {
             album: Some(album.to_string()),
             album_id: None,
             album_artists: vec![],
-            cover_url: None,
+            cover_url: Some(format!("https://example.invalid/{title}.jpg")),
             url: String::new(),
             added_at: None,
             list_index: 0,
@@ -1578,7 +1678,17 @@ mod tests {
         let screens = backend.stream();
         let mut siv = cursive::Cursive::new();
         siv.set_theme(crate::theme::load(&cfg.values().theme));
-        siv.add_fullscreen_layer(NowPlayingView::new(queue, library, events));
+        let view = NowPlayingView::new(queue, library, events);
+        #[cfg(feature = "album_art")]
+        if let Some(playable) = view.queue.get_current()
+            && let Some(url) = playable.cover_url()
+        {
+            view.load_art_for_test(
+                &url,
+                image::RgbImage::from_fn(64, 64, |x, y| image::Rgb([x as u8, y as u8, 128])),
+            );
+        }
+        siv.add_fullscreen_layer(view);
         let mut runner = siv.into_runner(backend);
         for frame in 0..frames.max(1) {
             if frame > 0 {
@@ -1779,6 +1889,30 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    #[cfg(feature = "album_art")]
+    #[test]
+    fn a_wide_card_puts_the_cover_beside_the_metadata() {
+        let screen = render(Vec2::new(96, 30), queued(), Some(0));
+        let art = find_text(&screen, "\u{2580}\u{2580}\u{2580}\u{2580}")
+            .expect("the cover is drawn as half blocks");
+        let title = find_text(&screen, "Solaris").expect("the title is drawn");
+        // The text column sits to the right of the cover, and the transport line
+        // survives intact so its buttons stay clickable.
+        assert!(
+            title.x > art.x,
+            "title at {title:?} is not right of art at {art:?}"
+        );
+        assert!(rows(&screen).join("\n").contains("shuffle off"));
+    }
+
+    #[cfg(feature = "album_art")]
+    #[test]
+    fn a_narrow_card_drops_the_cover_rather_than_the_text() {
+        let screen = render(Vec2::new(64, 24), queued(), Some(0));
+        assert!(find_text(&screen, "\u{2580}\u{2580}\u{2580}\u{2580}").is_none());
+        assert!(find_text(&screen, "Solaris").is_some());
     }
 
     #[test]

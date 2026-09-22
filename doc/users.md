@@ -143,6 +143,24 @@ When pressing <kbd>O</kbd>:
 | <kbd>D</kbd>                 | Delete the currently selected track. |
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the current queue.              |
 
+### Now Playing
+The card is clickable: the transport buttons, the progress bar, the repeat and
+shuffle toggles and the volume meter all respond to a click, and scrolling over
+the volume meter or progress bar adjusts them. Cover art is drawn beside the
+metadata when the terminal is wide enough and `ncspot` was built with the
+`album_art` feature (on by default).
+
+| Key                                                     | Command                                       |
+|---------------------------------------------------------|-----------------------------------------------|
+| <kbd>/</kbd>                                             | Open quick search (see below).                |
+| <kbd>1</kbd> - <kbd>4</kbd>                              | Pick one of the quick search results.         |
+| <kbd>1</kbd> / <kbd>2</kbd> (after picking)              | Play the result next / play it now.           |
+| <kbd>Escape</kbd>                                        | Step back one stage, or close quick search.   |
+
+Quick search runs a Spotify track search as you type and shows the top four
+matches. Press <kbd>Enter</kbd> or a digit to choose one, then <kbd>1</kbd> to
+queue it after the current track or <kbd>2</kbd> to play it immediately.
+
 ### Library
 | Key          | Command                                 |
 |--------------|-----------------------------------------|

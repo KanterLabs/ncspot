@@ -2,6 +2,8 @@ use cursive::{Cursive, CursiveRunner};
 use ncspot::BIN_NAME;
 
 pub mod album;
+#[cfg(feature = "album_art")]
+pub mod album_art;
 pub mod artist;
 pub mod browse;
 pub mod contextmenu;
@@ -15,6 +17,7 @@ pub mod pagination;
 pub mod playlist;
 pub mod playlists;
 pub mod queue;
+pub mod quick_search;
 pub mod search;
 pub mod search_results;
 pub mod show;

@@ -98,8 +98,9 @@ optional = true
 
 [features]
 alsa_backend = ["librespot-playback/alsa-backend"]
+album_art = ["image"] # Draw album art in the now playing view, with no terminal graphics protocol
 cover = ["image", "ioctl-rs", "viuer"] # Support displaying the album cover
-default = ["share_clipboard", "pulseaudio_backend", "mpris", "notify", "crossterm_backend"]
+default = ["album_art", "share_clipboard", "pulseaudio_backend", "mpris", "notify", "crossterm_backend"]
 mpris = ["zbus"] # Allow ncspot to be controlled via MPRIS API
 ncurses_backend = ["cursive/ncurses-backend"]
 notify = ["notify-rust"] # Show what's playing via a notification
