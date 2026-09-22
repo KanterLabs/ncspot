@@ -100,6 +100,9 @@ pub struct ConfigValues {
     pub statusbar_format: Option<String>,
     pub library_tabs: Option<Vec<LibraryTab>>,
     pub hide_display_names: Option<bool>,
+    /// Frames per second the now playing visualizer animates at. `0` turns the
+    /// animation off, leaving the rest of the screen updating as usual.
+    pub visualizer_fps: Option<u32>,
     pub ap_port: Option<u16>,
 }
 

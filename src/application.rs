@@ -197,7 +197,11 @@ impl Application {
 
         let queueview = ui::queue::QueueView::new(queue.clone(), library.clone());
 
-        let nowplayingview = ui::now_playing::NowPlayingView::new(queue.clone(), library.clone());
+        let nowplayingview = ui::now_playing::NowPlayingView::new(
+            queue.clone(),
+            library.clone(),
+            event_manager.clone(),
+        );
 
         #[cfg(feature = "cover")]
         let coverview = ui::cover::CoverView::new(queue.clone(), library.clone(), &configuration);

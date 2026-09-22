@@ -55,4 +55,10 @@ impl EventManager {
     pub fn trigger(&self) {
         self.cursive_sink.send(Box::new(Cursive::noop)).unwrap();
     }
+
+    /// Like [`Self::trigger`], but report a closed event loop instead of panicking.
+    /// Background animation threads use this to notice that the UI is shutting down.
+    pub fn try_trigger(&self) -> bool {
+        self.cursive_sink.send(Box::new(Cursive::noop)).is_ok()
+    }
 }
