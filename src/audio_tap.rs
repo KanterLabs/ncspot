@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,15 @@ const ENERGY_MEMORY: f32 = 1.5;
 const REFRACTORY: Duration = Duration::from_millis(220);
 /// How long a beat takes to fade out of the card.
 const PULSE_DECAY: Duration = Duration::from_millis(180);
+/// Gaps between beats kept for working out the tempo. Two bars of four at most
+/// tempos, which is enough to average out a missed or doubled beat.
+const TEMPO_MEMORY: usize = 16;
+/// How many gaps have to agree before a tempo is worth showing at all.
+const TEMPO_MINIMUM: usize = 6;
+/// The range a reported tempo is folded into, in beats per minute. Detected beats
+/// are often the half or double of what a listener would tap, so tempos outside
+/// this get doubled or halved until they land in it.
+const TEMPO_RANGE: std::ops::Range<f32> = 70.0..140.0;
 
 /// The most recent audio on its way to the speakers.
 ///
@@ -60,6 +70,8 @@ struct BeatDetector {
     average: f32,
     last_beat: Option<Instant>,
     strength: f32,
+    /// Recent gaps between beats, in seconds, oldest first.
+    intervals: VecDeque<f32>,
 }
 
 /// A fixed window of mono samples, overwritten oldest first.
@@ -118,6 +130,44 @@ impl AudioTap {
         };
         let elapsed = last.elapsed().as_secs_f32() / PULSE_DECAY.as_secs_f32();
         (beat.strength * (-elapsed).exp()).clamp(0.0, 1.0)
+    }
+
+    /// How loud the music is right now, 0 to 1.
+    ///
+    /// The root mean square of the window, on the same decibel scale the bands use,
+    /// so it can be drawn as a level without looking wildly different from them.
+    pub fn level(&self) -> f32 {
+        if !self.is_live() {
+            return 0.0;
+        }
+        let window = self.samples.lock().unwrap();
+        if !window.filled {
+            return 0.0;
+        }
+        let sum: f32 = window.samples.iter().map(|sample| sample * sample).sum();
+        let rms = (sum / WINDOW as f32).sqrt();
+        let decibels = 20.0 * rms.max(1e-9).log10();
+        ((decibels - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
+    }
+
+    /// The tempo of what is playing, in beats per minute, once enough beats have
+    /// been seen to be sure of it.
+    ///
+    /// The median gap between beats rather than the mean, so one missed beat moves
+    /// the answer by nothing instead of by half.
+    pub fn tempo(&self) -> Option<f32> {
+        let beat = self.beat.lock().unwrap();
+        if beat.intervals.len() < TEMPO_MINIMUM {
+            return None;
+        }
+        let mut gaps: Vec<f32> = beat.intervals.iter().copied().collect();
+        drop(beat);
+        gaps.sort_by(f32::total_cmp);
+        let median = gaps[gaps.len() / 2];
+        if median <= 0.0 {
+            return None;
+        }
+        Some(fold_tempo(60.0 / median))
     }
 
     /// Whether audio has arrived recently enough to be worth drawing.
@@ -203,7 +253,19 @@ impl BeatDetector {
             // How far past the average it got, so a gentle beat pulses gently.
             self.strength =
                 ((energy / self.average - BEAT_SENSITIVITY) / BEAT_SENSITIVITY).clamp(0.35, 1.0);
-            self.last_beat = Some(Instant::now());
+            let now = Instant::now();
+            if let Some(last) = self.last_beat {
+                let gap = last.elapsed().as_secs_f32();
+                // A gap longer than this is a pause or a missed run of beats, not a
+                // tempo, and averaging it in would drag the answer down.
+                if gap < 2.0 {
+                    if self.intervals.len() == TEMPO_MEMORY {
+                        self.intervals.pop_front();
+                    }
+                    self.intervals.push_back(gap);
+                }
+            }
+            self.last_beat = Some(now);
         }
 
         // The average follows the music, so loud and quiet passages both pulse.
@@ -211,6 +273,20 @@ impl BeatDetector {
         let weight = (seconds / ENERGY_MEMORY).clamp(0.0, 1.0);
         self.average += weight * (energy - self.average);
     }
+}
+
+/// A tempo doubled or halved until it lands in the range a listener would tap.
+fn fold_tempo(mut tempo: f32) -> f32 {
+    if !tempo.is_finite() || tempo <= 0.0 {
+        return 0.0;
+    }
+    while tempo < TEMPO_RANGE.start {
+        tempo *= 2.0;
+    }
+    while tempo >= TEMPO_RANGE.end {
+        tempo /= 2.0;
+    }
+    tempo
 }
 
 /// Magnitudes of the first half of the spectrum of `samples`, Hann windowed.
@@ -316,7 +392,10 @@ impl Sink for TapSink {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioTap, BeatDetector, HIGH_HZ, LOW_HZ, SAMPLE_RATE, WINDOW};
+    use super::{
+        AudioTap, BeatDetector, HIGH_HZ, LOW_HZ, SAMPLE_RATE, TEMPO_MINIMUM, TEMPO_RANGE, WINDOW,
+        fold_tempo,
+    };
     use std::time::Duration;
 
     /// Interleaved stereo of a sine at `hz`, long enough to fill the window.
@@ -471,5 +550,57 @@ mod tests {
             later < immediate * 0.8,
             "the pulse should be fading: {immediate} then {later}"
         );
+    }
+
+    #[test]
+    fn a_tempo_is_folded_into_the_range_a_listener_would_tap() {
+        // Half and double time both fold onto the same tempo.
+        assert!((fold_tempo(120.0) - 120.0).abs() < 0.01);
+        assert!((fold_tempo(60.0) - 120.0).abs() < 0.01);
+        assert!((fold_tempo(240.0) - 120.0).abs() < 0.01);
+        for raw in [37.0, 55.0, 91.0, 174.0, 300.0] {
+            let folded = fold_tempo(raw);
+            assert!(TEMPO_RANGE.contains(&folded), "{raw} folded to {folded}");
+        }
+        assert_eq!(fold_tempo(0.0), 0.0);
+    }
+
+    #[test]
+    fn the_tempo_comes_from_the_gaps_between_beats() {
+        let tap = AudioTap::new();
+        assert_eq!(tap.tempo(), None, "nothing has been heard yet");
+
+        // Half a second between beats is 120 BPM.
+        {
+            let mut beat = tap.beat.lock().unwrap();
+            beat.intervals
+                .extend(std::iter::repeat_n(0.5, TEMPO_MINIMUM - 1));
+        }
+        assert_eq!(tap.tempo(), None, "too few beats to be sure yet");
+
+        tap.beat.lock().unwrap().intervals.push_back(0.5);
+        let tempo = tap.tempo().expect("enough beats have been heard");
+        assert!((tempo - 120.0).abs() < 0.01, "got {tempo}");
+
+        // One missed beat leaves a double gap, and the median shrugs it off.
+        tap.beat.lock().unwrap().intervals.push_back(1.0);
+        let tempo = tap.tempo().expect("still enough beats");
+        assert!(
+            (tempo - 120.0).abs() < 0.01,
+            "a dropped beat moved it to {tempo}"
+        );
+    }
+
+    #[test]
+    fn the_level_follows_how_loud_the_music_is() {
+        let quiet = AudioTap::new();
+        quiet.push(&tone(200.0, 0.02));
+        let loud = AudioTap::new();
+        loud.push(&tone(200.0, 0.9));
+
+        assert!(quiet.level() < loud.level());
+        assert!(loud.level() <= 1.0);
+        // Nothing has been heard at all, so there is no level to report.
+        assert_eq!(AudioTap::new().level(), 0.0);
     }
 }

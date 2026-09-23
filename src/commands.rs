@@ -19,6 +19,7 @@ use crate::ui::contextmenu::{
 use crate::ui::help::HelpView;
 use crate::ui::layout::Layout;
 use crate::ui::modal::Modal;
+use crate::ui::osd;
 use crate::ui::search_results::SearchResultsView;
 use cursive::Cursive;
 use cursive::event::{Event, Key};
@@ -46,6 +47,12 @@ pub struct CommandManager {
 }
 
 impl CommandManager {
+    /// Raise the overlay showing where the volume ended up.
+    fn flash_volume(&self) {
+        let percent = (self.spotify.volume() as f64 / 65535.0 * 100.0).round() as u16;
+        osd::flash(osd::Flash::Volume(percent), &self.events);
+    }
+
     pub fn new(
         spotify: Spotify,
         queue: Arc<Queue>,
@@ -186,6 +193,17 @@ impl CommandManager {
                     SeekDirection::Relative(rel) => self.spotify.seek_relative(rel),
                     SeekDirection::Absolute(abs) => self.spotify.seek(abs),
                 }
+                // Say where the seek landed: the statusbar carries the same numbers,
+                // but two small cells of them are no use while you are skipping.
+                if let Some(playable) = self.queue.get_current() {
+                    osd::flash(
+                        osd::Flash::Seek {
+                            elapsed: self.spotify.get_current_progress().as_millis(),
+                            duration: playable.duration(),
+                        },
+                        &self.events,
+                    );
+                }
                 Ok(None)
             }
             Command::VolumeUp(amount) => {
@@ -194,6 +212,7 @@ impl CommandManager {
                     .volume()
                     .saturating_add(VOLUME_PERCENT * amount);
                 self.spotify.set_volume(volume, true);
+                self.flash_volume();
                 Ok(None)
             }
             Command::VolumeDown(amount) => {
@@ -203,6 +222,7 @@ impl CommandManager {
                     .saturating_sub(VOLUME_PERCENT * amount);
                 debug!("vol {volume}");
                 self.spotify.set_volume(volume, true);
+                self.flash_volume();
                 Ok(None)
             }
             Command::Help => {

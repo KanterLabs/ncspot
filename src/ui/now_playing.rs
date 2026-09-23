@@ -2,9 +2,8 @@ use std::cmp::min;
 use std::collections::hash_map::DefaultHasher;
 use std::f64::consts::{PI, TAU};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock, Weak};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use cursive::align::HAlign;
 use cursive::event::{Event, EventResult, MouseButton, MouseEvent};
@@ -20,62 +19,41 @@ use crate::model::playable::Playable;
 use crate::queue::{Queue, RepeatSetting};
 use crate::spotify::{PlayerEvent, Spotify, VOLUME_PERCENT};
 use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
+use crate::ui::accent;
 use crate::ui::album::AlbumView;
+use crate::ui::anim::{Animator, DEFAULT_FPS, blend, blendable, lift, marquee, staggered_fade};
 use crate::ui::artist::ArtistView;
 use crate::ui::contextmenu::ContextMenu;
 use crate::ui::queue::QueueView;
 use crate::ui::quick_search::QuickSearch;
+use crate::ui::spectrum::{self, SpectrumState};
 use crate::utils::ms_to_hms;
+use crate::waveform;
 
-/// Eighth-block glyphs, used both for the spectrum and for sub-cell progress.
-const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const CARD_MAX_WIDTH: usize = 78;
 const SPECTRUM_MAX_WIDTH: usize = 61;
 const SPECTRUM_MAX_HEIGHT: usize = 3;
 /// Tempo the spectrum pulses at. Nothing reports the real tempo, so the band
 /// pumps at a plausible mid tempo rather than pretending to follow the track.
 const SPECTRUM_TEMPO: f64 = 112.0;
-/// Seconds a bar takes to close most of the gap up to, and back down from, its
-/// target: hits land immediately, decay is slow, like a real meter.
-const BAR_RISE: f64 = 0.05;
-const BAR_FALL: f64 = 0.30;
-/// Downward acceleration of a peak marker, in eighths of a cell per second squared.
-const PEAK_GRAVITY: f64 = 30.0;
-/// Longest frame gap the animation will integrate over, so a view that was hidden
-/// for a while eases back in instead of snapping.
-const MAX_FRAME_GAP: f64 = 0.25;
-/// Frames per second the visualizer animates at, unless `visualizer_fps` says
-/// otherwise. Fast enough to look fluid, slow enough to stay cheap.
-const DEFAULT_FPS: u32 = 20;
-/// Bounds for `visualizer_fps`, so a typo cannot melt a CPU or stall the animation.
-const FPS_RANGE: std::ops::RangeInclusive<u32> = 1..=60;
-/// How often the animation thread re-checks an idle view.
-const IDLE_INTERVAL: Duration = Duration::from_millis(250);
 /// Move `colour` this much of the way to white on the hardest beat.
 const BEAT_LIFT: f32 = 0.35;
+/// The same for the cover art, which carries its own colours and so needs far
+/// less of a lift before the pulse reads.
+const ART_GLOW: f32 = 0.16;
 
-/// `colour` moved `amount` of the way towards white, hue intact. Colours that are
-/// not given as components are left alone, since there is nothing to brighten.
-fn lift(colour: Color, amount: f32) -> Color {
-    if amount <= 0.0 {
-        return colour;
-    }
-    let towards = |channel: u8, ceiling: f32| {
-        (channel as f32 + (ceiling - channel as f32) * amount).round() as u8
-    };
-    match colour {
-        Color::Rgb(r, g, b) => Color::Rgb(towards(r, 255.0), towards(g, 255.0), towards(b, 255.0)),
-        Color::RgbLowRes(r, g, b) => {
-            Color::RgbLowRes(towards(r, 5.0), towards(g, 5.0), towards(b, 5.0))
-        }
-        other => other,
-    }
-}
+/// How long the text of a newly started item takes to fade up out of the
+/// background, and how much later each line below the title arrives.
+const INTRO_FADE: Duration = Duration::from_millis(420);
+const INTRO_STAGGER: Duration = Duration::from_millis(90);
+/// How dim the oldest end of the progress bar is drawn, as a fraction of the way
+/// from the background to the accent colour. The bar shades up to full at the
+/// playhead, so the fill reads as a trail behind it.
+const PROGRESS_TAIL: f32 = 0.45;
 
-/// A view drawn this recently is assumed to still be on screen.
-const VISIBLE_FOR: Duration = Duration::from_millis(500);
-/// How long frames keep being drawn after playback stops, so the band can settle.
-const SETTLE_FOR: Duration = Duration::from_millis(900);
+/// Where a fade that has to make do with the dim attribute stops being dim.
+const HALF_FADED: f32 = 0.55;
+
 const VOLUME_METER_CELLS: usize = 8;
 /// Cover art sizing, in cells: never taller than this, never shown below it, and
 /// never at the cost of leaving the text column narrower than it needs.
@@ -90,129 +68,6 @@ const ART_MIN_TEXT_WIDTH: usize = 48;
 /// Smallest terminal that still gets the full card; anything smaller is laid out flat.
 const CARD_MIN_WIDTH: usize = 40;
 const CARD_MIN_HEIGHT: usize = 15;
-
-/// Drives the visualizer while it is on screen.
-///
-/// The rest of ncspot only redraws every few hundred milliseconds, which is far too
-/// coarse for an animation, so this asks the event loop for extra frames — but only
-/// while the view is actually being drawn and something is playing, so a background
-/// tab never costs anything.
-#[derive(Default)]
-struct Animator {
-    last_draw: RwLock<Option<Instant>>,
-}
-
-impl Animator {
-    /// Start animating at `fps`. Zero frames per second means the user turned the
-    /// animation off: the band still draws, it just never asks for a frame.
-    fn spawn(events: EventManager, spotify: Spotify, fps: u32) -> Arc<Self> {
-        let animator = Arc::new(Self::default());
-        if fps == 0 {
-            return animator;
-        }
-
-        let frame = Duration::from_secs_f64(
-            1.0 / f64::from(fps.clamp(*FPS_RANGE.start(), *FPS_RANGE.end())),
-        );
-        let handle: Weak<Self> = Arc::downgrade(&animator);
-
-        thread::spawn(move || {
-            let mut last_playing: Option<Instant> = None;
-
-            // Stop once the view is gone, or once the event loop has shut down.
-            while let Some(animator) = handle.upgrade() {
-                let visible = animator.is_visible();
-                drop(animator);
-
-                let playing = matches!(spotify.get_current_status(), PlayerEvent::Playing(_));
-                if playing {
-                    last_playing = Some(Instant::now());
-                }
-                // Keep drawing for a moment after playback stops, so the band eases
-                // down to its idle shape instead of freezing mid fall.
-                let settling = last_playing.is_some_and(|at| at.elapsed() < SETTLE_FOR);
-
-                if !visible || !(playing || settling) {
-                    thread::sleep(IDLE_INTERVAL);
-                    continue;
-                }
-                if !events.try_trigger() {
-                    break;
-                }
-                thread::sleep(frame);
-            }
-        });
-
-        animator
-    }
-
-    fn mark_drawn(&self) {
-        *self.last_draw.write().unwrap() = Some(Instant::now());
-    }
-
-    fn is_visible(&self) -> bool {
-        self.last_draw
-            .read()
-            .unwrap()
-            .is_some_and(|at| at.elapsed() < VISIBLE_FOR)
-    }
-}
-
-/// Bar and peak marker animation, carried between frames. Heights are in eighths
-/// of a cell; motion is integrated over real elapsed time so the animation looks
-/// the same whether the terminal is redrawing at two frames a second or twenty.
-#[derive(Default)]
-struct SpectrumState {
-    levels: Vec<f64>,
-    peaks: Vec<f64>,
-    /// Current downward speed of each peak marker, in eighths per second.
-    peak_speed: Vec<f64>,
-    last_frame: Option<Instant>,
-}
-
-impl SpectrumState {
-    /// Advance the animation to now, from however long ago the last frame was.
-    fn step(&mut self, targets: &[f64]) {
-        let now = Instant::now();
-        let elapsed = self
-            .last_frame
-            .map(|last| now.duration_since(last).as_secs_f64())
-            .unwrap_or_default()
-            .clamp(0.0, MAX_FRAME_GAP);
-        self.last_frame = Some(now);
-        self.advance(targets, elapsed);
-    }
-
-    /// Ease every bar toward its target and let the peak markers fall, over
-    /// `elapsed` seconds.
-    fn advance(&mut self, targets: &[f64], elapsed: f64) {
-        // On the first frame, and after a resize, snap to the targets: a single
-        // redraw (a paused view, or a frame triggered by something else entirely)
-        // has to show the band, not an empty strip easing up from nothing.
-        if self.levels.len() != targets.len() {
-            self.levels = targets.to_vec();
-            self.peaks = targets.to_vec();
-            self.peak_speed = vec![0.0; targets.len()];
-            return;
-        }
-
-        let rise = 1.0 - (-elapsed / BAR_RISE).exp();
-        let fall = 1.0 - (-elapsed / BAR_FALL).exp();
-        for (column, target) in targets.iter().enumerate() {
-            let level = &mut self.levels[column];
-            *level += (target - *level) * if *target > *level { rise } else { fall };
-
-            if *level >= self.peaks[column] {
-                self.peaks[column] = *level;
-                self.peak_speed[column] = 0.0;
-            } else {
-                self.peak_speed[column] += PEAK_GRAVITY * elapsed;
-                self.peaks[column] =
-                    (self.peaks[column] - self.peak_speed[column] * elapsed).max(*level);
-            }
-        }
-    }
-}
 
 /// What a click on a given run of cells does. The card advertises these controls,
 /// so they have to be usable with the mouse as well as with the keyboard.
@@ -280,6 +135,44 @@ impl Segment {
     }
 }
 
+/// How a line is inked: the colour it is drawn in and the attributes on top of it.
+///
+/// Dim is here because a fade cannot always be done in colour: a theme that leaves
+/// the background as the terminal's own gives nothing to interpolate towards, and
+/// the terminal's dim attribute is the only shading left.
+#[derive(Clone, Copy)]
+struct Ink {
+    style: ColorStyle,
+    bold: bool,
+    dim: bool,
+}
+
+impl Ink {
+    fn new(style: ColorStyle, bold: bool) -> Self {
+        Self {
+            style,
+            bold,
+            dim: false,
+        }
+    }
+
+    fn dimmed(mut self) -> Self {
+        self.dim = true;
+        self
+    }
+
+    fn apply(self, printer: &Printer<'_, '_>, draw: impl FnOnce(&Printer<'_, '_>)) {
+        printer.with_color(self.style, |printer| match (self.bold, self.dim) {
+            (false, false) => draw(printer),
+            (true, false) => printer.with_effect(Effect::Bold, draw),
+            (false, true) => printer.with_effect(Effect::Dim, draw),
+            (true, true) => printer.with_effect(Effect::Bold, |printer| {
+                printer.with_effect(Effect::Dim, draw)
+            }),
+        });
+    }
+}
+
 /// A horizontal slice of the screen that content is laid out inside. Keeping the
 /// slice explicit means the card contents centre on the card, not on the terminal.
 #[derive(Clone, Copy)]
@@ -336,6 +229,8 @@ enum BlockKind {
         text: String,
         style: ColorStyle,
         bold: bool,
+        /// Whether a line too long for its column scrolls instead of being clipped.
+        scroll: bool,
     },
     Segments(Vec<Segment>),
     Progress,
@@ -358,6 +253,7 @@ impl Block {
                 text: text.into(),
                 style,
                 bold: false,
+                scroll: false,
             },
             drop_order,
         )
@@ -369,9 +265,19 @@ impl Block {
                 text: text.into(),
                 style: ColorStyle::title_primary(),
                 bold: true,
+                scroll: true,
             },
             0,
         )
+    }
+
+    /// Let this line scroll when it does not fit, rather than losing its tail to an
+    /// ellipsis. Worth it for a name, pointless for a label that is short anyway.
+    fn scrolling(mut self) -> Self {
+        if let BlockKind::Line { scroll, .. } = &mut self.kind {
+            *scroll = true;
+        }
+        self
     }
 
     fn height(&self) -> usize {
@@ -462,46 +368,96 @@ impl NowPlayingView {
     /// Only the brightness moves; sizes and shapes stay put, which is the
     /// difference between a card that breathes and one that twitches.
     fn on_beat(&self, colour: Color) -> Color {
-        if !self.library.cfg.values().beat_pulse.unwrap_or(true) {
-            return colour;
-        }
-        lift(colour, BEAT_LIFT * self.spotify.audio_tap().pulse())
+        lift(colour, BEAT_LIFT * self.glow())
     }
 
     /// The colour the card highlights with: the cover's own, when it has one worth
     /// using, and the theme's progress colour otherwise.
+    ///
+    /// Taken from the shared tint rather than straight from this view's own cover,
+    /// so the card, the statusbar and the lists all highlight in the same colour
+    /// and all cross over to the next album's colour together.
     fn accent_style(&self, printer: &Printer<'_, '_>) -> ColorStyle {
-        let colour = self
-            .cover_accent()
-            .unwrap_or(*printer.theme.palette.custom("statusbar_progress").unwrap());
+        let theme = *printer.theme.palette.custom("statusbar_progress").unwrap();
+        let colour = if self.library.cfg.values().cover_accent.unwrap_or(true) {
+            accent::current(theme)
+        } else {
+            theme
+        };
         ColorStyle::new(
             ColorType::Color(self.on_beat(colour)),
             ColorType::Palette(PaletteColor::Background),
         )
     }
 
-    /// The playing cover's own colour, unless the user would rather keep the theme.
-    #[cfg(feature = "album_art")]
-    fn cover_accent(&self) -> Option<cursive::theme::Color> {
-        if !self.library.cfg.values().cover_accent.unwrap_or(true) {
-            return None;
+    /// How hard the beat is hitting, or zero when the user turned the pulse off.
+    fn glow(&self) -> f32 {
+        if !self.library.cfg.values().beat_pulse.unwrap_or(true) {
+            return 0.0;
         }
-        let url = self.queue.get_current()?.cover_url()?;
-        self.art.accent(&url)
+        self.spotify.audio_tap().pulse()
     }
 
-    #[cfg(not(feature = "album_art"))]
-    fn cover_accent(&self) -> Option<cursive::theme::Color> {
-        None
+    /// The tempo of what is playing, for the chip on the card and for the band to
+    /// pump along to when there is no audio to read.
+    fn tempo(&self) -> Option<f64> {
+        self.spotify.audio_tap().tempo().map(f64::from)
     }
 
+    /// The shape the user asked the band to take.
+    fn visualizer_style(&self) -> spectrum::Style {
+        spectrum::Style::parse(self.library.cfg.values().visualizer_style.as_deref())
+    }
+
+    /// Whether the moving parts of the card are wanted at all. Turning the
+    /// visualizer off turns off the rest of the motion with it.
+    fn animated(&self) -> bool {
+        self.library
+            .cfg
+            .values()
+            .visualizer_fps
+            .unwrap_or(DEFAULT_FPS)
+            > 0
+    }
+
+    /// `ink` drawn `amount` of the way up from the background behind it, so a line
+    /// can fade in instead of appearing all at once. Themes with no background
+    /// colour to fade out of get the coarser dim attribute instead of a blend.
+    fn faded(printer: &Printer<'_, '_>, ink: Ink, amount: f32) -> Ink {
+        if amount >= 1.0 {
+            return ink;
+        }
+        let background = printer.theme.palette[PaletteColor::Background];
+        let resolve = |colour: ColorType| match colour {
+            ColorType::Color(colour) => colour,
+            ColorType::Palette(entry) => printer.theme.palette[entry],
+            _ => background,
+        };
+
+        let from = resolve(ink.style.back);
+        let front = resolve(ink.style.front);
+        if !blendable(from) || !blendable(front) {
+            return if amount < HALF_FADED {
+                ink.dimmed()
+            } else {
+                ink
+            };
+        }
+        Ink {
+            style: ColorStyle::new(ColorType::Color(blend(from, front, amount)), ink.style.back),
+            ..ink
+        }
+    }
+
+    /// Draw one centered line. With a `phase` the line scrolls when it is too long
+    /// for the column; without one it is clipped to an ellipsis.
     fn draw_line(
         printer: &Printer<'_, '_>,
         y: usize,
         region: Region,
         text: &str,
-        style: ColorStyle,
-        bold: bool,
+        ink: Ink,
+        phase: Option<Duration>,
     ) {
         let Some(region) = region.visible(printer) else {
             return;
@@ -510,15 +466,12 @@ impl NowPlayingView {
             return;
         }
 
-        let text = truncate(text, region.width);
+        let text = match phase {
+            Some(phase) => marquee(text, region.width, phase),
+            None => truncate(text, region.width),
+        };
         let x = region.center(text.width());
-        printer.with_color(style, |printer| {
-            if bold {
-                printer.with_effect(Effect::Bold, |printer| printer.print((x, y), &text));
-            } else {
-                printer.print((x, y), &text);
-            }
-        });
+        ink.apply(printer, |printer| printer.print((x, y), &text));
     }
 
     /// Draw differently styled runs of text as one centered line, so key hints can
@@ -549,7 +502,7 @@ impl NowPlayingView {
                 .first()
                 .map(|segment| segment.style)
                 .unwrap_or_else(ColorStyle::primary);
-            Self::draw_line(printer, y, region, &flattened, style, false);
+            Self::draw_line(printer, y, region, &flattened, Ink::new(style, false), None);
             return;
         }
 
@@ -692,7 +645,10 @@ impl NowPlayingView {
         let time = elapsed_ms as f64 / 1000.0;
         let ceiling = (rows * 8) as f64;
         let center = (width as f64 - 1.0) / 2.0;
-        let beat = (time * SPECTRUM_TEMPO / 60.0 * PI).sin().abs().powi(6);
+        // The real tempo when the beat detector has found one, so the fallback band
+        // pumps along with the track rather than to a number picked in advance.
+        let tempo = self.tempo().unwrap_or(SPECTRUM_TEMPO);
+        let beat = (time * tempo / 60.0 * PI).sin().abs().powi(6);
 
         (0..width)
             .map(|column| {
@@ -744,58 +700,19 @@ impl NowPlayingView {
         let mut state = self.spectrum.write().unwrap();
         state.step(&targets);
 
-        let accent = self.accent_style(printer);
-        let playing = self.playing_style(printer);
-        let quiet = ColorStyle::secondary();
-        let playing_now = self.is_playing();
-        let baseline = top + rows - 1;
-        let origin = region.center(width);
-
-        for column in 0..width {
-            let x = origin + column;
-            let level = state.levels[column].round().max(0.0) as usize;
-            let peak = state.peaks[column].round().max(0.0) as usize;
-
-            // A dim floor frames the band, and keeps it readable as a band when a
-            // column has decayed away to nothing.
-            if level == 0 && baseline < printer.size.y {
-                printer.with_color(quiet, |printer| printer.print((x, baseline), "▁"));
-            }
-
-            for tier in 0..rows {
-                let y = top + rows - 1 - tier;
-                if y >= printer.size.y {
-                    continue;
-                }
-                let cell = min(8, level.saturating_sub(tier * 8));
-                if cell == 0 {
-                    continue;
-                }
-                // Classic meter colouring: the higher the cell, the hotter it reads.
-                let style = if !playing_now {
-                    quiet
-                } else if tier + 1 == rows {
-                    playing
-                } else {
-                    accent
-                };
-                printer.with_color(style, |printer| {
-                    printer.print((x, y), &BLOCKS[cell - 1].to_string());
-                });
-            }
-
-            // The peak marker floats above the bar and falls back under gravity,
-            // so a column that just spiked stays legible after the bar drops.
-            let peak_tier = peak / 8;
-            let bar_tier = level.saturating_sub(1) / 8;
-            if peak > 0 && peak_tier < rows && (level == 0 || peak_tier > bar_tier) {
-                let y = top + rows - 1 - peak_tier;
-                let style = if playing_now { playing } else { quiet };
-                if y < printer.size.y {
-                    printer.with_color(style, |printer| printer.print((x, y), "▔"));
-                }
-            }
-        }
+        let palette = spectrum::Palette {
+            hot: self.playing_style(printer),
+            warm: self.accent_style(printer),
+            quiet: ColorStyle::secondary(),
+            live: self.is_playing(),
+        };
+        let area = spectrum::Area {
+            origin: region.center(width),
+            top,
+            width,
+            rows,
+        };
+        spectrum::draw(printer, &state, area, &palette, self.visualizer_style());
     }
 
     fn draw_progress(
@@ -804,7 +721,7 @@ impl NowPlayingView {
         row: usize,
         region: Region,
         elapsed_ms: u128,
-        duration_ms: u32,
+        playable: Option<&Playable>,
     ) {
         let Some(region) = region.visible(printer) else {
             return;
@@ -813,29 +730,66 @@ impl NowPlayingView {
             return;
         }
 
-        const PARTIALS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+        const PARTIALS: [char; 8] = [
+            '\u{258f}', '\u{258e}', '\u{258d}', '\u{258c}', '\u{258b}', '\u{258a}', '\u{2589}',
+            '\u{2588}',
+        ];
         let Region { start, width } = region;
+        let duration_ms = playable.map(Playable::duration).unwrap_or_default();
         let eighths = progress_eighths(elapsed_ms, duration_ms, width);
         let filled = eighths / 8;
         let remainder = eighths % 8;
         let accent = self.accent_style(printer);
+        let shade = self.shader(printer, accent);
 
         printer.with_color(ColorStyle::secondary(), |printer| {
-            printer.print((start, row), &"┈".repeat(width));
+            printer.print((start, row), &"\u{2508}".repeat(width));
         });
-        printer.with_color(accent, |printer| {
-            if filled > 0 {
-                printer.print((start, row), &"█".repeat(filled));
+
+        match self.shape(playable, width) {
+            // The track's own shape, learned by listening to it: each column is as
+            // tall as that moment is loud, and the played part is lit up.
+            Some(shape) => {
+                for (cell, level) in shape.iter().enumerate() {
+                    let glyph = match level {
+                        Some(level) => {
+                            let eighth = ((level * 8.0).round() as usize).clamp(1, 8);
+                            spectrum::BLOCKS[eighth - 1]
+                        }
+                        // Not heard yet, so there is nothing to claim about it.
+                        None => '\u{2508}',
+                    };
+                    let ink = if cell < filled {
+                        shade(cell, filled)
+                    } else {
+                        Ink::new(ColorStyle::secondary(), false)
+                    };
+                    ink.apply(printer, |printer| {
+                        printer.print((start + cell, row), &glyph.to_string())
+                    });
+                }
             }
-            if remainder > 0 && filled < width {
-                printer.print((start + filled, row), &PARTIALS[remainder - 1].to_string());
+            // Nothing known about this track yet: a plain bar, shaded from dim at
+            // the start of the track up to full at the playhead.
+            None => {
+                printer.with_color(accent, |printer| {
+                    for cell in 0..filled {
+                        shade(cell, filled).apply(printer, |printer| {
+                            printer.print((start + cell, row), "\u{2588}")
+                        });
+                    }
+                    if remainder > 0 && filled < width {
+                        printer.print((start + filled, row), &PARTIALS[remainder - 1].to_string());
+                    }
+                });
             }
-        });
+        }
+
         // A playhead makes the seek target obvious, and marks where a click will land.
         if width > 1 {
             let head = min(filled, width - 1);
             printer.with_color(self.playing_style(printer), |printer| {
-                printer.print((start + head, row), "●");
+                printer.print((start + head, row), "\u{25cf}");
             });
         }
 
@@ -845,6 +799,56 @@ impl NowPlayingView {
             width,
             control: Control::Seek,
         });
+    }
+
+    /// How to ink cell `cell` of a bar `filled` cells long: dim at the start of the
+    /// track, full at the playhead, so the fill reads as a trail behind the head.
+    ///
+    /// Themes that leave the background to the terminal have no colour to shade
+    /// towards, so on those the tail is dimmed with the terminal's own attribute.
+    fn shader(
+        &self,
+        printer: &Printer<'_, '_>,
+        accent: ColorStyle,
+    ) -> impl Fn(usize, usize) -> Ink {
+        let background = printer.theme.palette[PaletteColor::Background];
+        let accent_colour = match accent.front {
+            ColorType::Color(colour) => colour,
+            _ => background,
+        };
+        let tail = blend(background, accent_colour, PROGRESS_TAIL);
+        let shaded = blendable(background) && blendable(accent_colour);
+
+        move |cell, filled| {
+            let along = if filled > 1 {
+                cell as f32 / (filled - 1) as f32
+            } else {
+                1.0
+            };
+            if shaded {
+                Ink::new(
+                    ColorStyle::new(
+                        ColorType::Color(blend(tail, accent_colour, along)),
+                        accent.back,
+                    ),
+                    false,
+                )
+            } else if along < HALF_FADED {
+                Ink::new(accent, false).dimmed()
+            } else {
+                Ink::new(accent, false)
+            }
+        }
+    }
+
+    /// The shape of the playing track, resampled to `width` columns, once enough of
+    /// it has been heard to be worth drawing.
+    fn shape(&self, playable: Option<&Playable>, width: usize) -> Option<Vec<Option<f32>>> {
+        if !self.library.cfg.values().waveform.unwrap_or(true) {
+            return None;
+        }
+        let id = playable?.id()?;
+        waveform::shared().shape(&id, width)
     }
 
     fn draw_times(
@@ -1102,9 +1106,9 @@ impl NowPlayingView {
         }
         blocks.push(Block::blank());
         blocks.push(Block::title(title));
-        blocks.push(Block::line(byline, ColorStyle::primary(), 1));
+        blocks.push(Block::line(byline, ColorStyle::primary(), 1).scrolling());
         if !album.is_empty() {
-            blocks.push(Block::line(album, ColorStyle::secondary(), 4));
+            blocks.push(Block::line(album, ColorStyle::secondary(), 4).scrolling());
         }
         if card {
             blocks.push(Block::blank());
@@ -1158,7 +1162,15 @@ impl NowPlayingView {
     ) {
         fit_blocks(&mut blocks, frame.height);
         let Frame { region, edges, .. } = frame;
-        let elapsed = self.spotify.get_current_progress().as_millis();
+        // Both the scrolling and the fade run off playback position rather than the
+        // wall clock, so they restart at a track change and hold still while paused.
+        let position = self.spotify.get_current_progress();
+        let elapsed = position.as_millis();
+        let motion = self.animated().then_some(position);
+        // Only fade a line in while something is actually playing: an item paused at
+        // its start would otherwise sit half faded with nothing coming to finish it.
+        let intro = motion.filter(|_| self.is_playing());
+        let mut line = 0u32;
         let mut row = frame.top;
 
         for block in &blocks {
@@ -1168,13 +1180,29 @@ impl NowPlayingView {
                     let seed = playable.map(Self::spectrum_seed).unwrap_or_default();
                     self.draw_spectrum(printer, row, *rows, region, elapsed, seed);
                 }
-                BlockKind::Line { text, style, bold } => {
-                    Self::draw_line(printer, row, region, text, *style, *bold)
+                BlockKind::Line {
+                    text,
+                    style,
+                    bold,
+                    scroll,
+                } => {
+                    let ink = Ink::new(*style, *bold);
+                    let ink = match intro {
+                        Some(position) => Self::faded(
+                            printer,
+                            ink,
+                            staggered_fade(position, INTRO_FADE, INTRO_STAGGER * line),
+                        ),
+                        None => ink,
+                    };
+                    line += 1;
+                    let phase = motion.filter(|_| *scroll);
+                    Self::draw_line(printer, row, region, text, ink, phase);
                 }
                 BlockKind::Segments(segments) => self.draw_segments(printer, row, region, segments),
                 BlockKind::Progress => {
-                    if let Some(playable) = playable {
-                        self.draw_progress(printer, row, region, elapsed, playable.duration());
+                    if playable.is_some() {
+                        self.draw_progress(printer, row, region, elapsed, playable);
                     }
                 }
                 BlockKind::Times => {
@@ -1236,7 +1264,9 @@ impl NowPlayingView {
 
     #[cfg(feature = "album_art")]
     fn draw_art(&self, printer: &Printer<'_, '_>, offset: Vec2, size: Vec2, url: &str) {
-        self.art.draw(printer, offset, size, url);
+        // The cover breathes with the kick, the same way the card's border does.
+        self.art
+            .draw(printer, offset, size, url, ART_GLOW * self.glow());
     }
 
     #[cfg(not(feature = "album_art"))]
@@ -1345,10 +1375,16 @@ impl NowPlayingView {
         });
         let footer = self.queue_position();
         let (icon, state) = self.status();
+        // The tempo is only shown once the beat detector is sure of it, so the chip
+        // stays still rather than counting up and down at the start of every track.
+        let chip = match self.tempo() {
+            Some(tempo) if self.is_playing() => format!("{icon}  {state}  \u{b7}  {tempo:.0} BPM"),
+            _ => format!("{icon}  {state}"),
+        };
         self.draw_card_layout(
             printer,
             self.blocks(printer, playable, true),
-            &format!("{icon}  {state}"),
+            &chip,
             saved,
             footer.as_deref(),
         );
@@ -1412,6 +1448,9 @@ impl NowPlayingView {
 impl View for NowPlayingView {
     fn draw(&self, printer: &Printer<'_, '_>) {
         self.animator.mark_drawn();
+        // This view draws at the visualizer's frame rate, which makes it the best
+        // sampler of the track's shape that the app has.
+        waveform::observe(&self.spotify, &self.queue);
         self.hitboxes.write().unwrap().clear();
         if printer.size.x == 0 || printer.size.y == 0 {
             return;
@@ -1684,6 +1723,7 @@ mod tests {
     use std::time::Duration;
 
     use cursive::Vec2;
+    use cursive::theme::Effect;
     use unicode_width::UnicodeWidthStr;
 
     use cursive::backends::puppet::Backend as PuppetBackend;
@@ -1702,9 +1742,8 @@ mod tests {
     #[cfg(feature = "album_art")]
     use super::ART_MIN_HEIGHT;
     use super::{
-        Block, BlockKind, NowPlayingView, SPECTRUM_MAX_HEIGHT, SpectrumState, ViewExt,
-        blocks_height, fit_blocks, percent_complete, progress_eighths, remaining_label, truncate,
-        volume_meter,
+        Block, BlockKind, NowPlayingView, SPECTRUM_MAX_HEIGHT, ViewExt, blocks_height, fit_blocks,
+        percent_complete, progress_eighths, remaining_label, truncate, volume_meter,
     };
     use cursive::theme::ColorStyle;
 
@@ -1887,6 +1926,131 @@ mod tests {
             bands.windows(2).any(|pair| pair[0] != pair[1]),
             "the visualizer never moved:\n{bands:#?}"
         );
+    }
+
+    #[test]
+    fn a_title_too_long_for_the_card_scrolls_instead_of_being_clipped() {
+        let long = "A Very Long Track Title That No Reasonable Card Could Fit On One Line";
+        let tracks = vec![track(long, "Juno Reactor", "Shango")];
+        let at = |seconds| {
+            rows(&render_state(
+                Vec2::new(64, 24),
+                tracks.clone(),
+                Some(0),
+                PlayerEvent::Paused(Duration::from_secs(seconds)),
+                false,
+                1,
+            ))
+            .join("\n")
+        };
+
+        // It starts at the start of the title, and says so without an ellipsis.
+        let start = at(0);
+        assert!(start.contains("A Very Long Track Title"), "{start}");
+        assert!(!start.contains('\u{2026}'), "{start}");
+
+        // A few seconds later the window has travelled to the end of the title, so
+        // the part that would have been cut off is the part now on screen.
+        let scrolled = at(7);
+        assert!(scrolled.contains("Fit On One Line"), "{scrolled}");
+        assert!(!scrolled.contains("A Very Long"), "{scrolled}");
+    }
+
+    #[test]
+    fn a_track_that_just_started_fades_its_title_in() {
+        let playing = |since: Duration| {
+            let started = std::time::SystemTime::now()
+                .checked_sub(since)
+                .expect("a clock a few seconds in the past");
+            render_state(
+                Vec2::new(90, 28),
+                queued(),
+                Some(0),
+                PlayerEvent::Playing(started),
+                false,
+                1,
+            )
+        };
+
+        // The test theme leaves the background to the terminal, so the fade has no
+        // colour to interpolate and shows up as the dim attribute instead.
+        let fresh = playing(Duration::ZERO);
+        assert!(dimmed(&fresh, "Solaris"), "the title did not fade in");
+
+        let settled = playing(Duration::from_secs(5));
+        assert!(
+            !dimmed(&settled, "Solaris"),
+            "the title never finished fading in"
+        );
+    }
+
+    #[test]
+    fn a_track_that_has_been_heard_gets_its_own_shape_for_a_progress_bar() {
+        let store = crate::waveform::shared();
+        let id = "shaped";
+        let tracks = vec![Playable::Track(Track {
+            id: Some(id.to_string()),
+            ..match track("Shaped", "Juno Reactor", "Shango") {
+                Playable::Track(track) => track,
+                _ => unreachable!("the helper builds a track"),
+            }
+        })];
+        // Alternate loud and quiet through the track, so its shape is unmistakable.
+        for bucket in 0..256u128 {
+            let level = if bucket % 2 == 0 { 0.95 } else { 0.15 };
+            store.record(id, bucket * 880, 225_000, level);
+        }
+
+        let rows = rows(&render(Vec2::new(78, 26), tracks, Some(0)));
+        let bar = rows
+            .iter()
+            .find(|row| row.contains('\u{25cf}'))
+            .expect("the progress bar is drawn");
+        // A plain bar is one glyph repeated; a shape is not.
+        let heights: std::collections::HashSet<char> = bar
+            .chars()
+            .filter(|glyph| crate::ui::spectrum::BLOCKS.contains(glyph))
+            .collect();
+        assert!(
+            heights.len() > 1,
+            "the bar should follow the track's shape, got {bar:?}"
+        );
+    }
+
+    #[test]
+    fn the_played_part_of_the_bar_shades_up_to_the_playhead() {
+        let screen = render(Vec2::new(90, 28), queued(), Some(0));
+        let head = find_text(&screen, "\u{25cf}").expect("the playhead is drawn");
+        let filled: Vec<Vec2> = (0..head.x)
+            .map(|x| Vec2::new(x, head.y))
+            .filter(|at| matches!(&screen[*at], Some(cell) if cell.letter.unwrap() == "\u{2588}"))
+            .collect();
+        assert!(filled.len() > 4, "the bar is too short to shade");
+
+        let dim = |at: Vec2| {
+            screen[at]
+                .as_ref()
+                .unwrap()
+                .style
+                .effects
+                .contains(Effect::Dim)
+        };
+        assert!(dim(filled[0]), "the start of the bar is not shaded back");
+        assert!(
+            !dim(*filled.last().unwrap()),
+            "the bar is still shaded back at the playhead"
+        );
+    }
+
+    /// Whether the first cell of `needle` was drawn with the dim attribute.
+    fn dimmed(screen: &ObservedScreen, needle: &str) -> bool {
+        let at = find_text(screen, needle).unwrap_or_else(|| panic!("{needle} is not on screen"));
+        screen[at]
+            .as_ref()
+            .expect("a drawn cell")
+            .style
+            .effects
+            .contains(Effect::Dim)
     }
 
     fn render(size: Vec2, tracks: Vec<Playable>, current: Option<usize>) -> ObservedScreen {
@@ -2158,47 +2322,6 @@ mod tests {
         assert_eq!(volume_meter(100, 8), "▮▮▮▮▮▮▮▮");
         // Rounding must never overrun the meter, even above nominal volume.
         assert_eq!(volume_meter(150, 8), "▮▮▮▮▮▮▮▮");
-    }
-
-    #[test]
-    fn bars_snap_into_place_on_the_first_frame() {
-        // A single redraw — a paused view, say — has to show the band right away.
-        let mut state = SpectrumState::default();
-        state.advance(&[4.0, 12.0, 20.0], 0.0);
-        assert_eq!(state.levels, [4.0, 12.0, 20.0]);
-        assert_eq!(state.peaks, [4.0, 12.0, 20.0]);
-    }
-
-    #[test]
-    fn bars_rise_fast_and_fall_slowly() {
-        let mut state = SpectrumState::default();
-        state.advance(&[0.0], 0.0);
-
-        state.advance(&[24.0], 0.05);
-        let risen = state.levels[0];
-        assert!(risen > 12.0 && risen <= 24.0, "{risen}");
-
-        state.advance(&[0.0], 0.05);
-        let fallen = state.levels[0];
-        assert!(fallen > risen / 2.0, "fell too fast: {risen} -> {fallen}");
-    }
-
-    #[test]
-    fn peak_markers_hang_above_the_bar_and_drop_back() {
-        let mut state = SpectrumState::default();
-        state.advance(&[24.0], 0.0);
-        state.advance(&[0.0], 0.05);
-        assert!(state.peaks[0] > state.levels[0]);
-
-        let hanging = state.peaks[0];
-        for _ in 0..4 {
-            state.advance(&[0.0], 0.05);
-        }
-        assert!(state.peaks[0] < hanging, "the peak never fell");
-        assert!(
-            state.peaks[0] >= state.levels[0],
-            "the peak fell through the bar"
-        );
     }
 
     #[test]

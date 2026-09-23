@@ -148,9 +148,35 @@ When pressing <kbd>O</kbd>:
 The visualizer shows the spectrum of the audio actually playing, read from the
 playback sink and split into bands by frequency. When nothing is coming through
 it falls back to an animated band so the view still has some life in it, and
-`visualizer_fps = 0` turns it off entirely. The card is also tinted with the
-album cover's own colour, which `cover_accent = false` turns off, and it
-brightens in time with the beat, which `beat_pulse = false` turns off.
+`visualizer_fps = 0` turns it off entirely. `visualizer_style` picks the shape it
+takes: `bars` (the default), `mirror` for bars with a reflection under them,
+`wave` for a single line tracing the band, or `vu` for one horizontal meter with
+a peak marker.
+
+The card is tinted with the album cover's own colour, which `cover_accent = false`
+turns off, and it brightens in time with the beat, which `beat_pulse = false`
+turns off. The cover itself pulses along with it. Once enough beats have been
+heard to be sure of the tempo, the card's status chip also shows it in BPM, and
+the fallback band pumps along at that tempo instead of a made up one.
+
+The progress bar is drawn as the track's own waveform: while a track plays, how
+loud it is at each point is written down, so the bar shows the shape of the music
+with the part you have heard lit up. The first listen fills the shape in behind
+the playhead and every later one has it ready up front. Shapes are kept in
+`waveforms.db` in the cache directory, and `waveform = false` goes back to a
+plain bar.
+
+A title, artist or album too long for the card scrolls rather than being cut off
+with an ellipsis, the text fades up out of the background when a new track
+starts, the cover fades in as soon as it has been decoded, and the progress bar
+shades from dim at the start of the track up to full at the playhead.
+`visualizer_fps = 0` turns the scrolling and the fades off along with the
+visualizer. On a theme that leaves the background to the terminal there is no
+colour to fade out of, so the fades use the terminal's dim attribute instead.
+
+The album's colour is not confined to this screen: the statusbar's progress bar
+and the playing row in every list take the same tint, and it crossfades from one
+album's colour to the next rather than snapping.
 
 The card is clickable: the transport buttons, the progress bar, the repeat and
 shuffle toggles and the volume meter all respond to a click, and scrolling over
@@ -180,12 +206,37 @@ at once and tracks like it fill the queue behind it. A digit only picks once the
 query can still start with a number; to type a digit after results are up, hold
 <kbd>Alt</kbd>.
 
+Results carry a small thumbnail of the album cover, drawn once the cover has been
+fetched, and nothing shifts sideways while you wait for one.
+
 Results appear before the network answers: matches from your saved library are
 shown on the keystroke itself, and previous searches are remembered in
 `searches.db` in the cache directory, so a repeated query needs no request at
 all and a growing one keeps the previous prefix's results on screen instead of
 blanking. Covers for the results are fetched in the background, so art for a
 track you play is already on disk.
+
+### Statusbar
+The statusbar keeps the playing track clear of the readout on its right, and
+scrolls the name when it does not fit in the space that leaves. Its progress bar
+moves in half cells rather than whole ones, takes the playing album's colour, and
+brightens with the beat, which `beat_pulse = false` turns off. While audio is
+playing, the play icon is replaced by a small live equalizer; it comes back as
+soon as there is nothing to show a level for, and `visualizer_fps = 0` keeps the
+icon for good. Keeping the equalizer and the bar moving means the interface
+redraws a few times a second whenever something is playing, wherever you are in
+the app; `visualizer_fps = 0` stops that if you would rather it stayed still.
+
+### Lists
+The playing row of any list — library, queue, search results — fills with the
+album's colour as the track plays, so a glance at a list says how far through it
+is. A row that is also the selected one keeps its usual highlight instead.
+
+### Volume and seeking
+Changing the volume or seeking with a key raises a panel in the middle of the
+screen with the new value and a bar, which fades away about a second later. The
+same numbers are in the statusbar; the panel is there for when you are not
+reading it.
 
 ### Library
 | Key          | Command                                 |
@@ -309,9 +360,11 @@ Possible configuration values are:
 | `cover_max_scale`<sup>[1]</sup> | Set maximum scaling ratio for cover art                        | Number                                                                                | No limit            |
 | `hide_display_names`            | Hides spotify usernames in the library header and on playlists | `true`, `false`                                                                       | `false`             |
 | `statusbar_format`              | Formatting for tracks in the statusbar                         | See [track_formatting](#track-formatting)                                             | `%artists - %track` |
-| `visualizer_fps`                | Frame rate of the now playing visualizer, `0` to disable it    | `0` - `60`                                                                            | `20`                |
-| `cover_accent`                  | Tint the now playing card with the album cover's own colour    | `true`, `false`                                                                       | `true`              |
-| `beat_pulse`                    | Brighten the now playing card in time with the beat            | `true`, `false`                                                                       | `true`              |
+| `visualizer_fps`                | Frame rate of the now playing visualizer, `0` to disable it and the other now playing motion with it | `0` - `60`                                                                            | `20`                |
+| `visualizer_style`              | Shape the now playing visualizer takes                         | `"bars"`, `"mirror"`, `"wave"`, `"vu"`                                                | `"bars"`            |
+| `waveform`                      | Draw the progress bar as the track's own waveform              | `true`, `false`                                                                       | `true`              |
+| `cover_accent`                  | Tint the card, statusbar and lists with the album cover's own colour | `true`, `false`                                                                 | `true`              |
+| `beat_pulse`                    | Brighten the now playing card and the statusbar progress bar in time with the beat | `true`, `false`                                                                       | `true`              |
 | `[track_format]`                | Set active fields shown in Library/Queue views                 | See [track formatting](#track-formatting)                                             |                     |
 | `[notification_format]`         | Set the text displayed in notifications<sup>[4]</sup>          | See [notification formatting](#notification-formatting)                               |                     |
 | `[theme]`                       | Custom theme                                                   | See [custom theme](#theming)                                                          |                     |

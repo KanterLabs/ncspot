@@ -103,6 +103,11 @@ pub struct ConfigValues {
     /// Frames per second the now playing visualizer animates at. `0` turns the
     /// animation off, leaving the rest of the screen updating as usual.
     pub visualizer_fps: Option<u32>,
+    /// Draw the progress bar as the track's own waveform, once enough of the
+    /// track has been heard to know its shape.
+    pub waveform: Option<bool>,
+    /// Shape the now playing visualizer takes: `bars`, `mirror`, `wave` or `vu`.
+    pub visualizer_style: Option<String>,
     pub cover_accent: Option<bool>,
     pub beat_pulse: Option<bool>,
     pub ap_port: Option<u16>,

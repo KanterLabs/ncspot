@@ -32,6 +32,11 @@ const FETCH: u32 = 20;
 /// How many library hits can take the top of the list before catalogue results.
 const LOCAL_SLOTS: usize = 2;
 const WIDTH: usize = 62;
+/// Width of the cover thumbnail beside each result, in cells. Two subpixel rows
+/// inside one text row is not detail, but it is the album's colours, which is
+/// enough to recognise a record you own.
+#[cfg(feature = "album_art")]
+const THUMBNAIL: usize = 3;
 
 /// What the next keypress means. Digits always pick a result the moment there is
 /// one to pick, so choosing and playing is two keys and never more; a digit that
@@ -74,6 +79,9 @@ pub struct QuickSearch {
     /// Bumped on every keystroke; a search only lands if it is still the newest.
     generation: Arc<AtomicU64>,
     cache: Arc<SearchCache>,
+    /// Covers for the results on screen, drawn as thumbnails beside them.
+    #[cfg(feature = "album_art")]
+    art: crate::ui::album_art::AlbumArt,
 }
 
 impl QuickSearch {
@@ -86,6 +94,8 @@ impl QuickSearch {
         Self {
             spotify,
             queue,
+            #[cfg(feature = "album_art")]
+            art: crate::ui::album_art::AlbumArt::new(events.clone()),
             library,
             events,
             query: String::new(),
@@ -348,22 +358,46 @@ impl QuickSearch {
             } else {
                 ""
             };
+            let text_at = 6 + self.draw_thumbnail(printer, track, row);
             let artists = track.artists.join(", ");
             let title = truncate(&format!("{saved}{}", track.title), width / 2);
             printer.with_color(ColorStyle::primary(), |printer| {
                 if chosen {
-                    printer.with_effect(Effect::Bold, |printer| printer.print((6, row), &title));
+                    printer.with_effect(Effect::Bold, |printer| {
+                        printer.print((text_at, row), &title)
+                    });
                 } else {
-                    printer.print((6, row), &title);
+                    printer.print((text_at, row), &title);
                 }
             });
-            let used = 6 + title.width() + 2;
+            let used = text_at + title.width() + 2;
             if used < width {
                 printer.with_color(ColorStyle::secondary(), |printer| {
                     printer.print((used, row), &truncate(&artists, width - used));
                 });
             }
         }
+    }
+
+    /// Draw the cover beside a result, and say how many cells it took. Nothing is
+    /// drawn, and nothing is reserved, until the cover is actually decoded: a row
+    /// that jumps sideways when a download lands is worse than a row with no art.
+    #[cfg(feature = "album_art")]
+    fn draw_thumbnail(&self, printer: &Printer<'_, '_>, track: &Track, row: usize) -> usize {
+        let Some(url) = track.cover_url.as_ref() else {
+            return 0;
+        };
+        let size = Vec2::new(THUMBNAIL, 1);
+        if self.art.draw(printer, Vec2::new(6, row), size, url, 0.0) {
+            THUMBNAIL + 1
+        } else {
+            0
+        }
+    }
+
+    #[cfg(not(feature = "album_art"))]
+    fn draw_thumbnail(&self, _printer: &Printer<'_, '_>, _track: &Track, _row: usize) -> usize {
+        0
     }
 
     fn draw_hint(&self, printer: &Printer<'_, '_>, row: usize) {

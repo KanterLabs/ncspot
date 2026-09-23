@@ -206,7 +206,11 @@ impl Application {
         #[cfg(feature = "cover")]
         let coverview = ui::cover::CoverView::new(queue.clone(), library.clone(), &configuration);
 
-        let status = ui::statusbar::StatusBar::new(queue.clone(), Arc::clone(&library));
+        let status = ui::statusbar::StatusBar::new(
+            queue.clone(),
+            Arc::clone(&library),
+            event_manager.clone(),
+        );
 
         let mut layout =
             ui::layout::Layout::new(status, &event_manager, theme, Arc::clone(&configuration))

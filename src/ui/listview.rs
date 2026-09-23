@@ -82,6 +82,22 @@ impl<I: ListItem + Clone> ListView<I> {
         result
     }
 
+    /// How many of `width` cells the playing track has got through.
+    fn played_cells(&self, width: usize) -> usize {
+        let spotify = self.queue.get_spotify();
+        let Some(duration) = self
+            .queue
+            .get_current()
+            .map(|playable| playable.duration())
+            .filter(|duration| *duration > 0)
+        else {
+            return 0;
+        };
+        let elapsed = spotify.get_current_progress().as_millis();
+        let cells = elapsed.saturating_mul(width as u128) / duration as u128;
+        min(cells as usize, width)
+    }
+
     pub fn with_title(mut self, title: &str) -> Self {
         self.title = title.to_string();
         self
@@ -391,69 +407,91 @@ impl<I: ListItem + Clone> View for ListView<I> {
                 let right = item.display_right(&self.library);
                 let draw_center = !center.is_empty();
 
-                // draw left string
-                printer.with_color(style, |printer| {
-                    printer.print_hline((0, 0), printer.size.x, " ");
-                    printer.print((0, 0), &left);
-                });
+                // The row is drawn through a closure so it can be drawn twice: once
+                // whole, and once more clipped to the part of the track that has
+                // played, which is what lights the playing row up as it goes.
+                let draw_row = |printer: &Printer<'_, '_>, style: ColorStyle| {
+                    // draw left string
+                    printer.with_color(style, |printer| {
+                        printer.print_hline((0, 0), printer.size.x, " ");
+                        printer.print((0, 0), &left);
+                    });
 
-                // if line contains search query match, draw on top with
-                // highlight color
-                if self.search_indexes.contains(&i) {
-                    let fg = *printer.theme.palette.custom("search_match").unwrap();
-                    let matched_style = ColorStyle::new(fg, style.back);
+                    // if line contains search query match, draw on top with
+                    // highlight color
+                    if self.search_indexes.contains(&i) {
+                        let fg = *printer.theme.palette.custom("search_match").unwrap();
+                        let matched_style = ColorStyle::new(fg, style.back);
 
-                    let matches: Vec<(usize, usize)> = left
-                        .to_lowercase()
-                        .match_indices(&self.search_query)
-                        .map(|i| (i.0, i.0 + i.1.len()))
-                        .collect();
+                        let matches: Vec<(usize, usize)> = left
+                            .to_lowercase()
+                            .match_indices(&self.search_query)
+                            .map(|i| (i.0, i.0 + i.1.len()))
+                            .collect();
 
-                    for m in matches {
-                        printer.with_color(matched_style, |printer| {
-                            printer.print((left[0..m.0].width(), 0), &left[m.0..m.1]);
-                        });
+                        for m in matches {
+                            printer.with_color(matched_style, |printer| {
+                                printer.print((left[0..m.0].width(), 0), &left[m.0..m.1]);
+                            });
+                        }
                     }
-                }
 
-                // left string cut off indicator
-                let center_offset = printer.size.x / 2;
-                let left_max_length = if draw_center {
-                    center_offset.saturating_sub(1)
-                } else {
-                    printer.size.x.saturating_sub(right.width() + 1)
-                };
+                    // left string cut off indicator
+                    let center_offset = printer.size.x / 2;
+                    let left_max_length = if draw_center {
+                        center_offset.saturating_sub(1)
+                    } else {
+                        printer.size.x.saturating_sub(right.width() + 1)
+                    };
 
-                if left_max_length < left.width() {
-                    let offset = left_max_length.saturating_sub(1);
-                    printer.with_color(style, |printer| {
-                        printer.print_hline((offset, 0), printer.size.x, " ");
-                        printer.print((offset, 0), "..");
-                    });
-                }
-
-                // draw center string
-                if draw_center {
-                    printer.with_color(style, |printer| {
-                        printer.print((center_offset, 0), &center);
-                    });
-
-                    // center string cut off indicator
-                    let max_length = printer.size.x.saturating_sub(right.width() + 1);
-                    if max_length < center_offset + center.width() {
-                        let offset = max_length.saturating_sub(1);
+                    if left_max_length < left.width() {
+                        let offset = left_max_length.saturating_sub(1);
                         printer.with_color(style, |printer| {
+                            printer.print_hline((offset, 0), printer.size.x, " ");
                             printer.print((offset, 0), "..");
                         });
                     }
+
+                    // draw center string
+                    if draw_center {
+                        printer.with_color(style, |printer| {
+                            printer.print((center_offset, 0), &center);
+                        });
+
+                        // center string cut off indicator
+                        let max_length = printer.size.x.saturating_sub(right.width() + 1);
+                        if max_length < center_offset + center.width() {
+                            let offset = max_length.saturating_sub(1);
+                            printer.with_color(style, |printer| {
+                                printer.print((offset, 0), "..");
+                            });
+                        }
+                    }
+
+                    // draw right string
+                    let offset = HAlign::Right.get_offset(right.width(), printer.size.x);
+
+                    printer.with_color(style, |printer| {
+                        printer.print((offset, 0), &right);
+                    });
+                };
+
+                draw_row(printer, style);
+
+                // The playing row fills with the album's colour as the track plays,
+                // so a glance at a list says how far through it is. The selected row
+                // keeps its highlight: two effects on one row reads as neither.
+                if currently_playing && self.selected != i {
+                    let played = self.played_cells(printer.size.x);
+                    if played > 0 {
+                        let theme = *printer.theme.palette.custom("playing").unwrap();
+                        let lit = ColorStyle::new(
+                            ColorType::Color(crate::ui::accent::current(theme)),
+                            style.back,
+                        );
+                        draw_row(&printer.cropped((played, 1)), lit);
+                    }
                 }
-
-                // draw right string
-                let offset = HAlign::Right.get_offset(right.width(), printer.size.x);
-
-                printer.with_color(style, |printer| {
-                    printer.print((offset, 0), &right);
-                });
             }
         });
     }
@@ -811,5 +849,76 @@ impl<I: ListItem + Clone> ViewExt for ListView<I> {
         };
 
         Ok(CommandResult::Ignored)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+
+    use crate::config::Config;
+    use crate::events::EventManager;
+    use crate::library::Library;
+    use crate::model::playable::Playable;
+    use crate::model::track::Track;
+    use crate::queue::Queue;
+    use crate::spotify::{PlayerEvent, Spotify};
+
+    use super::ListView;
+
+    fn track(title: &str, duration: u32) -> Playable {
+        Playable::Track(Track {
+            id: Some(title.to_string()),
+            uri: format!("spotify:track:{title}"),
+            title: title.to_string(),
+            track_number: 1,
+            disc_number: 1,
+            duration,
+            artists: vec!["Juno Reactor".to_string()],
+            artist_ids: vec![],
+            album: Some("Shango".to_string()),
+            album_id: None,
+            album_artists: vec![],
+            cover_url: None,
+            url: String::new(),
+            added_at: None,
+            list_index: 0,
+            is_local: false,
+            is_playable: Some(true),
+        })
+    }
+
+    /// A list of one playing track, paused `elapsed` into it.
+    fn list(duration: u32, elapsed: Duration) -> ListView<Playable> {
+        let cfg = Config::new_for_test();
+        let ev = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), ev.clone());
+        let library = Library::new_for_test(ev.clone(), spotify.clone(), cfg.clone());
+        spotify.update_status(PlayerEvent::Paused(elapsed));
+        let tracks = vec![track("Solaris", duration)];
+        let queue = Arc::new(Queue::new_for_test(
+            tracks.clone(),
+            Some(0),
+            spotify,
+            cfg,
+            library.clone(),
+        ));
+        ListView::new(Arc::new(RwLock::new(tracks)), queue, library)
+    }
+
+    #[test]
+    fn the_playing_row_lights_up_as_far_as_the_track_has_played() {
+        let quarter = list(100_000, Duration::from_millis(25_000));
+        assert_eq!(quarter.played_cells(40), 10);
+        // The fill is clamped to the row, whatever the clock says.
+        assert_eq!(quarter.played_cells(0), 0);
+        assert_eq!(list(100_000, Duration::from_secs(600)).played_cells(40), 40);
+    }
+
+    #[test]
+    fn a_track_with_no_length_lights_nothing_up() {
+        // An item still loading has no length to measure progress against.
+        assert_eq!(list(0, Duration::from_secs(5)).played_cells(40), 0);
     }
 }

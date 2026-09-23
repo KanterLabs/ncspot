@@ -75,7 +75,7 @@ Here are some auxiliary features you may wish to enable:
 
 | Feature           | Default | Description                                                                                |
 |-------------------|---------|--------------------------------------------------------------------------------------------|
-| `album_art`       | on      | Draw the cover beside the metadata in the Now Playing view.                                |
+| `album_art`       | on      | Draw the cover in the Now Playing view and beside quick search results, and take the interface tint from it. |
 | `cover`           | off     | Add a screen to show the album art.                                                        |
 | `mpris`           | on      | Control `ncspot` via dbus. See [Arch Wiki: MPRIS](https://wiki.archlinux.org/title/MPRIS). |
 | `notify`          | on      | Send a notification to show what's playing.                                                |

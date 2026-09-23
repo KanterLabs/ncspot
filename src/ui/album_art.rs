@@ -1,13 +1,30 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
-use cursive::theme::{Color, ColorStyle, ColorType};
+use cursive::theme::{Color, ColorStyle, ColorType, PaletteColor};
 use cursive::{Printer, Vec2};
 use image::imageops::FilterType;
 use log::debug;
 
 use crate::events::EventManager;
+use crate::ui::anim::{blend, blendable, fade, lift};
+
+/// How long a cover takes to fade up out of the card once it has been decoded, so
+/// it arrives rather than popping in a frame after the text.
+const FADE: Duration = Duration::from_millis(320);
+/// Covers kept decoded at once. The card needs one, a list of results needs one
+/// per row, and a handful more costs a few hundred kilobytes.
+const MAX_LOADED: usize = 12;
+/// Cell grids kept at once. One cover can be scaled to several sizes at the same
+/// time: the card's, and the thumbnail in the list behind it.
+const MAX_SCALED: usize = 24;
+
+/// Redraws asked for while a cover fades in. The rest of the UI only refreshes a
+/// couple of times a second, which is not enough to see a fade, so the fade drives
+/// its own frames and then stops.
+const FADE_FRAMES: u32 = 12;
 
 /// The quadrant blocks, indexed by which of a cell's four subpixels take the
 /// foreground colour: bit 0 is top left, 1 top right, 2 bottom left, 3 bottom
@@ -22,8 +39,8 @@ const QUADRANTS: [&str; 16] = [
 struct Loaded {
     url: String,
     image: image::RgbImage,
-    /// The cover's own colour, for tinting the card it is drawn in.
-    accent: Option<Color>,
+    /// When this cover became drawable, which is where its fade in starts.
+    shown_at: Instant,
 }
 
 /// One printed cell: a block glyph and the two colours it is drawn in.
@@ -48,8 +65,10 @@ struct Scaled {
 /// own buffer as half blocks, so the art composes with everything drawn around it
 /// and needs no terminal graphics protocol.
 pub struct AlbumArt {
-    loaded: Arc<RwLock<Option<Loaded>>>,
-    scaled: RwLock<Option<Scaled>>,
+    /// Decoded covers, least recently used first.
+    loaded: Arc<RwLock<Vec<Loaded>>>,
+    /// Cell grids, least recently used first.
+    scaled: RwLock<Vec<Scaled>>,
     pending: Arc<RwLock<HashSet<String>>>,
     events: EventManager,
 }
@@ -58,17 +77,25 @@ impl AlbumArt {
     pub fn new(events: EventManager) -> Self {
         Self {
             loaded: Arc::default(),
-            scaled: RwLock::new(None),
+            scaled: RwLock::default(),
             pending: Arc::default(),
             events,
         }
     }
 
-    /// Draw the cover at `url` into `size` cells at `offset`.
+    /// Draw the cover at `url` into `size` cells at `offset`, lifted `glow` of the
+    /// way towards white so the art can pulse with the music.
     ///
     /// Returns false when the cover is not ready yet; the caller lays out without it
     /// and gets a redraw once the fetch lands.
-    pub fn draw(&self, printer: &Printer<'_, '_>, offset: Vec2, size: Vec2, url: &str) -> bool {
+    pub fn draw(
+        &self,
+        printer: &Printer<'_, '_>,
+        offset: Vec2,
+        size: Vec2,
+        url: &str,
+        glow: f32,
+    ) -> bool {
         if size.x == 0 || size.y == 0 {
             return false;
         }
@@ -77,35 +104,49 @@ impl AlbumArt {
             return false;
         }
 
+        // How far into its fade this cover is. Taken before the grid is locked, so
+        // the two locks are never held at once.
+        let amount = self
+            .loaded
+            .read()
+            .unwrap()
+            .iter()
+            .find(|loaded| loaded.url == url)
+            .map(|loaded| fade(loaded.shown_at.elapsed(), FADE))
+            .unwrap_or(1.0);
+        let card = printer.theme.palette[PaletteColor::Background];
+        // A theme that leaves the background to the terminal gives nothing to fade
+        // out of, so those themes get the coarser dim attribute for the first half
+        // of the fade rather than no fade at all.
+        let dim = !blendable(card) && amount < 0.55;
+
         let scaled = self.scaled.read().unwrap();
-        let Some(scaled) = scaled.as_ref() else {
+        let Some(scaled) = scaled
+            .iter()
+            .find(|scaled| scaled.url == url && scaled.size == size)
+        else {
             return false;
         };
         for row in 0..size.y {
             for column in 0..size.x {
                 let cell = scaled.cells[row * size.x + column];
                 let style = ColorStyle::new(
-                    ColorType::Color(cell.foreground),
-                    ColorType::Color(cell.background),
+                    ColorType::Color(lift(blend(card, cell.foreground, amount), glow)),
+                    ColorType::Color(lift(blend(card, cell.background, amount), glow)),
                 );
                 printer.with_color(style, |printer| {
-                    printer.print((offset.x + column, offset.y + row), cell.glyph);
+                    let print = |printer: &Printer<'_, '_>| {
+                        printer.print((offset.x + column, offset.y + row), cell.glyph)
+                    };
+                    if dim {
+                        printer.with_effect(cursive::theme::Effect::Dim, print);
+                    } else {
+                        print(printer);
+                    }
                 });
             }
         }
         true
-    }
-
-    /// The cover's own colour, once it is loaded: the most present colour that is
-    /// vivid enough to read as a highlight. None for a cover with no such colour,
-    /// so the caller keeps its theme colour.
-    pub fn accent(&self, url: &str) -> Option<Color> {
-        self.loaded
-            .read()
-            .unwrap()
-            .as_ref()
-            .filter(|loaded| loaded.url == url)
-            .and_then(|loaded| loaded.accent)
     }
 
     /// Whether a cover for `url` is already loaded, scaling it to `size` if needed.
@@ -113,8 +154,8 @@ impl AlbumArt {
         self.loaded
             .read()
             .unwrap()
-            .as_ref()
-            .is_some_and(|loaded| loaded.url == url)
+            .iter()
+            .any(|loaded| loaded.url == url)
     }
 
     /// Make sure `self.scaled` holds this url at this size. False if not loaded yet.
@@ -123,14 +164,14 @@ impl AlbumArt {
             .scaled
             .read()
             .unwrap()
-            .as_ref()
-            .is_some_and(|scaled| scaled.url == url && scaled.size == size)
+            .iter()
+            .any(|scaled| scaled.url == url && scaled.size == size)
         {
             return true;
         }
 
         let loaded = self.loaded.read().unwrap();
-        let Some(loaded) = loaded.as_ref().filter(|loaded| loaded.url == url) else {
+        let Some(loaded) = loaded.iter().find(|loaded| loaded.url == url) else {
             return false;
         };
 
@@ -159,11 +200,16 @@ impl AlbumArt {
             })
             .collect();
 
-        *self.scaled.write().unwrap() = Some(Scaled {
+        let mut grids = self.scaled.write().unwrap();
+        grids.retain(|scaled| !(scaled.url == url && scaled.size == size));
+        grids.push(Scaled {
             url: url.to_string(),
             size,
             cells,
         });
+        while grids.len() > MAX_SCALED {
+            grids.remove(0);
+        }
         true
     }
 
@@ -182,25 +228,53 @@ impl AlbumArt {
         let events = self.events.clone();
         thread::spawn(move || {
             let image = fetch(&url);
+            let arrived = image.is_some();
             if let Some(image) = image {
-                *loaded.write().unwrap() = Some(Loaded {
+                let mut covers = loaded.write().unwrap();
+                covers.retain(|cover| cover.url != url);
+                covers.push(Loaded {
                     url: url.clone(),
-                    accent: accent_of(&image),
                     image,
+                    shown_at: Instant::now(),
                 });
-                events.trigger();
+                while covers.len() > MAX_LOADED {
+                    covers.remove(0);
+                }
             }
             pending.write().unwrap().remove(&url);
+
+            // Drive the fade in. Without these the cover would appear at whatever
+            // opacity the next unrelated redraw happened to catch it at.
+            if arrived {
+                for _ in 0..FADE_FRAMES {
+                    if !events.try_trigger() {
+                        break;
+                    }
+                    thread::sleep(FADE / FADE_FRAMES);
+                }
+            }
         });
+    }
+
+    /// Drop the covers loaded longest ago once the cache outgrows its budget.
+    #[cfg(test)]
+    fn trim_loaded(&self) {
+        let mut covers = self.loaded.write().unwrap();
+        while covers.len() > MAX_LOADED {
+            covers.remove(0);
+        }
     }
 
     /// Install an already decoded cover, so tests do not need the network.
     #[cfg(test)]
     pub fn load_for_test(&self, url: &str, image: image::RgbImage) {
-        *self.loaded.write().unwrap() = Some(Loaded {
+        self.loaded.write().unwrap().push(Loaded {
             url: url.to_string(),
-            accent: accent_of(&image),
             image,
+            // Past its fade already, so a test renders the cover at full strength.
+            shown_at: Instant::now()
+                .checked_sub(FADE)
+                .unwrap_or_else(Instant::now),
         });
     }
 }
@@ -404,6 +478,13 @@ pub fn prefetch_covers(urls: Vec<String>) {
     });
 }
 
+/// The colour of the cover at `url`, fetching and decoding it if that is what it
+/// takes. Meant for the one call made when the playing track changes, not for
+/// drawing: it does the work on the calling thread.
+pub fn accent_for(url: &str) -> Option<Color> {
+    accent_of(&fetch(url)?)
+}
+
 /// Read the cover from the shared cover cache, downloading it first if needed.
 fn fetch(url: &str) -> Option<image::RgbImage> {
     let path = crate::utils::cache_path_for_url(url.to_string());
@@ -431,7 +512,7 @@ fn fetch(url: &str) -> Option<image::RgbImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::AlbumArt;
+    use super::{AlbumArt, MAX_LOADED};
     use crate::events::EventManager;
     use cursive::Vec2;
     use cursive::theme::Color;
@@ -462,7 +543,7 @@ mod tests {
 
         assert!(art.prepare("cover", Vec2::new(2, 2)));
         let scaled = art.scaled.read().unwrap();
-        let scaled = scaled.as_ref().unwrap();
+        let scaled = scaled.last().expect("the grid was cached");
         assert_eq!(scaled.size, Vec2::new(2, 2));
         assert_eq!(scaled.cells.len(), 4);
 
@@ -555,12 +636,35 @@ mod tests {
     }
 
     #[test]
-    fn rescaling_replaces_the_cached_grid() {
+    fn one_cover_can_be_held_at_several_sizes_at_once() {
+        // The card and a thumbnail of the same cover are on screen together, so
+        // scaling for one must not throw the other away.
         let art = AlbumArt::new(EventManager::new_for_test());
         art.load_for_test("cover", image());
         assert!(art.prepare("cover", Vec2::new(2, 2)));
         assert!(art.prepare("cover", Vec2::new(4, 3)));
+
         let scaled = art.scaled.read().unwrap();
-        assert_eq!(scaled.as_ref().unwrap().cells.len(), 12);
+        let cells = |size: Vec2| {
+            scaled
+                .iter()
+                .find(|scaled| scaled.size == size)
+                .map(|scaled| scaled.cells.len())
+        };
+        assert_eq!(cells(Vec2::new(2, 2)), Some(4));
+        assert_eq!(cells(Vec2::new(4, 3)), Some(12));
+    }
+
+    #[test]
+    fn the_cover_cache_stays_within_its_budget() {
+        let art = AlbumArt::new(EventManager::new_for_test());
+        for index in 0..MAX_LOADED + 3 {
+            art.load_for_test(&format!("cover {index}"), image());
+        }
+        art.trim_loaded();
+        assert_eq!(art.loaded.read().unwrap().len(), MAX_LOADED);
+        // The covers that went are the ones loaded longest ago.
+        assert!(!art.is_ready("cover 0"));
+        assert!(art.is_ready(&format!("cover {}", MAX_LOADED + 2)));
     }
 }

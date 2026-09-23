@@ -326,6 +326,10 @@ impl View for Layout {
             view.draw(printer);
         }
 
+        // Over the screen, under the statusbar: an overlay that covered the track
+        // you are listening to would be a strange thing to put on screen.
+        crate::ui::osd::draw(printer);
+
         self.statusbar
             .draw(&printer.offset((0, printer.size.y - 2 - cmdline_height)));
 

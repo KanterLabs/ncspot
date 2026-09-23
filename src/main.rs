@@ -34,6 +34,7 @@ mod theme;
 mod traits;
 mod ui;
 mod utils;
+mod waveform;
 
 #[cfg(unix)]
 mod ipc;
