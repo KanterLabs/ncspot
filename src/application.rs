@@ -2,10 +2,11 @@ use std::error::Error;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use cursive::traits::Nameable;
 use cursive::{Cursive, CursiveRunner};
-use log::{error, info, trace};
+use log::{debug, error, info, trace};
 
 #[cfg(unix)]
 use signal_hook::{consts::SIGHUP, consts::SIGTERM, iterator::Signals};
@@ -34,7 +35,7 @@ pub fn setup_logging(filename: &Path) -> Result<(), fern::InitError> {
         .format(|out, message, record| {
             out.finish(format_args!(
                 "{} [{}] [{}] {}",
-                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S%.3f]"),
                 record.target(),
                 record.level(),
                 message
@@ -58,6 +59,21 @@ pub struct UserDataInner {
 
 /// The global Tokio runtime for running asynchronous tasks.
 pub static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// When the process started, for reporting how long each part of startup took.
+static STARTUP: OnceLock<Instant> = OnceLock::new();
+
+/// Note that a stage of startup has finished, with the time since the process began. Only visible
+/// with `--debug`, where it is the first thing to look at when startup feels slow.
+pub fn mark_startup_phase(phase: &str) {
+    let elapsed = STARTUP.get_or_init(Instant::now).elapsed();
+    debug!("startup: {phase} at {}ms", elapsed.as_millis());
+}
+
+/// Start the startup clock, as early in `main` as possible.
+pub fn begin_startup_clock() {
+    STARTUP.get_or_init(Instant::now);
+}
 
 /// The representation of an ncspot application.
 pub struct Application {
@@ -93,8 +109,11 @@ impl Application {
             )
             .unwrap();
 
+        mark_startup_phase("runtime ready");
+
         let configuration = Arc::new(Config::new(configuration_file_path));
         let theme = configuration.build_theme();
+        mark_startup_phase("configuration read");
 
         // Connect to Spotify before the terminal is taken over, because a rejected login has to
         // be answered on stdout. The Web API token is not fetched here: it is renewed on demand
@@ -106,6 +125,7 @@ impl Application {
         if let Err(e) = authentication::ensure_rspotify_token() {
             error!("Failed to get rspotify token: {e}");
         }
+        mark_startup_phase("credentials ready");
 
         println!("Connecting to Spotify..");
 
@@ -125,9 +145,12 @@ impl Application {
             }
         };
 
+        mark_startup_phase("spotify session open");
+
         // DON'T USE STDOUT AFTER THIS CALL!
         let mut cursive = create_cursive().map_err(|error| error.to_string())?;
         event_manager.attach_cursive(cursive.cb_sink().clone());
+        mark_startup_phase("terminal ready");
 
         cursive.set_theme(theme.clone());
 
@@ -141,6 +164,8 @@ impl Application {
             spotify.clone(),
             configuration.clone(),
         ));
+
+        mark_startup_phase("library created");
 
         let queue = Arc::new(queue::Queue::new(
             spotify.clone(),
@@ -254,6 +279,7 @@ impl Application {
         }
 
         cursive.add_fullscreen_layer(layout.with_name("main"));
+        mark_startup_phase("views built");
 
         Ok(Self {
             queue,
@@ -271,9 +297,16 @@ impl Application {
         let mut signals =
             Signals::new([SIGTERM, SIGHUP]).expect("could not register signal handler");
 
+        let mut first_frame = true;
+
         // cursive event loop
         while self.cursive.is_running() {
             self.cursive.step();
+
+            if first_frame {
+                mark_startup_phase("first frame drawn");
+                first_frame = false;
+            }
             #[cfg(feature = "cover")]
             self.cursive
                 .call_on_name("cover", |view: &mut ui::cover::CoverView| {

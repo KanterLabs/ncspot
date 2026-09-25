@@ -5,7 +5,7 @@ extern crate serde;
 
 use std::{path::PathBuf, process::exit};
 
-use application::{Application, setup_logging};
+use application::{Application, begin_startup_clock, setup_logging};
 use config::set_configuration_base_path;
 use log::error;
 use ncspot::program_arguments;
@@ -43,6 +43,8 @@ mod ipc;
 mod mpris;
 
 fn main() -> Result<(), String> {
+    begin_startup_clock();
+
     // Set a custom backtrace hook that writes the backtrace to a file instead of stdout, since
     // stdout is most likely in use by Cursive.
     panic::register_backtrace_panic_handler();
