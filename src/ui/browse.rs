@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::thread;
 
 use cursive::Cursive;
 use cursive::view::ViewWrapper;
@@ -18,9 +19,19 @@ pub struct BrowseView {
 
 impl BrowseView {
     pub fn new(queue: Arc<Queue>, library: Arc<Library>) -> Self {
-        let categories = queue.get_spotify().api.categories();
-        let list = ListView::new(categories.items.clone(), queue, library);
-        categories.apply_pagination(list.get_pagination());
+        // The categories come from the Web API, and this runs while the interface is still being
+        // built: fetching them here would hold the first frame back by however long Spotify takes
+        // to answer, which is the whole of startup if the endpoint is rate limiting. Start with an
+        // empty list and fill it in from a worker instead.
+        let categories = Arc::new(RwLock::new(Vec::new()));
+        let list = ListView::new(categories.clone(), queue.clone(), library.clone());
+        let pagination = list.get_pagination().clone();
+
+        thread::spawn(move || {
+            let fetched = queue.get_spotify().api.categories().into_store(categories);
+            fetched.apply_pagination(&pagination);
+            library.trigger_redraw();
+        });
 
         Self { list }
     }

@@ -205,6 +205,8 @@ impl Application {
             }
         }
 
+        mark_startup_phase("playback restored");
+
         #[cfg(unix)]
         let ipc = if let Ok(runtime_directory) = utils::create_runtime_directory() {
             Some(
@@ -232,6 +234,7 @@ impl Application {
         cmd_manager.register_keybindings(&mut cursive);
 
         cursive.set_user_data(Rc::new(UserDataInner { cmd: cmd_manager }));
+        mark_startup_phase("commands registered");
 
         let search =
             ui::search::SearchView::new(event_manager.clone(), queue.clone(), library.clone());
@@ -248,6 +251,8 @@ impl Application {
 
         #[cfg(feature = "cover")]
         let coverview = ui::cover::CoverView::new(queue.clone(), library.clone(), &configuration);
+
+        mark_startup_phase("screens constructed");
 
         let status = ui::statusbar::StatusBar::new(
             queue.clone(),

@@ -45,6 +45,22 @@ impl<I: ListItem + Clone> ApiResult<I> {
         }
     }
 
+    /// Move the items fetched so far into `store`, and have later pages land there too.
+    ///
+    /// This lets a view hand its own list to a result that was fetched after the view was built,
+    /// which is how the fetch is kept off the thread that draws.
+    pub fn into_store(self, store: Arc<RwLock<Vec<I>>>) -> Self {
+        store
+            .write()
+            .unwrap()
+            .extend(self.items.read().unwrap().iter().cloned());
+
+        Self {
+            items: store,
+            ..self
+        }
+    }
+
     fn offset(&self) -> u32 {
         *self.offset.read().unwrap()
     }

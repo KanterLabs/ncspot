@@ -25,6 +25,9 @@ use crate::model::track::Track;
 use crate::spotify_worker::WorkerCommand;
 use crate::ui::pagination::{ApiPage, ApiResult};
 
+/// The longest a rate limit will be waited out before the call is abandoned instead.
+const MAX_RETRY_AFTER_SECS: u64 = 10;
+
 /// Convenient wrapper around the rspotify web API functionality.
 #[derive(Clone)]
 pub struct WebApi {
@@ -143,9 +146,18 @@ impl WebApi {
                         429 => {
                             let waiting_duration = response
                                 .header("Retry-After")
-                                .and_then(|v| v.parse::<u64>().ok());
-                            debug!("rate limit hit. waiting {waiting_duration:?} seconds");
-                            thread::sleep(Duration::from_secs(waiting_duration.unwrap_or(0)));
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(0);
+
+                            // Spotify can ask for a wait of minutes, which is longer than any
+                            // caller should be held for; give up and let it try again later.
+                            if waiting_duration > MAX_RETRY_AFTER_SECS {
+                                error!("rate limited for {waiting_duration}s, giving up on call");
+                                return None;
+                            }
+
+                            debug!("rate limit hit. waiting {waiting_duration} seconds");
+                            thread::sleep(Duration::from_secs(waiting_duration));
                             api_call(&self.api).ok()
                         }
                         401 => {
