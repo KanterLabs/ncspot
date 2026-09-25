@@ -29,6 +29,9 @@ const DEBOUNCE: Duration = Duration::from_millis(120);
 /// Results asked of Spotify. More than are shown, so the cache is worth reusing
 /// for the next keystroke and costs no extra round trip.
 const FETCH: u32 = 20;
+/// Station tracks whose art is fetched up front when a radio starts. The rest
+/// of the station is long enough that its art can wait until it is asked for.
+const STATION_PREFETCH: usize = 8;
 /// How many library hits can take the top of the list before catalogue results.
 const LOCAL_SLOTS: usize = 2;
 const WIDTH: usize = 62;
@@ -258,17 +261,23 @@ impl QuickSearch {
                 debug!("no recommendations for {id}");
                 return;
             };
-            let station: Vec<Playable> = found
-                .tracks
+            // Recommendations arrive without an album, and so without cover art;
+            // looking them up in full is what gives the whole station artwork
+            // rather than just the seed.
+            let tracks = spotify.api.hydrate_tracks(&found.tracks);
+            let station: Vec<Playable> = tracks
                 .iter()
-                .map(Track::from)
                 // The seed is already playing, so it does not want queueing again.
                 .filter(|track| track.uri != seed)
+                .cloned()
                 .map(Playable::Track)
                 .collect();
             if !station.is_empty() {
                 queue.append_next(&station);
             }
+            // Only the front of the station is worth warming; the rest will have
+            // been fetched long before it is reached.
+            prefetch_covers(&tracks[..tracks.len().min(STATION_PREFETCH)]);
             events.trigger();
         });
     }

@@ -280,7 +280,7 @@ impl ListItem for Track {
                 .recommendations(None, None, Some(vec![id]))
                 .ok()
                 .map(|r| r.tracks)
-                .map(|tracks| tracks.iter().map(Self::from).collect())
+                .map(|tracks| spotify.api.hydrate_tracks(&tracks))
         } else {
             None
         };

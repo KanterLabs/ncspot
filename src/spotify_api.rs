@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -352,6 +353,47 @@ impl WebApi {
             )
         })
         .ok_or(())
+    }
+
+    /// Fill in the album a [`SimplifiedTrack`] does not carry, by looking the
+    /// tracks up in full.
+    ///
+    /// Recommendations come back simplified, which means no album and so no
+    /// cover art. Looking them up is what keeps the art coming for every track
+    /// of a station rather than only the seed. Tracks that cannot be looked up
+    /// keep their simplified form, so a failed batch costs artwork, not tracks.
+    pub fn hydrate_tracks(&self, tracks: &[SimplifiedTrack]) -> Vec<Track> {
+        /// Ids the "several tracks" endpoint accepts in one request.
+        const BATCH: usize = 50;
+
+        let mut full: HashMap<String, Track> = HashMap::new();
+        for chunk in tracks.chunks(BATCH) {
+            let ids: Vec<TrackId> = chunk.iter().filter_map(|track| track.id.clone()).collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let found = self.api_with_retry(|api| {
+                #[allow(deprecated)]
+                api.tracks(ids.clone(), Some(Market::FromToken))
+            });
+            for track in found.unwrap_or_default() {
+                let track = Track::from(&track);
+                if let Some(id) = track.id.clone() {
+                    full.insert(id, track);
+                }
+            }
+        }
+
+        tracks
+            .iter()
+            .map(|track| {
+                track
+                    .id
+                    .as_ref()
+                    .and_then(|id| full.remove(id.id()))
+                    .unwrap_or_else(|| Track::from(track))
+            })
+            .collect()
     }
 
     /// Search for items of `searchtype` using the provided `query`. Limit the results to `limit`

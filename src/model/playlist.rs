@@ -310,7 +310,7 @@ impl ListItem for Playlist {
             )
             .ok()
             .map(|r| r.tracks)
-            .map(|tracks| tracks.iter().map(Track::from).collect());
+            .map(|tracks| spotify.api.hydrate_tracks(&tracks));
 
         recommendations.map(|tracks| {
             ListView::new(
