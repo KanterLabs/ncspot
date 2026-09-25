@@ -59,10 +59,16 @@ impl ContextMenu {
         track: Track,
     ) -> NamedView<AddToPlaylistMenu> {
         let mut list_select: SelectView<Playlist> = SelectView::new();
-        let current_user_id = library.user_id.as_ref().unwrap();
+
+        // The owner is unknown until the startup lookup answers, in which case only playlists
+        // that anyone may add to can be offered.
+        let current_user_id = library.user_id();
 
         for list in library.playlists.read().unwrap().iter() {
-            if current_user_id == &list.owner_id || list.collaborative {
+            let owned = current_user_id
+                .as_ref()
+                .is_some_and(|id| id == &list.owner_id);
+            if owned || list.collaborative {
                 list_select.add_item(list.name.clone(), list.clone());
             }
         }

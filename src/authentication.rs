@@ -7,8 +7,7 @@ use librespot_core::cache::Cache;
 use librespot_oauth::OAuthClientBuilder;
 use log::{error, info, warn};
 
-use crate::config::{self, Config};
-use crate::spotify::Spotify;
+use crate::config;
 
 pub const SPOTIFY_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 pub const NCSPOT_CLIENT_ID: &str = "d420a117a32841c2b3474932e49fb54b";
@@ -71,33 +70,29 @@ pub fn get_client_redirect_uri() -> String {
     redirect_url
 }
 
-/// Get credentials for use with librespot. This first tries to get cached credentials. If no cached
-/// credentials are available it will initiate the OAuth2 login process.
-pub fn get_credentials(configuration: &Config) -> Result<RespotCredentials, String> {
-    let mut credentials = {
-        let cache = Cache::new(Some(config::cache_path("librespot")), None, None, None)
-            .expect("Could not create librespot cache");
-        let cached_credentials = cache.credentials();
-        match cached_credentials {
-            Some(c) => {
-                info!("Using cached credentials");
-                c
-            }
-            None => {
-                info!("Attempting to login via OAuth2");
-                credentials_prompt(None)?
-            }
-        }
-    };
+/// Get credentials for use with librespot. This returns cached credentials if there are any, and
+/// only falls back to the OAuth2 login process when there are none.
+///
+/// The credentials are deliberately not verified here. Doing so used to cost a whole extra
+/// session handshake on every startup, and the session that playback needs is opened moments
+/// later anyway: that one reports a rejection, and the caller offers a fresh login then.
+pub fn get_credentials() -> Result<RespotCredentials, String> {
+    let cache = Cache::new(Some(config::cache_path("librespot")), None, None, None)
+        .expect("Could not create librespot cache");
 
-    while let Err(error) = Spotify::test_credentials(configuration, credentials.clone()) {
-        let error_msg = format!("{error}");
-        credentials = credentials_prompt(Some(error_msg))?;
+    match cache.credentials() {
+        Some(credentials) => {
+            info!("Using cached credentials");
+            Ok(credentials)
+        }
+        None => {
+            info!("Attempting to login via OAuth2");
+            credentials_prompt(None)
+        }
     }
-    Ok(credentials)
 }
 
-fn credentials_prompt(error_message: Option<String>) -> Result<RespotCredentials, String> {
+pub fn credentials_prompt(error_message: Option<String>) -> Result<RespotCredentials, String> {
     if let Some(message) = error_message {
         eprintln!("Connection error: {message}");
     }
@@ -121,15 +116,45 @@ pub fn create_credentials() -> Result<RespotCredentials, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Read the cached Web API token, if one has been stored and can still be parsed.
+fn cached_rspotify_token() -> Option<rspotify::Token> {
+    let path = config::cache_path("rspotify_token.json");
+    let token_json = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<rspotify::Token>(&token_json).ok()
+}
+
+/// Perform the Web API authorization if, and only if, it needs the user's browser.
+///
+/// This has to happen before the TUI takes over the terminal, since the prompt is written to
+/// stdout. A token that is merely expired needs no prompt: it is renewed over the network by the
+/// first API call that wants it, off the main thread, so startup doesn't wait for it here.
+pub fn ensure_rspotify_token() -> Result<(), String> {
+    let usable = cached_rspotify_token().is_some_and(|token| {
+        !token.is_expired()
+            || token
+                .refresh_token
+                .as_deref()
+                .is_some_and(|t| !t.is_empty())
+    });
+
+    if usable {
+        return Ok(());
+    }
+
+    let token = create_rspotify_token()?;
+    write_token(&config::cache_path("rspotify_token.json"), &token);
+    Ok(())
+}
+
+/// Get a usable Web API token, renewing the cached one over the network when it has expired.
+///
+/// This never falls back to a fresh authorization, which would write a prompt to a stdout the TUI
+/// owns and then block on a browser. [`ensure_rspotify_token`] covers that case before the TUI
+/// exists.
 pub fn get_rspotify_token() -> Result<rspotify::Token, String> {
     let path = config::cache_path("rspotify_token.json");
-    let token = if let Ok(token_json) = fs::read_to_string(&path) {
-        serde_json::from_str::<rspotify::Token>(&token_json).ok()
-    } else {
-        None
-    };
 
-    if let Some(t) = token {
+    if let Some(t) = cached_rspotify_token() {
         if !t.is_expired() {
             return Ok(t);
         }
@@ -160,9 +185,7 @@ pub fn get_rspotify_token() -> Result<rspotify::Token, String> {
         }
     }
 
-    let t = create_rspotify_token()?;
-    write_token(&path, &t);
-    Ok(t)
+    Err("no usable API token; restart ncspot to authorize again".to_string())
 }
 
 pub fn create_rspotify_token() -> Result<rspotify::Token, String> {

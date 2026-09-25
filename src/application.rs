@@ -16,7 +16,7 @@ use crate::config::{Config, PlaybackState};
 use crate::events::{Event, EventManager};
 use crate::library::Library;
 use crate::queue::Queue;
-use crate::spotify::{PlayerEvent, Spotify};
+use crate::spotify::{PlayerEvent, SessionError, Spotify};
 use crate::ui::create_cursive;
 use crate::{authentication, ui, utils};
 use crate::{command, queue, spotify};
@@ -94,17 +94,40 @@ impl Application {
             .unwrap();
 
         let configuration = Arc::new(Config::new(configuration_file_path));
-        let credentials = authentication::get_credentials(&configuration)?;
         let theme = configuration.build_theme();
 
-        if let Err(e) = authentication::get_rspotify_token() {
+        // Connect to Spotify before the terminal is taken over, because a rejected login has to
+        // be answered on stdout. The Web API token is not fetched here: it is renewed on demand
+        // by the first call that needs one, all of which happen off this thread.
+        let event_manager = EventManager::new();
+        let mut credentials = authentication::get_credentials()?;
+
+        // Only prompts when there is no Web API token to renew at all, which is the first run.
+        if let Err(e) = authentication::ensure_rspotify_token() {
             error!("Failed to get rspotify token: {e}");
         }
 
         println!("Connecting to Spotify..");
 
+        let mut spotify = loop {
+            match spotify::Spotify::new(
+                event_manager.clone(),
+                credentials.clone(),
+                configuration.clone(),
+            ) {
+                Ok(spotify) => break spotify,
+                Err(error) => {
+                    // A refused session, as opposed to one that couldn't be opened at all, is
+                    // answered by offering a fresh login.
+                    let session_error = error.downcast::<SessionError>()?;
+                    credentials = authentication::credentials_prompt(Some(session_error.0))?;
+                }
+            }
+        };
+
         // DON'T USE STDOUT AFTER THIS CALL!
         let mut cursive = create_cursive().map_err(|error| error.to_string())?;
+        event_manager.attach_cursive(cursive.cb_sink().clone());
 
         cursive.set_theme(theme.clone());
 
@@ -112,11 +135,6 @@ impl Application {
         cursive.add_global_callback(cursive::event::Event::CtrlChar('z'), |_s| unsafe {
             libc::raise(libc::SIGTSTP);
         });
-
-        let event_manager = EventManager::new(cursive.cb_sink().clone());
-
-        let mut spotify =
-            spotify::Spotify::new(event_manager.clone(), credentials, configuration.clone())?;
 
         let library = Arc::new(Library::new(
             event_manager.clone(),

@@ -1,3 +1,5 @@
+use std::sync::{Arc, RwLock};
+
 use crossbeam_channel::{Receiver, Sender, TryIter, unbounded};
 use cursive::{CbSink, Cursive};
 
@@ -17,7 +19,11 @@ pub enum Event {
 pub struct EventManager {
     tx: Sender<Event>,
     rx: Receiver<Event>,
-    cursive_sink: CbSink,
+    /// The sink into the Cursive event loop, absent until the TUI has been created. The manager
+    /// is handed out to background workers before that happens, so that connecting to Spotify can
+    /// overlap with bringing the interface up; events sent in the meantime wait in the channel and
+    /// are drained by the first pass of the event loop.
+    cursive_sink: Arc<RwLock<Option<CbSink>>>,
 }
 
 impl EventManager {
@@ -26,17 +32,24 @@ impl EventManager {
     #[cfg(test)]
     pub fn new_for_test() -> Self {
         let (cb_sink, _): (CbSink, _) = crossbeam_channel::unbounded();
-        Self::new(cb_sink)
+        let manager = Self::new();
+        manager.attach_cursive(cb_sink);
+        manager
     }
 
-    pub fn new(cursive_sink: CbSink) -> Self {
+    pub fn new() -> Self {
         let (tx, rx) = unbounded();
 
         Self {
             tx,
             rx,
-            cursive_sink,
+            cursive_sink: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Attach the Cursive event loop, so that events start waking it up.
+    pub fn attach_cursive(&self, cursive_sink: CbSink) {
+        *self.cursive_sink.write().unwrap() = Some(cursive_sink);
     }
 
     /// Return a non-blocking iterator over the messages awaiting handling. Calling `next()` on the
@@ -53,12 +66,18 @@ impl EventManager {
 
     /// Send a no-op to the Cursive event loop to trigger immediate processing of events.
     pub fn trigger(&self) {
-        self.cursive_sink.send(Box::new(Cursive::noop)).unwrap();
+        if let Some(sink) = self.cursive_sink.read().unwrap().as_ref() {
+            sink.send(Box::new(Cursive::noop)).unwrap();
+        }
     }
 
     /// Like [`Self::trigger`], but report a closed event loop instead of panicking.
-    /// Background animation threads use this to notice that the UI is shutting down.
+    /// Background animation threads use this to notice that the UI is shutting down. An event
+    /// loop that hasn't been attached yet counts as live: it is still on its way up.
     pub fn try_trigger(&self) -> bool {
-        self.cursive_sink.send(Box::new(Cursive::noop)).is_ok()
+        match self.cursive_sink.read().unwrap().as_ref() {
+            Some(sink) => sink.send(Box::new(Cursive::noop)).is_ok(),
+            None => true,
+        }
     }
 }

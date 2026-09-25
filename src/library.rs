@@ -43,8 +43,10 @@ pub struct Library {
     pub playlists: Arc<RwLock<Vec<Playlist>>>,
     pub shows: Arc<RwLock<Vec<Show>>>,
     pub is_done: Arc<RwLock<bool>>,
-    pub user_id: Option<String>,
-    pub display_name: Option<String>,
+    /// Identity of the logged in user. Fetched in the background during startup, so both are
+    /// briefly absent while the interface is already up.
+    user_id: Arc<RwLock<Option<String>>>,
+    display_name: Arc<RwLock<Option<String>>>,
     ev: EventManager,
     spotify: Spotify,
     pub cfg: Arc<Config>,
@@ -61,8 +63,8 @@ impl Library {
             playlists: Arc::new(RwLock::new(Vec::new())),
             shows: Arc::new(RwLock::new(Vec::new())),
             is_done: Arc::new(RwLock::new(false)),
-            user_id: None,
-            display_name: None,
+            user_id: Arc::new(RwLock::new(None)),
+            display_name: Arc::new(RwLock::new(None)),
             ev,
             spotify,
             cfg,
@@ -70,10 +72,6 @@ impl Library {
     }
 
     pub fn new(ev: EventManager, spotify: Spotify, cfg: Arc<Config>) -> Self {
-        let current_user = spotify.api.current_user().ok();
-        let user_id = current_user.as_ref().map(|u| u.id.id().to_string());
-        let display_name = current_user.as_ref().and_then(|u| u.display_name.clone());
-
         let library = Self {
             tracks: Arc::new(RwLock::new(Vec::new())),
             albums: Arc::new(RwLock::new(Vec::new())),
@@ -81,15 +79,42 @@ impl Library {
             playlists: Arc::new(RwLock::new(Vec::new())),
             shows: Arc::new(RwLock::new(Vec::new())),
             is_done: Arc::new(RwLock::new(false)),
-            user_id,
-            display_name,
+            user_id: Arc::new(RwLock::new(None)),
+            display_name: Arc::new(RwLock::new(None)),
             ev,
             spotify,
             cfg,
         };
 
+        library.fetch_current_user();
         library.update_library();
         library
+    }
+
+    /// The id of the logged in user, absent until the first Web API call of startup has answered.
+    pub fn user_id(&self) -> Option<String> {
+        self.user_id.read().unwrap().clone()
+    }
+
+    /// The display name of the logged in user, absent until the first Web API call of startup has
+    /// answered, or when the user has not set one.
+    pub fn display_name(&self) -> Option<String> {
+        self.display_name.read().unwrap().clone()
+    }
+
+    /// Look up who is logged in, off the main thread so the interface doesn't wait on it.
+    fn fetch_current_user(&self) {
+        let library = self.clone();
+        thread::spawn(move || {
+            let Ok(user) = library.spotify.api.current_user() else {
+                error!("could not determine the logged in user");
+                return;
+            };
+
+            *library.user_id.write().unwrap() = Some(user.id.id().to_string());
+            *library.display_name.write().unwrap() = user.display_name.clone();
+            library.trigger_redraw();
+        });
     }
 
     /// Load cached items from the file at `cache_path` into the given `store`.
@@ -853,9 +878,8 @@ impl Library {
 
     /// Check whether `playlist` is in the library but not created by the library's owner.
     pub fn is_followed_playlist(&self, playlist: &Playlist) -> bool {
-        self.user_id
-            .as_ref()
-            .map(|id| id != &playlist.owner_id)
+        self.user_id()
+            .map(|id| id != playlist.owner_id)
             .unwrap_or(false)
     }
 

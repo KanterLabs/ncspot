@@ -36,6 +36,9 @@ use crate::traits::ListItem;
 /// percent.
 pub const VOLUME_PERCENT: u16 = ((u16::MAX as f64) * 1.0 / 100.0) as u16;
 
+/// How long to wait before retrying a session that couldn't be reopened.
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+
 /// Events sent by the [Player].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum PlayerEvent {
@@ -44,6 +47,18 @@ pub enum PlayerEvent {
     Stopped,
     FinishedTrack,
 }
+
+/// A failure to open a Spotify session, most often credentials that are no longer accepted.
+#[derive(Debug)]
+pub struct SessionError(pub String);
+
+impl fmt::Display for SessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Error for SessionError {}
 
 /// Wrapper around a worker thread that exposes methods to safely control it.
 #[derive(Clone)]
@@ -89,16 +104,20 @@ impl Spotify {
 
         let (user_tx, user_rx) = oneshot::channel();
         spotify.start_worker(Some(user_tx))?;
-        let user = ASYNC_RUNTIME.get().unwrap().block_on(user_rx).ok();
+
+        // Wait for the session handshake, which is also what tells us whether the credentials
+        // are still good. The Web API token is left alone here: nothing on this thread needs it,
+        // and it is renewed on demand by the first call that does.
+        let user = match ASYNC_RUNTIME.get().unwrap().block_on(user_rx) {
+            Ok(Ok(user)) => Some(user),
+            Ok(Err(error)) => return Err(Box::new(SessionError(error))),
+            Err(_) => return Err(Box::new(SessionError("worker thread died".to_string()))),
+        };
+
         let volume = cfg.state().volume;
         spotify.set_volume(volume, false);
 
         spotify.api.set_worker_channel(spotify.channel.clone());
-        spotify
-            .api
-            .update_token()
-            .map(move |h| ASYNC_RUNTIME.get().unwrap().block_on(h).ok());
-
         spotify.api.set_user(user);
 
         Ok(spotify)
@@ -132,7 +151,7 @@ impl Spotify {
     /// in user.
     pub fn start_worker(
         &self,
-        user_tx: Option<oneshot::Sender<String>>,
+        user_tx: Option<oneshot::Sender<Result<String, String>>>,
     ) -> Result<(), Box<dyn Error>> {
         let (tx, rx) = mpsc::unbounded_channel();
         *self.channel.write().unwrap() = Some(tx);
@@ -174,20 +193,6 @@ impl Spotify {
             session_config.ap_port = Some(ap_port)
         }
         session_config
-    }
-
-    pub fn test_credentials(
-        cfg: &config::Config,
-        credentials: Credentials,
-    ) -> Result<Session, librespot_core::Error> {
-        let config = Self::session_config(cfg);
-        let _guard = ASYNC_RUNTIME.get().unwrap().enter();
-        let session = Session::new(config, None);
-        ASYNC_RUNTIME
-            .get()
-            .unwrap()
-            .block_on(session.connect(credentials, true))
-            .map(|_| session)
     }
 
     /// Create a [Session] that respects the user configuration in `cfg` and with the given
@@ -254,7 +259,7 @@ impl Spotify {
         commands: mpsc::UnboundedReceiver<WorkerCommand>,
         cfg: Arc<config::Config>,
         credentials: Credentials,
-        user_tx: Option<oneshot::Sender<String>>,
+        user_tx: Option<oneshot::Sender<Result<String, String>>>,
         volume: u16,
         backend: SinkBuilder,
         tap: Arc<AudioTap>,
@@ -273,10 +278,28 @@ impl Spotify {
             ..Default::default()
         };
 
-        let session = Self::create_session(&cfg, credentials)
-            .await
-            .expect("Could not create session");
-        user_tx.map(|tx| tx.send(session.username()));
+        let session = match Self::create_session(&cfg, credentials).await {
+            Ok(session) => session,
+            Err(error) => {
+                error!("could not create session: {error}");
+                *worker_channel.write().unwrap() = None;
+                match user_tx {
+                    // Startup: the main thread is waiting on this and will offer a fresh login.
+                    Some(tx) => {
+                        tx.send(Err(error.to_string())).ok();
+                    }
+                    // A reconnect after the session dropped. Leave the interface up rather than
+                    // taking the process down with it, and wait before asking for another try so
+                    // that an outage doesn't turn into a spin.
+                    None => {
+                        tokio::time::sleep(RECONNECT_DELAY).await;
+                        events.send(Event::SessionDied);
+                    }
+                }
+                return;
+            }
+        };
+        user_tx.map(|tx| tx.send(Ok(session.username())));
 
         let mixer_factory_opt = librespot_playback::mixer::find(Some(SoftMixer::NAME));
         let factory = mixer_factory_opt.expect("could not find softvol mixer factory");

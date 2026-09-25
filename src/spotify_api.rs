@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use crate::application::ASYNC_RUNTIME;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use log::{debug, error, info};
 use rspotify::http::HttpError;
@@ -15,7 +14,6 @@ use rspotify::model::{
 };
 use rspotify::{AuthCodeSpotify, ClientError, ClientResult, Config, prelude::*};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use crate::model::album::Album;
 use crate::model::artist::Artist;
@@ -38,6 +36,9 @@ pub struct WebApi {
     worker_channel: Arc<RwLock<Option<mpsc::UnboundedSender<WorkerCommand>>>>,
     /// Time at which the token expires.
     token_expiration: Arc<RwLock<DateTime<Utc>>>,
+    /// Held while the token is being renewed, so that concurrent API calls wait for a single
+    /// renewal instead of each starting one of their own.
+    token_renewal: Arc<Mutex<()>>,
 }
 
 impl Default for WebApi {
@@ -56,6 +57,7 @@ impl Default for WebApi {
             user: None,
             worker_channel: Arc::new(RwLock::new(None)),
             token_expiration: Arc::new(RwLock::new(Utc::now())),
+            token_renewal: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -79,37 +81,50 @@ impl WebApi {
         self.worker_channel = channel;
     }
 
-    /// Update the authentication token when it expires.
-    pub fn update_token(&self) -> Option<JoinHandle<()>> {
-        {
-            let token_expiration = self.token_expiration.read().unwrap();
-            let now = Utc::now();
-            let delta = *token_expiration - now;
+    /// Whether the stored token has more than five minutes of life left in it.
+    fn token_is_fresh(&self) -> bool {
+        let delta = *self.token_expiration.read().unwrap() - Utc::now();
+        delta.num_seconds() > 60 * 5
+    }
 
-            // token is valid for 5 more minutes, renewal is not necessary yet
-            if delta.num_seconds() > 60 * 5 {
-                return None;
-            }
-
-            info!("Token will expire in {delta}, renewing");
+    /// Make sure a usable token is stored before an API call goes out, renewing it if it is
+    /// missing or about to expire.
+    ///
+    /// This runs on the calling thread rather than the async runtime: every caller has to wait
+    /// for the token anyway, and the renewal lock means that a burst of parallel calls (the
+    /// library bootstrap, a search fanning out over several endpoints) performs one renewal
+    /// between them instead of one each.
+    pub fn refresh_token_if_needed(&self) {
+        if self.token_is_fresh() {
+            return;
         }
 
-        let api_token = self.api.token.clone();
-        let api_token_expiration = self.token_expiration.clone();
-        Some(ASYNC_RUNTIME.get().unwrap().spawn_blocking(move || {
-            match crate::authentication::get_rspotify_token() {
-                Ok(token) => {
-                    let expires_at = token
-                        .expires_at
-                        .unwrap_or_else(|| Utc::now() + ChronoDuration::hours(1));
-                    *api_token.lock().unwrap() = Some(token);
-                    *api_token_expiration.write().unwrap() = expires_at;
-                }
-                Err(e) => {
-                    error!("Failed to update token: {e}");
-                }
+        let _renewal = self.token_renewal.lock().unwrap();
+
+        // Another thread may have renewed the token while this one waited for the lock.
+        if self.token_is_fresh() {
+            return;
+        }
+
+        info!("API token missing or about to expire, renewing");
+        match crate::authentication::get_rspotify_token() {
+            Ok(token) => {
+                let expires_at = token
+                    .expires_at
+                    .unwrap_or_else(|| Utc::now() + ChronoDuration::hours(1));
+                *self.api.token.lock().unwrap() = Some(token);
+                *self.token_expiration.write().unwrap() = expires_at;
             }
-        }))
+            Err(e) => {
+                error!("Failed to update token: {e}");
+            }
+        }
+    }
+
+    /// Force a token renewal, used when the API rejects the current one.
+    fn force_token_refresh(&self) {
+        *self.token_expiration.write().unwrap() = Utc::now();
+        self.refresh_token_if_needed();
     }
 
     /// Execute `api_call` and retry once if a rate limit occurs.
@@ -117,6 +132,7 @@ impl WebApi {
     where
         F: Fn(&AuthCodeSpotify) -> ClientResult<R>,
     {
+        self.refresh_token_if_needed();
         let result = { api_call(&self.api) };
         match result {
             Ok(v) => Some(v),
@@ -134,8 +150,8 @@ impl WebApi {
                         }
                         401 => {
                             debug!("token unauthorized. trying refresh..");
-                            self.update_token()
-                                .and_then(move |_| api_call(&self.api).ok())
+                            self.force_token_refresh();
+                            api_call(&self.api).ok()
                         }
                         _ => {
                             error!("unhandled api error: {response:?}");

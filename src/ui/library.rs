@@ -17,7 +17,7 @@ use crate::ui::tabbedview::TabbedView;
 
 pub struct LibraryView {
     tabs: TabbedView,
-    display_name: Option<String>,
+    library: Arc<Library>,
 }
 
 impl LibraryView {
@@ -60,14 +60,7 @@ impl LibraryView {
 
         Self {
             tabs: tabview,
-            display_name: {
-                let hide_username = library.cfg.values().hide_display_names.unwrap_or(false);
-                if hide_username {
-                    None
-                } else {
-                    library.display_name.clone()
-                }
-            },
+            library,
         }
     }
 }
@@ -78,10 +71,17 @@ impl ViewWrapper for LibraryView {
 
 impl ViewExt for LibraryView {
     fn title(&self) -> String {
-        if let Some(name) = &self.display_name {
-            format!("Library of {name}")
-        } else {
-            "Library".to_string()
+        // Read the name on every draw rather than at construction: it is fetched in the
+        // background, so it usually isn't known yet when this view is built.
+        let hide_username = self
+            .library
+            .cfg
+            .values()
+            .hide_display_names
+            .unwrap_or(false);
+        match self.library.display_name() {
+            Some(name) if !hide_username => format!("Library of {name}"),
+            _ => "Library".to_string(),
         }
     }
 

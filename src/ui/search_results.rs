@@ -1,4 +1,3 @@
-use crate::application::ASYNC_RUNTIME;
 use crate::command::Command;
 use crate::commands::CommandResult;
 use crate::events::EventManager;
@@ -389,13 +388,9 @@ impl SearchResultsView {
     pub fn run_search(&mut self) {
         let query = self.search_term.clone();
 
-        // check if API token refresh is necessary before commencing multiple
-        // requests to avoid deadlock, as the parallel requests might
-        // simultaneously try to refresh the token
-        self.spotify
-            .api
-            .update_token()
-            .map(move |h| ASYNC_RUNTIME.get().unwrap().block_on(h).ok());
+        // Renew the API token up front if it is due, so the parallel requests below don't each
+        // try to renew it themselves.
+        self.spotify.api.refresh_token_if_needed();
 
         // is the query a Spotify URI?
         if let Ok(uritype) = query.parse() {
