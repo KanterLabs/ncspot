@@ -129,9 +129,15 @@ impl<I: ListItem + Clone> ListView<I> {
                 Some("waiting for it to let us back in".to_string()),
             ),
             (false, LoadState::Loading) => ("Loading your library\u{2026}".to_string(), None),
+            // Being told to wait is not the same as not getting through, and only one
+            // of the two is worth checking the network over.
+            (false, LoadState::Failed) if self.library.retry_wait().is_some() => (
+                "Spotify is busy".to_string(),
+                Some("the library will fill in once it lets us back in".to_string()),
+            ),
             (false, LoadState::Failed) => (
                 "Couldn't reach Spotify".to_string(),
-                Some("the library will fill in once it is back".to_string()),
+                Some("the library will keep trying in the background".to_string()),
             ),
             // Titles here are phrases like `Similar to Album "X"`, which read badly
             // inside a sentence, so the message stays general.

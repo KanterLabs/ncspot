@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::iter::Iterator;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,6 +33,13 @@ const RATE_LIMIT_ATTEMPTS: u32 = 3;
 /// large library takes a while to walk, and quitting part way through used to throw
 /// away everything the run had fetched.
 const PLAYLIST_SAVE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long to wait before the first attempt at a library that failed, doubling up to
+/// [`LIBRARY_RETRY_MAX`]. Long enough not to be part of the problem when the problem is
+/// Spotify asking to be left alone.
+const LIBRARY_RETRY_INITIAL: Duration = Duration::from_secs(60);
+/// The longest gap between attempts at a library that keeps failing.
+const LIBRARY_RETRY_MAX: Duration = Duration::from_secs(600);
 
 /// Cached tracks database filename.
 const CACHE_TRACKS: &str = "tracks.db";
@@ -70,6 +78,9 @@ pub struct Library {
     /// Set when a fetch gave up, so an empty list is not passed off as an empty
     /// library.
     fetch_failed: Arc<RwLock<bool>>,
+    /// Bumped by every update, so that a retry still sleeping from an earlier one
+    /// stands down instead of fetching alongside the update that replaced it.
+    update_generation: Arc<AtomicU64>,
     /// Identity of the logged in user. Fetched in the background during startup, so both are
     /// briefly absent while the interface is already up.
     user_id: Arc<RwLock<Option<String>>>,
@@ -91,6 +102,7 @@ impl Library {
             shows: Arc::new(RwLock::new(Vec::new())),
             is_done: Arc::new(RwLock::new(false)),
             fetch_failed: Arc::new(RwLock::new(false)),
+            update_generation: Arc::new(AtomicU64::new(0)),
             user_id: Arc::new(RwLock::new(None)),
             display_name: Arc::new(RwLock::new(None)),
             ev,
@@ -108,6 +120,7 @@ impl Library {
             shows: Arc::new(RwLock::new(Vec::new())),
             is_done: Arc::new(RwLock::new(false)),
             fetch_failed: Arc::new(RwLock::new(false)),
+            update_generation: Arc::new(AtomicU64::new(0)),
             user_id: Arc::new(RwLock::new(None)),
             display_name: Arc::new(RwLock::new(None)),
             ev,
@@ -319,8 +332,11 @@ impl Library {
         *self.is_done.write().unwrap() = false;
         *self.fetch_failed.write().unwrap() = false;
 
+        let generation = self.update_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let library = self.clone();
         thread::spawn(move || {
+            let current = || library.update_generation.load(Ordering::SeqCst) == generation;
+
             // A rate limit takes down every fetch at once and is usually over in seconds,
             // so wait it out here rather than leaving the library half loaded until
             // something asks for an update again.
@@ -339,10 +355,35 @@ impl Library {
 
                 debug!("rate limited, retrying the library in {}s", wait.as_secs());
                 thread::sleep(wait);
+
+                if !current() {
+                    return;
+                }
             }
 
             *library.is_done.write().unwrap() = true;
             library.ev.trigger();
+
+            // Whatever went wrong, keep trying in the background: an empty library
+            // telling the user it will fill in once Spotify is back has to mean it.
+            // Slowly, and never while a rate limit is still running, so a retry
+            // cannot be what keeps it running.
+            let mut backoff = LIBRARY_RETRY_INITIAL;
+            while *library.fetch_failed.read().unwrap() {
+                let wait = library.retry_wait().unwrap_or(backoff).max(backoff);
+                debug!("library incomplete, trying again in {}s", wait.as_secs());
+                thread::sleep(wait);
+
+                if !current() {
+                    return;
+                }
+
+                *library.fetch_failed.write().unwrap() = false;
+                library.fetch_all();
+                library.ev.trigger();
+
+                backoff = (backoff * 2).min(LIBRARY_RETRY_MAX);
+            }
         });
     }
 
