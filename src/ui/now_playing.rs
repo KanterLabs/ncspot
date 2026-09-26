@@ -2004,9 +2004,11 @@ mod tests {
                 _ => unreachable!("the helper builds a track"),
             }
         })];
-        // Alternate loud and quiet through the track, so its shape is unmistakable.
+        // Ramp from quiet to loud across the track. Alternating every other bucket
+        // would read as a shape at one width and as a flat average at another, and the
+        // bar is a different width wherever the album art is not built in.
         for bucket in 0..256u128 {
-            let level = if bucket % 2 == 0 { 0.95 } else { 0.15 };
+            let level = 0.05 + 0.9 * (bucket as f32 / 255.0);
             store.record(id, bucket * 880, 225_000, level);
         }
 
