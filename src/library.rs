@@ -4,7 +4,7 @@ use std::iter::Iterator;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, error, info};
 use rspotify::model::Id;
@@ -27,6 +27,11 @@ use crate::ui::osd;
 /// windows is long enough to outlast the bursts a restart causes, short enough that a
 /// genuinely throttled account is told so rather than retried forever.
 const RATE_LIMIT_ATTEMPTS: u32 = 3;
+
+/// How often the playlist cache is written while playlists are still downloading. A
+/// large library takes a while to walk, and quitting part way through used to throw
+/// away everything the run had fetched.
+const PLAYLIST_SAVE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Cached tracks database filename.
 const CACHE_TRACKS: &str = "tracks.db";
@@ -456,6 +461,7 @@ impl Library {
         let mut stale_lists = self.playlists.read().unwrap().clone();
         let mut list_order = Vec::new();
 
+        let mut last_save = Instant::now();
         let lists_page = self.spotify.api.current_user_playlist();
         let mut lists_batch = Some(lists_page.items.read().unwrap().clone());
         while let Some(lists) = lists_batch {
@@ -475,6 +481,16 @@ impl Library {
                     self.append_or_update(playlist);
                     // trigger redraw
                     self.trigger_redraw();
+
+                    // Write what has been fetched so far, so that quitting during a
+                    // long download keeps it rather than starting over next time.
+                    if last_save.elapsed() >= PLAYLIST_SAVE_INTERVAL {
+                        self.save_cache(
+                            &config::cache_path(CACHE_PLAYLISTS),
+                            &self.playlists.read().unwrap(),
+                        );
+                        last_save = Instant::now();
+                    }
                 }
             }
             lists_batch = lists_page.next();
