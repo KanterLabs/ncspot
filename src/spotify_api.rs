@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use log::{debug, error, info};
@@ -27,6 +27,9 @@ use crate::ui::pagination::{ApiPage, ApiResult};
 
 /// The longest a rate limit will be waited out before the call is abandoned instead.
 const MAX_RETRY_AFTER_SECS: u64 = 10;
+/// Added to a rate limit window before retrying, so the retry lands after it has
+/// expired rather than on the boundary.
+const RATE_LIMIT_GRACE: Duration = Duration::from_secs(1);
 
 /// Convenient wrapper around the rspotify web API functionality.
 #[derive(Clone)]
@@ -42,6 +45,9 @@ pub struct WebApi {
     /// Held while the token is being renewed, so that concurrent API calls wait for a single
     /// renewal instead of each starting one of their own.
     token_renewal: Arc<Mutex<()>>,
+    /// When the rate limit Spotify last reported is due to expire, if a call has been
+    /// abandoned for one. Callers that can retry ask for the remaining wait.
+    rate_limited_until: Arc<RwLock<Option<Instant>>>,
 }
 
 impl Default for WebApi {
@@ -61,6 +67,7 @@ impl Default for WebApi {
             worker_channel: Arc::new(RwLock::new(None)),
             token_expiration: Arc::new(RwLock::new(Utc::now())),
             token_renewal: Arc::new(Mutex::new(())),
+            rate_limited_until: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -131,6 +138,33 @@ impl WebApi {
         self.refresh_token_if_needed();
     }
 
+    /// Record a rate limit that was too long to wait out, so that callers able to come
+    /// back later know when to.
+    fn note_rate_limit(&self, wait: Duration) {
+        let until = Instant::now() + wait;
+        let mut limited = self.rate_limited_until.write().unwrap();
+
+        // One rate limit takes down every call in flight, and one notice says as much as
+        // seven identical ones would.
+        if !limited.is_some_and(|previous| previous > Instant::now()) {
+            crate::ui::osd::notify(format!("Spotify is busy, retrying in {}s", wait.as_secs()));
+        }
+
+        // Keep the longer window, so a concurrent call reporting a shorter one cannot
+        // bring the retry forward into the limit that is still running.
+        if limited.is_none_or(|previous| previous < until) {
+            *limited = Some(until);
+        }
+    }
+
+    /// How long until the rate limit that abandoned a call expires, if one is running.
+    pub fn rate_limit_wait(&self) -> Option<Duration> {
+        let until = (*self.rate_limited_until.read().unwrap())?;
+        until
+            .checked_duration_since(Instant::now())
+            .map(|remaining| remaining + RATE_LIMIT_GRACE)
+    }
+
     /// Execute `api_call` and retry once if a rate limit occurs.
     fn api_with_retry<F, R>(&self, api_call: F) -> Option<R>
     where
@@ -153,10 +187,10 @@ impl WebApi {
                             // Spotify can ask for a wait of minutes, which is longer than any
                             // caller should be held for; give up and let it try again later.
                             if waiting_duration > MAX_RETRY_AFTER_SECS {
-                                error!("rate limited for {waiting_duration}s, giving up on call");
-                                crate::ui::osd::notify(format!(
-                                    "Spotify is rate limiting us for {waiting_duration}s"
-                                ));
+                                error!(
+                                    "rate limited for {waiting_duration}s, abandoning call for now"
+                                );
+                                self.note_rate_limit(Duration::from_secs(waiting_duration));
                                 return None;
                             }
 
@@ -815,5 +849,44 @@ impl WebApi {
     /// Get details about the logged in user.
     pub fn current_user(&self) -> Result<PrivateUser, ()> {
         self.api_with_retry(|api| api.current_user()).ok_or(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rate_limit_is_reported_until_it_expires() {
+        let api = WebApi::new();
+        assert!(api.rate_limit_wait().is_none());
+
+        api.note_rate_limit(Duration::from_secs(17));
+        let wait = api
+            .rate_limit_wait()
+            .expect("the limit should still be running");
+        assert!(
+            wait > Duration::from_secs(17),
+            "the grace period is included"
+        );
+
+        *api.rate_limited_until.write().unwrap() = Some(Instant::now() - Duration::from_secs(1));
+        assert!(api.rate_limit_wait().is_none(), "an expired limit is over");
+    }
+
+    #[test]
+    fn the_longer_of_two_rate_limits_wins() {
+        let api = WebApi::new();
+
+        api.note_rate_limit(Duration::from_secs(30));
+        api.note_rate_limit(Duration::from_secs(5));
+
+        let wait = api
+            .rate_limit_wait()
+            .expect("the limit should still be running");
+        assert!(
+            wait > Duration::from_secs(29),
+            "a shorter concurrent limit must not bring the retry forward, got {wait:?}"
+        );
     }
 }

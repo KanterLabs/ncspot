@@ -22,6 +22,11 @@ use crate::model::track::Track;
 use crate::spotify::Spotify;
 use crate::ui::osd;
 
+/// How many times the library is fetched again while Spotify is rate limiting it. Three
+/// windows is long enough to outlast the bursts a restart causes, short enough that a
+/// genuinely throttled account is told so rather than retried forever.
+const RATE_LIMIT_ATTEMPTS: u32 = 3;
+
 /// Cached tracks database filename.
 const CACHE_TRACKS: &str = "tracks.db";
 
@@ -134,8 +139,14 @@ impl Library {
     fn note_fetch_failure(&self, what: &str) {
         error!("Failed to fetch {what}.");
         let mut failed = self.fetch_failed.write().unwrap();
-        if !*failed {
-            *failed = true;
+        if *failed {
+            return;
+        }
+        *failed = true;
+
+        // A rate limit is reported by the call that hit it, along with when it will be
+        // tried again, which is more use than naming each part it took down.
+        if self.spotify.api.rate_limit_wait().is_none() {
             osd::notify(format!("couldn't load your {what}"));
         }
     }
@@ -299,87 +310,111 @@ impl Library {
 
         let library = self.clone();
         thread::spawn(move || {
-            let t_tracks = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
-                        &config::cache_path(CACHE_TRACKS),
-                        library.tracks.write().unwrap().as_mut(),
-                    );
-                    library.fetch_tracks();
-                    library.save_cache(
-                        &config::cache_path(CACHE_TRACKS),
-                        &library.tracks.read().unwrap(),
-                    );
-                })
-            };
+            // A rate limit takes down every fetch at once and is usually over in seconds,
+            // so wait it out here rather than leaving the library half loaded until
+            // something asks for an update again.
+            for attempt in 1..=RATE_LIMIT_ATTEMPTS {
+                *library.fetch_failed.write().unwrap() = false;
+                library.fetch_all();
 
-            let t_albums = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
-                        &config::cache_path(CACHE_ALBUMS),
-                        library.albums.write().unwrap().as_mut(),
-                    );
-                    library.fetch_albums();
-                    library.save_cache(
-                        &config::cache_path(CACHE_ALBUMS),
-                        &library.albums.read().unwrap(),
-                    );
-                })
-            };
+                let Some(wait) = library.spotify.api.rate_limit_wait() else {
+                    break;
+                };
 
-            let t_artists = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
-                        &config::cache_path(CACHE_ARTISTS),
-                        library.artists.write().unwrap().as_mut(),
-                    );
-                    library.fetch_artists();
-                })
-            };
+                if attempt == RATE_LIMIT_ATTEMPTS {
+                    library.note_fetch_failure("library");
+                    break;
+                }
 
-            let t_playlists = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
-                        &config::cache_path(CACHE_PLAYLISTS),
-                        library.playlists.write().unwrap().as_mut(),
-                    );
-                    library.fetch_playlists();
-                    library.save_cache(
-                        &config::cache_path(CACHE_PLAYLISTS),
-                        &library.playlists.read().unwrap(),
-                    );
-                })
-            };
+                debug!("rate limited, retrying the library in {}s", wait.as_secs());
+                thread::sleep(wait);
+            }
 
-            let t_shows = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.fetch_shows();
-                })
-            };
-
-            t_tracks.join().unwrap();
-            t_artists.join().unwrap();
-
-            library.populate_artists();
-            library.save_cache(
-                &config::cache_path(CACHE_ARTISTS),
-                &library.artists.read().unwrap(),
-            );
-
-            t_albums.join().unwrap();
-            t_playlists.join().unwrap();
-            t_shows.join().unwrap();
-
-            let mut is_done = library.is_done.write().unwrap();
-            *is_done = true;
-
+            *library.is_done.write().unwrap() = true;
             library.ev.trigger();
         });
+    }
+
+    /// Fetch every part of the library at once, leaving whatever could not be fetched as
+    /// it was.
+    fn fetch_all(&self) {
+        let library = self.clone();
+
+        let t_tracks = {
+            let library = library.clone();
+            thread::spawn(move || {
+                library.load_cache(
+                    &config::cache_path(CACHE_TRACKS),
+                    library.tracks.write().unwrap().as_mut(),
+                );
+                library.fetch_tracks();
+                library.save_cache(
+                    &config::cache_path(CACHE_TRACKS),
+                    &library.tracks.read().unwrap(),
+                );
+            })
+        };
+
+        let t_albums = {
+            let library = library.clone();
+            thread::spawn(move || {
+                library.load_cache(
+                    &config::cache_path(CACHE_ALBUMS),
+                    library.albums.write().unwrap().as_mut(),
+                );
+                library.fetch_albums();
+                library.save_cache(
+                    &config::cache_path(CACHE_ALBUMS),
+                    &library.albums.read().unwrap(),
+                );
+            })
+        };
+
+        let t_artists = {
+            let library = library.clone();
+            thread::spawn(move || {
+                library.load_cache(
+                    &config::cache_path(CACHE_ARTISTS),
+                    library.artists.write().unwrap().as_mut(),
+                );
+                library.fetch_artists();
+            })
+        };
+
+        let t_playlists = {
+            let library = library.clone();
+            thread::spawn(move || {
+                library.load_cache(
+                    &config::cache_path(CACHE_PLAYLISTS),
+                    library.playlists.write().unwrap().as_mut(),
+                );
+                library.fetch_playlists();
+                library.save_cache(
+                    &config::cache_path(CACHE_PLAYLISTS),
+                    &library.playlists.read().unwrap(),
+                );
+            })
+        };
+
+        let t_shows = {
+            let library = library.clone();
+            thread::spawn(move || {
+                library.fetch_shows();
+            })
+        };
+
+        t_tracks.join().unwrap();
+        t_artists.join().unwrap();
+
+        library.populate_artists();
+        library.save_cache(
+            &config::cache_path(CACHE_ARTISTS),
+            &library.artists.read().unwrap(),
+        );
+
+        t_albums.join().unwrap();
+        t_playlists.join().unwrap();
+        t_shows.join().unwrap();
     }
 
     /// Fetch the shows from the web API and save them to the local library.
