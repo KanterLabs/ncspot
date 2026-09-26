@@ -112,7 +112,7 @@ impl<I: ListItem + Clone> ListView<I> {
     /// A blank pane is the same picture whether the library is still arriving, the
     /// list really is empty, or the fetch failed, and the three want different things
     /// from the user: wait, add something, or check the connection.
-    fn empty_message(&self) -> (String, Option<&'static str>) {
+    fn empty_message(&self) -> (String, Option<String>) {
         if self.pagination.is_busy() {
             return ("Loading\u{2026}".to_string(), None);
         }
@@ -122,16 +122,22 @@ impl<I: ListItem + Clone> ListView<I> {
         let answered = self.pagination.max_content().is_some();
 
         match (answered, self.library.load_state()) {
+            // Waiting out a rate limit can take the better part of a minute, which
+            // reads as a hang unless the wait says what it is waiting for.
+            (false, LoadState::Loading) if self.library.retry_wait().is_some() => (
+                "Spotify is busy".to_string(),
+                Some("waiting for it to let us back in".to_string()),
+            ),
             (false, LoadState::Loading) => ("Loading your library\u{2026}".to_string(), None),
             (false, LoadState::Failed) => (
                 "Couldn't reach Spotify".to_string(),
-                Some("the library will fill in once it is back"),
+                Some("the library will fill in once it is back".to_string()),
             ),
             // Titles here are phrases like `Similar to Album "X"`, which read badly
             // inside a sentence, so the message stays general.
             _ => (
                 "Nothing here yet".to_string(),
-                Some("press ? for keybindings"),
+                Some("press ? for keybindings".to_string()),
             ),
         }
     }
@@ -156,7 +162,7 @@ impl<I: ListItem + Clone> ListView<I> {
         if let Some(hint) = hint
             && row + 2 < printer.size.y
         {
-            write(row + 2, hint, ColorStyle::secondary());
+            write(row + 2, &hint, ColorStyle::secondary());
         }
     }
 
@@ -1024,7 +1030,7 @@ mod tests {
         library.set_load_state_for_test(LoadState::Ready);
         let (message, hint) = view.empty_message();
         assert_eq!(message, "Nothing here yet");
-        assert_eq!(hint, Some("press ? for keybindings"));
+        assert_eq!(hint.as_deref(), Some("press ? for keybindings"));
     }
 
     #[test]

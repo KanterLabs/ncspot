@@ -4,6 +4,7 @@ use std::iter::Iterator;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::thread;
+use std::time::Duration;
 
 use log::{debug, error, info};
 use rspotify::model::Id;
@@ -119,6 +120,11 @@ impl Library {
     pub fn set_load_state_for_test(&self, state: LoadState) {
         *self.is_done.write().unwrap() = state != LoadState::Loading;
         *self.fetch_failed.write().unwrap() = state == LoadState::Failed;
+    }
+
+    /// How long until the library tries again, when a rate limit is holding it up.
+    pub fn retry_wait(&self) -> Option<Duration> {
+        self.spotify.api.rate_limit_wait()
     }
 
     /// Where the library has got to, for views that have to explain an empty list.
