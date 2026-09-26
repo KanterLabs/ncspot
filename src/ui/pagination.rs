@@ -15,6 +15,10 @@ pub struct ApiResult<I> {
     pub total: u32,
     pub items: Arc<RwLock<Vec<I>>>,
     fetch_page: Arc<FetchPageFn<I>>,
+    /// Whether the first page could not be fetched. Without this an empty result
+    /// means both "nothing there" and "never found out", and a caller that syncs
+    /// against it would take the second for the first and delete everything.
+    failed: bool,
 }
 
 impl<I: ListItem + Clone> ApiResult<I> {
@@ -33,6 +37,7 @@ impl<I: ListItem + Clone> ApiResult<I> {
                 total: first_page.total,
                 items,
                 fetch_page: fetch_page.clone(),
+                failed: false,
             }
         } else {
             Self {
@@ -41,8 +46,14 @@ impl<I: ListItem + Clone> ApiResult<I> {
                 total: 0,
                 items,
                 fetch_page: fetch_page.clone(),
+                failed: true,
             }
         }
+    }
+
+    /// Whether the first page could not be fetched, as opposed to coming back empty.
+    pub fn failed(&self) -> bool {
+        self.failed
     }
 
     /// Move the items fetched so far into `store`, and have later pages land there too.
@@ -174,5 +185,40 @@ impl<I: ListItem + Clone> Pagination<I> {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::track::Track;
+
+    fn track_page(offset: u32, total: u32, items: Vec<Track>) -> ApiPage<Track> {
+        ApiPage {
+            offset,
+            total,
+            items,
+        }
+    }
+
+    #[test]
+    fn an_empty_result_is_not_a_failed_one() {
+        let result = ApiResult::new(50, Arc::new(move |_| Some(track_page(0, 0, Vec::new()))));
+
+        assert!(
+            !result.failed(),
+            "an account with nothing saved answered the question"
+        );
+        assert_eq!(result.total, 0);
+    }
+
+    #[test]
+    fn a_result_that_never_answered_is_a_failed_one() {
+        let result: ApiResult<Track> = ApiResult::new(50, Arc::new(|_| None));
+
+        assert!(
+            result.failed(),
+            "a caller syncing against this would delete everything it has"
+        );
     }
 }

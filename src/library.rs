@@ -474,7 +474,13 @@ impl Library {
         debug!("loading shows");
 
         let mut saved_shows: Vec<Show> = Vec::new();
-        let mut shows_result = self.spotify.api.get_saved_shows(0).ok();
+        let Ok(first_page) = self.spotify.api.get_saved_shows(0) else {
+            // As with the playlists, an unanswered fetch must not be allowed to read
+            // as an empty library.
+            self.note_fetch_failure("podcasts");
+            return;
+        };
+        let mut shows_result = Some(first_page);
 
         while let Some(shows) = shows_result {
             saved_shows.extend(shows.items.iter().map(|show| (&show.show).into()));
@@ -504,6 +510,15 @@ impl Library {
 
         let mut last_save = Instant::now();
         let lists_page = self.spotify.api.current_user_playlist();
+
+        // Without this, a fetch that never got an answer looks exactly like an account
+        // with no playlists, and everything below treats the local copy as stale and
+        // deletes it, cache and all.
+        if lists_page.failed() {
+            self.note_fetch_failure("playlists");
+            return;
+        }
+
         let mut lists_batch = Some(lists_page.items.read().unwrap().clone());
         while let Some(lists) = lists_batch {
             for (index, remote) in lists.iter().enumerate() {
