@@ -20,6 +20,7 @@ use crate::model::playlist::Playlist;
 use crate::model::show::Show;
 use crate::model::track::Track;
 use crate::spotify::Spotify;
+use crate::ui::osd;
 
 /// Cached tracks database filename.
 const CACHE_TRACKS: &str = "tracks.db";
@@ -33,6 +34,18 @@ const CACHE_ARTISTS: &str = "artists.db";
 /// Cached playlists database filename.
 const CACHE_PLAYLISTS: &str = "playlists.db";
 
+/// How the library's contents stand, so a view showing an empty list can say why it
+/// is empty rather than leaving a blank pane that could mean anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoadState {
+    /// Still being fetched; what is on screen is whatever the cache held.
+    Loading,
+    /// Fetched, so an empty list really is empty.
+    Ready,
+    /// At least one fetch failed, so an empty list may not be the truth.
+    Failed,
+}
+
 /// The user library with all their saved tracks, albums, playlists... High level interface to the
 /// Spotify API used to manage items in the user library.
 #[derive(Clone)]
@@ -43,6 +56,9 @@ pub struct Library {
     pub playlists: Arc<RwLock<Vec<Playlist>>>,
     pub shows: Arc<RwLock<Vec<Show>>>,
     pub is_done: Arc<RwLock<bool>>,
+    /// Set when a fetch gave up, so an empty list is not passed off as an empty
+    /// library.
+    fetch_failed: Arc<RwLock<bool>>,
     /// Identity of the logged in user. Fetched in the background during startup, so both are
     /// briefly absent while the interface is already up.
     user_id: Arc<RwLock<Option<String>>>,
@@ -63,6 +79,7 @@ impl Library {
             playlists: Arc::new(RwLock::new(Vec::new())),
             shows: Arc::new(RwLock::new(Vec::new())),
             is_done: Arc::new(RwLock::new(false)),
+            fetch_failed: Arc::new(RwLock::new(false)),
             user_id: Arc::new(RwLock::new(None)),
             display_name: Arc::new(RwLock::new(None)),
             ev,
@@ -79,6 +96,7 @@ impl Library {
             playlists: Arc::new(RwLock::new(Vec::new())),
             shows: Arc::new(RwLock::new(Vec::new())),
             is_done: Arc::new(RwLock::new(false)),
+            fetch_failed: Arc::new(RwLock::new(false)),
             user_id: Arc::new(RwLock::new(None)),
             display_name: Arc::new(RwLock::new(None)),
             ev,
@@ -89,6 +107,48 @@ impl Library {
         library.fetch_current_user();
         library.update_library();
         library
+    }
+
+    /// Put the library into a given load state, for tests of views that react to it.
+    #[cfg(test)]
+    pub fn set_load_state_for_test(&self, state: LoadState) {
+        *self.is_done.write().unwrap() = state != LoadState::Loading;
+        *self.fetch_failed.write().unwrap() = state == LoadState::Failed;
+    }
+
+    /// Where the library has got to, for views that have to explain an empty list.
+    pub fn load_state(&self) -> LoadState {
+        if !*self.is_done.read().unwrap() {
+            LoadState::Loading
+        } else if *self.fetch_failed.read().unwrap() {
+            LoadState::Failed
+        } else {
+            LoadState::Ready
+        }
+    }
+
+    /// Record that part of the library could not be fetched, and say so on screen.
+    /// Only the first failure of a load is reported, since one lost connection tends
+    /// to take all five fetches down together and five panels would say no more than
+    /// one does.
+    fn note_fetch_failure(&self, what: &str) {
+        error!("Failed to fetch {what}.");
+        let mut failed = self.fetch_failed.write().unwrap();
+        if !*failed {
+            *failed = true;
+            osd::notify(format!("couldn't load your {what}"));
+        }
+    }
+
+    /// Whether the library may be changed yet, telling the user why not if it may
+    /// not. Saving a track needs the library loaded to know what it is changing, and
+    /// the commands used to return quietly, so the key simply appeared not to work.
+    fn ready_for_changes(&self) -> bool {
+        if *self.is_done.read().unwrap() {
+            return true;
+        }
+        osd::notify("still loading your library, try that again in a moment");
+        false
     }
 
     /// The id of the logged in user, absent until the first Web API call of startup has answered.
@@ -107,7 +167,7 @@ impl Library {
         let library = self.clone();
         thread::spawn(move || {
             let Ok(user) = library.spotify.api.current_user() else {
-                error!("could not determine the logged in user");
+                library.note_fetch_failure("account details");
                 return;
             };
 
@@ -188,7 +248,7 @@ impl Library {
 
     /// Delete the playlist with the given `id` if it exists.
     pub fn delete_playlist(&self, id: &str) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -235,6 +295,7 @@ impl Library {
     /// Update the local library and its cache on disk.
     pub fn update_library(&self) {
         *self.is_done.write().unwrap() = false;
+        *self.fetch_failed.write().unwrap() = false;
 
         let library = self.clone();
         thread::spawn(move || {
@@ -414,7 +475,7 @@ impl Library {
             debug!("artists page: {i}");
             i += 1;
             if page.is_err() {
-                error!("Failed to fetch artists.");
+                self.note_fetch_failure("artists");
                 return;
             }
             let page = page.unwrap();
@@ -473,7 +534,7 @@ impl Library {
             i += 1;
 
             if page.is_err() {
-                error!("Failed to fetch albums.");
+                self.note_fetch_failure("albums");
                 return;
             }
 
@@ -516,7 +577,7 @@ impl Library {
             i += 1;
 
             if page.is_err() {
-                error!("Failed to fetch tracks.");
+                self.note_fetch_failure("tracks");
                 return;
             }
             let page = page.unwrap();
@@ -645,7 +706,7 @@ impl Library {
 
     /// Save `tracks` to the user's library.
     pub fn save_tracks(&self, tracks: &[&Track]) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -685,7 +746,7 @@ impl Library {
 
     /// Remove `tracks` from the user's library.
     pub fn unsave_tracks(&self, tracks: &[&Track]) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -733,7 +794,7 @@ impl Library {
 
     /// Save `album` to the user's library.
     pub fn save_album(&self, album: &Album) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -765,7 +826,7 @@ impl Library {
 
     /// Remove `album` from the user's library.
     pub fn unsave_album(&self, album: &Album) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -802,7 +863,7 @@ impl Library {
 
     /// Follow `artist` as the logged in user.
     pub fn follow_artist(&self, artist: &Artist) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -837,7 +898,7 @@ impl Library {
 
     /// Unfollow `artist` as the logged in user.
     pub fn unfollow_artist(&self, artist: &Artist) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -885,7 +946,7 @@ impl Library {
 
     /// Add `playlist` to the user's library by following it as the logged in user.
     pub fn follow_playlist(&self, mut playlist: Playlist) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -922,7 +983,7 @@ impl Library {
 
     /// Save the `show` to the user's library.
     pub fn save_show(&self, show: &Show) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 
@@ -938,7 +999,7 @@ impl Library {
 
     /// Remove the `show` from the user's library.
     pub fn unsave_show(&self, show: &Show) {
-        if !*self.is_done.read().unwrap() {
+        if !self.ready_for_changes() {
             return;
         }
 

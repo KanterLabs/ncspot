@@ -120,6 +120,7 @@ impl WebApi {
             }
             Err(e) => {
                 error!("Failed to update token: {e}");
+                crate::ui::osd::notify("couldn't renew the Spotify token; restart to log in again");
             }
         }
     }
@@ -153,6 +154,9 @@ impl WebApi {
                             // caller should be held for; give up and let it try again later.
                             if waiting_duration > MAX_RETRY_AFTER_SECS {
                                 error!("rate limited for {waiting_duration}s, giving up on call");
+                                crate::ui::osd::notify(format!(
+                                    "Spotify is rate limiting us for {waiting_duration}s"
+                                ));
                                 return None;
                             }
 

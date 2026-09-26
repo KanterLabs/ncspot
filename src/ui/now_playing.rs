@@ -1245,9 +1245,12 @@ impl NowPlayingView {
         }
         let width = height * 2;
 
+        // Reserve the space even before the cover has arrived. Laying out without it
+        // and then finding room once it lands moved every line of the card sideways
+        // a second into the track; a plate that fills in is steadier than a card that
+        // rearranges itself.
         if !self.art.is_ready(&url) {
             self.art.prefetch(&url);
-            return None;
         }
         Some((url, Vec2::new(width, height)))
     }
@@ -1265,8 +1268,14 @@ impl NowPlayingView {
     #[cfg(feature = "album_art")]
     fn draw_art(&self, printer: &Printer<'_, '_>, offset: Vec2, size: Vec2, url: &str) {
         // The cover breathes with the kick, the same way the card's border does.
-        self.art
-            .draw(printer, offset, size, url, ART_GLOW * self.glow());
+        if self
+            .art
+            .draw(printer, offset, size, url, ART_GLOW * self.glow())
+        {
+            return;
+        }
+
+        crate::ui::album_art::draw_placeholder(printer, offset, size);
     }
 
     #[cfg(not(feature = "album_art"))]

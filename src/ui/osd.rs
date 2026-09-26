@@ -1,9 +1,15 @@
-//! The overlay that says what a keypress just did.
+//! The overlay that says what a keypress just did, and what went wrong.
 //!
 //! Volume and seek are the two commands whose effect is a number in the corner of
 //! a two line statusbar, which is no use at all from across the room. A key that
 //! changes one of them raises a panel in the middle of the screen with the new
 //! value drawn big, and the panel fades out a second later.
+//!
+//! The same panel carries notices. Without one, a failure has nowhere to go but the
+//! log, which is only written when `--debug` was passed, so an ordinary run would
+//! fail silently: a search that returned nothing, a library that could not be
+//! reached, a token that expired. Anything the user would otherwise be left
+//! guessing about goes through [`notify`].
 
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -30,17 +36,20 @@ const FRAMES: u32 = 18;
 const WIDTH: usize = 34;
 
 /// What the panel is showing.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Flash {
     /// A volume, 0 to 100.
     Volume(u16),
     /// A position in a track, both in milliseconds.
     Seek { elapsed: u128, duration: u32 },
+    /// Something the user needs told, which has no bar under it.
+    Notice(String),
 }
 
 impl Flash {
     fn label(&self) -> String {
         match self {
+            Self::Notice(message) => message.clone(),
             Self::Volume(percent) => format!("volume {percent}%"),
             Self::Seek { elapsed, duration } => format!(
                 "{} / {}",
@@ -53,6 +62,7 @@ impl Flash {
     /// How full the bar is drawn, 0 to 1.
     fn fraction(&self) -> f32 {
         match self {
+            Self::Notice(_) => 0.0,
             Self::Volume(percent) => (*percent as f32 / 100.0).clamp(0.0, 1.0),
             Self::Seek { elapsed, duration } => {
                 if *duration == 0 {
@@ -69,11 +79,38 @@ fn state() -> &'static RwLock<Option<(Flash, Instant)>> {
     STATE.get_or_init(RwLock::default)
 }
 
+/// The event loop to wake when a notice is raised.
+///
+/// Notices come from places with no view and no event manager to hand: a library
+/// worker, a failed API call several layers down. The panel's state is already
+/// process wide, so the way to reach the screen from those places is too.
+fn notifier() -> &'static RwLock<Option<EventManager>> {
+    static NOTIFIER: OnceLock<RwLock<Option<EventManager>>> = OnceLock::new();
+    NOTIFIER.get_or_init(RwLock::default)
+}
+
+/// Let [`notify`] reach the screen. Called once, as the interface comes up.
+pub fn attach(events: &EventManager) {
+    *notifier().write().unwrap() = Some(events.clone());
+}
+
+/// Tell the user something, on the panel, for as long as a flash lasts.
+///
+/// Silently does nothing before the interface exists, which is the right thing:
+/// startup failures are reported on stdout, where they can still be read.
+pub fn notify(message: impl Into<String>) {
+    let events = notifier().read().unwrap().clone();
+    if let Some(events) = events {
+        flash(Flash::Notice(message.into()), &events);
+    }
+}
+
 /// Raise the panel, and keep the frames coming until it has faded away.
 pub fn flash(flash: Flash, events: &EventManager) {
     let already_up = state()
         .read()
         .unwrap()
+        .as_ref()
         .is_some_and(|(_, since)| since.elapsed() < LIFETIME);
     *state().write().unwrap() = Some((flash, Instant::now()));
 
@@ -99,14 +136,21 @@ pub fn flash(flash: Flash, events: &EventManager) {
 
 /// Draw the panel over `printer`, if one is up. Cheap to call on every frame.
 pub fn draw(printer: &Printer<'_, '_>) {
-    let Some((flash, since)) = *state().read().unwrap() else {
+    let Some((flash, since)) = state().read().unwrap().clone() else {
         return;
     };
     let age = since.elapsed();
     if age >= LIFETIME {
         return;
     }
-    let width = WIDTH.min(printer.size.x.saturating_sub(4));
+    let label = flash.label();
+    // A notice is as wide as its message needs, up to what the terminal allows; the
+    // bars keep their fixed width so a volume panel doesn't change size as it counts.
+    let wanted = match flash {
+        Flash::Notice(_) => WIDTH.max(label.width() + 2),
+        _ => WIDTH,
+    };
+    let width = wanted.min(printer.size.x.saturating_sub(4));
     if width < 12 || printer.size.y < 7 {
         return;
     }
@@ -130,7 +174,9 @@ pub fn draw(printer: &Printer<'_, '_>) {
 
     let left = (printer.size.x - width) / 2;
     let top = printer.size.y / 2 - 2;
-    let label = flash.label();
+    // A message too wide even for the whole terminal is cut rather than wrapped, so
+    // the panel keeps its shape.
+    let label = crate::utils::truncate_string(&label, width);
     let filled = (flash.fraction() * width as f32).round() as usize;
 
     let ink = |colour| ColorStyle::new(ColorType::Color(colour), ColorType::Color(background));
@@ -170,6 +216,12 @@ pub fn draw(printer: &Printer<'_, '_>) {
     );
 
     let x = left + HAlign::Center.get_offset(label.width(), width);
+    if matches!(flash, Flash::Notice(_)) {
+        // No bar under it, so the message sits in the middle of the panel rather
+        // than at the top of it with two empty rows underneath.
+        write(printer, x, top + 1, &label, ink(faded(primary)));
+        return;
+    }
     write(printer, x, top, &label, ink(faded(primary)));
     write(
         printer,
@@ -200,6 +252,15 @@ mod tests {
         assert!((flash.fraction() - 0.5).abs() < f32::EPSILON);
         // Nothing sensible can overflow the bar.
         assert!((Flash::Volume(400).fraction() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_notice_is_its_message_and_has_no_bar() {
+        let flash = Flash::Notice("couldn't reach Spotify".to_string());
+        assert_eq!(flash.label(), "couldn't reach Spotify");
+        // Nothing is being measured, so nothing is filled in: a bar at zero would
+        // read as a volume of nought rather than as no bar at all.
+        assert_eq!(flash.fraction(), 0.0);
     }
 
     #[test]

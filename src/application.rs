@@ -150,6 +150,9 @@ impl Application {
         // DON'T USE STDOUT AFTER THIS CALL!
         let mut cursive = create_cursive().map_err(|error| error.to_string())?;
         event_manager.attach_cursive(cursive.cb_sink().clone());
+        // From here on a failure has somewhere to be seen, so the background workers
+        // starting below can report to the screen instead of only to the log.
+        ui::osd::attach(&event_manager);
         mark_startup_phase("terminal ready");
 
         cursive.set_theme(theme.clone());

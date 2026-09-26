@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use cursive::align::HAlign;
 use cursive::event::{Callback, Event, EventResult, MouseButton, MouseEvent};
-use cursive::theme::{ColorStyle, ColorType, PaletteColor};
+use cursive::theme::{ColorStyle, ColorType, Effect, PaletteColor};
 use cursive::traits::View;
 use cursive::view::scroll;
 use cursive::{Cursive, Printer, Rect, Vec2, XY};
@@ -14,7 +14,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::command::{Command, GotoMode, InsertSource, JumpMode, MoveAmount, MoveMode, TargetMode};
 use crate::commands::CommandResult;
 use crate::ext_traits::CursiveExt;
-use crate::library::Library;
+use crate::library::{Library, LoadState};
 use crate::model::album::Album;
 use crate::model::artist::Artist;
 use crate::model::episode::Episode;
@@ -105,6 +105,59 @@ impl<I: ListItem + Clone> ListView<I> {
 
     pub fn get_pagination(&self) -> &Pagination<I> {
         &self.pagination
+    }
+
+    /// What to say in place of an empty list.
+    ///
+    /// A blank pane is the same picture whether the library is still arriving, the
+    /// list really is empty, or the fetch failed, and the three want different things
+    /// from the user: wait, add something, or check the connection.
+    fn empty_message(&self) -> (String, Option<&'static str>) {
+        if self.pagination.is_busy() {
+            return ("Loading\u{2026}".to_string(), None);
+        }
+
+        // A list with pagination set has heard from the API: an empty one is empty,
+        // whatever the rest of the library is doing.
+        let answered = self.pagination.max_content().is_some();
+
+        match (answered, self.library.load_state()) {
+            (false, LoadState::Loading) => ("Loading your library\u{2026}".to_string(), None),
+            (false, LoadState::Failed) => (
+                "Couldn't reach Spotify".to_string(),
+                Some("the library will fill in once it is back"),
+            ),
+            // Titles here are phrases like `Similar to Album "X"`, which read badly
+            // inside a sentence, so the message stays general.
+            _ => (
+                "Nothing here yet".to_string(),
+                Some("press ? for keybindings"),
+            ),
+        }
+    }
+
+    /// Draw the empty message across the middle of `printer`.
+    fn draw_empty(&self, printer: &Printer<'_, '_>) {
+        if printer.size.y == 0 || printer.size.x == 0 {
+            return;
+        }
+
+        let (message, hint) = self.empty_message();
+        let row = printer.size.y / 3;
+        let write = |y: usize, text: &str, style: ColorStyle| {
+            let text = crate::utils::truncate_string(text, printer.size.x);
+            let offset = HAlign::Center.get_offset(text.width(), printer.size.x);
+            printer.with_color(style, |printer| {
+                printer.with_effect(Effect::Dim, |printer| printer.print((offset, y), &text));
+            });
+        };
+
+        write(row, &message, ColorStyle::primary());
+        if let Some(hint) = hint
+            && row + 2 < printer.size.y
+        {
+            write(row + 2, hint, ColorStyle::secondary());
+        }
     }
 
     /// Return the current amount of items in `content`
@@ -354,13 +407,24 @@ impl<I: ListItem + Clone> View for ListView<I> {
     fn draw(&self, printer: &Printer<'_, '_>) {
         let content_len = self.content_len(false);
 
+        if content_len == 0 && !self.can_paginate() {
+            self.draw_empty(printer);
+            return;
+        }
+
         scroll::draw_lines(self, printer, |_, printer, i| {
             // draw paginator after content
             if i == content_len && self.can_paginate() {
                 let style = ColorStyle::secondary();
 
-                let max = self.pagination.max_content().unwrap();
-                let buf = format!("{} more items, scroll to load", max - i);
+                // Fetching a page takes a moment, and a row that still invites a
+                // scroll while it happens reads as a list that has stopped working.
+                let buf = if self.pagination.is_busy() {
+                    "loading more\u{2026}".to_string()
+                } else {
+                    let max = self.pagination.max_content().unwrap();
+                    format!("{} more items, scroll to load", max - i)
+                };
                 printer.with_color(style, |printer| {
                     printer.print((0, 0), &buf);
                 });
@@ -859,7 +923,7 @@ mod tests {
 
     use crate::config::Config;
     use crate::events::EventManager;
-    use crate::library::Library;
+    use crate::library::{Library, LoadState};
     use crate::model::playable::Playable;
     use crate::model::track::Track;
     use crate::queue::Queue;
@@ -920,5 +984,72 @@ mod tests {
     fn a_track_with_no_length_lights_nothing_up() {
         // An item still loading has no length to measure progress against.
         assert_eq!(list(0, Duration::from_secs(5)).played_cells(40), 0);
+    }
+
+    /// An empty list, and the library it reports the state of.
+    fn empty_list() -> (ListView<Playable>, Arc<Library>) {
+        let cfg = Config::new_for_test();
+        let ev = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), ev.clone());
+        let library = Library::new_for_test(ev.clone(), spotify.clone(), cfg.clone());
+        let queue = Arc::new(Queue::new_for_test(
+            Vec::new(),
+            None,
+            spotify,
+            cfg,
+            library.clone(),
+        ));
+        let view = ListView::new(Arc::new(RwLock::new(Vec::new())), queue, library.clone());
+        (view, library)
+    }
+
+    #[test]
+    fn an_empty_list_says_why_it_is_empty() {
+        let (view, library) = empty_list();
+
+        // Nothing has been heard from the API and the library is still arriving, so
+        // the list is empty only for now.
+        library.set_load_state_for_test(LoadState::Loading);
+        assert_eq!(view.empty_message().0, "Loading your library\u{2026}");
+
+        // A fetch failed, so an empty list is not the truth and should not be read
+        // as one.
+        library.set_load_state_for_test(LoadState::Failed);
+        let (message, hint) = view.empty_message();
+        assert_eq!(message, "Couldn't reach Spotify");
+        assert!(hint.is_some_and(|hint| hint.contains("back")));
+
+        // Loaded and still empty: empty is the answer, and there is room to say how
+        // to get around.
+        library.set_load_state_for_test(LoadState::Ready);
+        let (message, hint) = view.empty_message();
+        assert_eq!(message, "Nothing here yet");
+        assert_eq!(hint, Some("press ? for keybindings"));
+    }
+
+    #[test]
+    fn a_list_that_has_heard_back_does_not_blame_the_library() {
+        let (view, library) = empty_list();
+        // The library is still loading, but this list's own request has answered and
+        // came back with nothing, which is a different fact about a different thing.
+        library.set_load_state_for_test(LoadState::Loading);
+        view.get_pagination().set(0, 0, Box::new(|_| {}));
+
+        assert_eq!(view.empty_message().0, "Nothing here yet");
+    }
+
+    #[test]
+    fn a_list_fetching_a_page_says_so() {
+        let (view, library) = empty_list();
+        library.set_load_state_for_test(LoadState::Ready);
+        view.get_pagination().set(0, 0, Box::new(|_| {}));
+
+        // A page in flight outranks everything else: whatever the list says now is
+        // about to be replaced, so it should not claim to be empty.
+        view.get_pagination().set_busy_for_test(true);
+        assert_eq!(view.empty_message().0, "Loading\u{2026}");
+
+        view.get_pagination().set_busy_for_test(false);
+        assert_eq!(view.empty_message().0, "Nothing here yet");
     }
 }

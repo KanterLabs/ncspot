@@ -2,6 +2,35 @@
 
 use std::{fmt::Write, path::PathBuf};
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Cut `text` down to `width` terminal cells, ending it in an ellipsis when there
+/// was more.
+///
+/// Counts display width rather than characters, so a CJK title or an emoji is not
+/// measured as narrower than it prints.
+pub fn truncate_string(text: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return "\u{2026}".repeat(width);
+    }
+
+    let mut cells = 0;
+    let mut out = String::new();
+    for character in text.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if cells + character_width > width - 1 {
+            break;
+        }
+        cells += character_width;
+        out.push(character);
+    }
+    out.push('\u{2026}');
+    out
+}
+
 /// Returns a human readable String of a Duration
 ///
 /// Example: `3h 12m 53s`
@@ -114,4 +143,37 @@ pub fn user_runtime_directory() -> Option<PathBuf> {
 #[cfg(unix)]
 fn xdg_runtime_directory() -> Option<PathBuf> {
     std::env::var("XDG_RUNTIME_DIR").ok().map(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_string;
+
+    #[test]
+    fn a_string_that_fits_is_left_alone() {
+        assert_eq!(truncate_string("hello", 5), "hello");
+        assert_eq!(truncate_string("hello", 40), "hello");
+        assert_eq!(truncate_string("", 0), "");
+    }
+
+    #[test]
+    fn a_longer_string_is_cut_to_width_including_its_ellipsis() {
+        assert_eq!(truncate_string("hello world", 8), "hello w\u{2026}");
+        // The result never prints wider than asked, however little room there is.
+        for width in 0..4 {
+            assert!(
+                super::UnicodeWidthStr::width(truncate_string("hello", width).as_str()) <= width
+            );
+        }
+    }
+
+    #[test]
+    fn width_is_counted_in_cells_rather_than_characters() {
+        // Each of these prints two cells wide, so only two of them fit in five cells
+        // alongside the ellipsis.
+        assert_eq!(
+            truncate_string("\u{5e83}\u{5cf6}\u{6587}", 5),
+            "\u{5e83}\u{5cf6}\u{2026}"
+        );
+    }
 }

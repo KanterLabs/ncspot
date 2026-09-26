@@ -146,7 +146,15 @@ impl<I: ListItem + Clone> Pagination<I> {
         *self.max_content.read().unwrap()
     }
 
-    fn is_busy(&self) -> bool {
+    /// Mark a page as in flight, for tests of views that draw the busy state.
+    #[cfg(test)]
+    pub fn set_busy_for_test(&self, busy: bool) {
+        *self.busy.write().unwrap() = busy;
+    }
+
+    /// Whether a page is being fetched right now, which a list draws so that
+    /// scrolling to the end doesn't look like the app has stopped responding.
+    pub fn is_busy(&self) -> bool {
         *self.busy.read().unwrap()
     }
 

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cursive::theme::{Color, ColorStyle, ColorType, PaletteColor};
+use cursive::theme::{Color, ColorStyle, ColorType, Effect, PaletteColor};
 use cursive::{Printer, Vec2};
 use image::imageops::FilterType;
 use log::debug;
@@ -25,6 +25,9 @@ const MAX_SCALED: usize = 24;
 /// couple of times a second, which is not enough to see a fade, so the fade drives
 /// its own frames and then stops.
 const FADE_FRAMES: u32 = 12;
+
+/// How far the placeholder plate is lifted off the card behind it.
+const PLACEHOLDER_LIFT: f32 = 0.08;
 
 /// The quadrant blocks, indexed by which of a cell's four subpixels take the
 /// foreground colour: bit 0 is top left, 1 top right, 2 bottom left, 3 bottom
@@ -71,6 +74,40 @@ pub struct AlbumArt {
     scaled: RwLock<Vec<Scaled>>,
     pending: Arc<RwLock<HashSet<String>>>,
     events: EventManager,
+}
+
+/// Draw the space a cover will occupy, for the moment before it has arrived.
+///
+/// A plate a shade off the card rather than a spinner or a caption: the cover is
+/// usually a few hundred milliseconds away, and at that length anything with detail
+/// in it only flickers.
+pub fn draw_placeholder(printer: &Printer<'_, '_>, offset: Vec2, size: Vec2) {
+    if size.x == 0 || size.y == 0 {
+        return;
+    }
+
+    let card = printer.theme.palette[PaletteColor::Background];
+    // A theme that leaves the background to the terminal has nothing to shade away
+    // from, so there the plate is drawn dim in the secondary colour instead.
+    let style = if blendable(card) {
+        ColorStyle::new(
+            ColorType::Color(lift(card, PLACEHOLDER_LIFT)),
+            ColorType::Color(lift(card, PLACEHOLDER_LIFT)),
+        )
+    } else {
+        ColorStyle::new(
+            ColorType::Palette(PaletteColor::Secondary),
+            ColorType::Palette(PaletteColor::Background),
+        )
+    };
+
+    printer.with_color(style, |printer| {
+        printer.with_effect(Effect::Dim, |printer| {
+            for row in 0..size.y {
+                printer.print_hline((offset.x, offset.y + row), size.x, "\u{2591}");
+            }
+        });
+    });
 }
 
 impl AlbumArt {
