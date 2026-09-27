@@ -131,6 +131,30 @@ impl Queue {
         }
     }
 
+    /// Up to `count` items in the order they will play, starting `start` places into
+    /// that order, each with its index in `self.queue`.
+    pub fn in_play_order(&self, start: usize, count: usize) -> Vec<(usize, Playable)> {
+        let random_order = self.random_order.read().unwrap();
+        let queue = self.queue.read().unwrap();
+        (start..queue.len().min(start.saturating_add(count)))
+            .filter_map(|position| {
+                let index = match random_order.as_ref() {
+                    Some(order) => *order.get(position)?,
+                    None => position,
+                };
+                Some((index, queue.get(index)?.clone()))
+            })
+            .collect()
+    }
+
+    /// Where the item at `index` in `self.queue` falls in the order the queue plays.
+    pub fn play_position(&self, index: usize) -> Option<usize> {
+        match self.random_order.read().unwrap().as_ref() {
+            Some(order) => order.iter().position(|&i| i == index),
+            None => Some(index),
+        }
+    }
+
     /// The currently playing item from `self.queue`.
     pub fn get_current(&self) -> Option<Playable> {
         self.get_current_index()

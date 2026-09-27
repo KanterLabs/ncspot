@@ -11,7 +11,7 @@ use cursive::theme::{Color, ColorStyle, ColorType, Effect, PaletteColor};
 use cursive::{Cursive, Printer, Vec2, View};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::command::{Command, GotoMode};
+use crate::command::{Command, GotoMode, MoveAmount, MoveMode};
 use crate::commands::CommandResult;
 use crate::events::EventManager;
 use crate::library::Library;
@@ -27,6 +27,7 @@ use crate::ui::contextmenu::ContextMenu;
 use crate::ui::queue::QueueView;
 use crate::ui::quick_search::QuickSearch;
 use crate::ui::spectrum::{self, SpectrumState};
+use crate::ui::up_next;
 use crate::utils::ms_to_hms;
 use crate::waveform;
 
@@ -68,6 +69,13 @@ const ART_MIN_TEXT_WIDTH: usize = 48;
 /// Smallest terminal that still gets the full card; anything smaller is laid out flat.
 const CARD_MIN_WIDTH: usize = 40;
 const CARD_MIN_HEIGHT: usize = 15;
+/// The queue goes beside the card once the card can keep this much width and the
+/// queue can have at least `QUEUE_MIN_WIDTH` of what is left.
+const SPLIT_CARD_MIN_WIDTH: usize = 60;
+const QUEUE_MIN_WIDTH: usize = 32;
+const QUEUE_MAX_WIDTH: usize = 56;
+/// Space between the card and the queue.
+const SPLIT_GAP: usize = 2;
 
 /// What a click on a given run of cells does. The card advertises these controls,
 /// so they have to be usable with the mouse as well as with the keyboard.
@@ -82,6 +90,8 @@ enum Control {
     Shuffle,
     /// Set the volume to the clicked fraction of the meter.
     Volume,
+    /// Play the item at this index in the queue.
+    Track(usize),
 }
 
 /// A run of cells on one row that responds to the mouse. Rebuilt on every draw,
@@ -330,6 +340,10 @@ pub struct NowPlayingView {
     events: EventManager,
     #[cfg(feature = "album_art")]
     art: crate::ui::album_art::AlbumArt,
+    /// The keyboard cursor in the queue beside the card, as a place in the play
+    /// order, with the queue index that was playing when it was moved: a new track
+    /// puts the cursor away again.
+    cursor: RwLock<Option<(Option<usize>, usize)>>,
 }
 
 impl NowPlayingView {
@@ -349,6 +363,7 @@ impl NowPlayingView {
             animator,
             #[cfg(feature = "album_art")]
             art: crate::ui::album_art::AlbumArt::new(events_for_art),
+            cursor: RwLock::new(None),
         }
     }
 
@@ -1281,17 +1296,20 @@ impl NowPlayingView {
     #[cfg(not(feature = "album_art"))]
     fn draw_art(&self, _printer: &Printer<'_, '_>, _offset: Vec2, _size: Vec2, _url: &str) {}
 
-    /// Draw `blocks` inside a centered card, sized to whatever the terminal allows.
+    /// Draw `blocks` inside a card centered in the columns of `area`, sized to
+    /// whatever the terminal allows. Returns the rows of the card's top and bottom
+    /// edges, so a panel drawn beside it can line up.
     fn draw_card_layout(
         &self,
         printer: &Printer<'_, '_>,
+        area: Region,
         blocks: Vec<Block>,
         chip: &str,
         badge: Option<&str>,
         footer: Option<&str>,
-    ) {
-        let card_width = min(CARD_MAX_WIDTH, printer.size.x.saturating_sub(4));
-        let left = printer.size.x.saturating_sub(card_width) / 2;
+    ) -> (usize, usize) {
+        let card_width = min(CARD_MAX_WIDTH, area.width.saturating_sub(4));
+        let left = area.start + area.width.saturating_sub(card_width) / 2;
         let right = left + card_width.saturating_sub(1);
 
         // Reserve the borders and one padding row at each end, fit the content into
@@ -1328,6 +1346,7 @@ impl NowPlayingView {
             edges,
         };
         self.draw_blocks(printer, blocks, frame, playable.as_ref());
+        (top, bottom)
     }
 
     fn draw_empty(&self, printer: &Printer<'_, '_>) {
@@ -1349,7 +1368,8 @@ impl NowPlayingView {
 
         if printer.size.x >= CARD_MIN_WIDTH && printer.size.y >= 8 {
             // Nothing is loaded, so the player state would only ever read "stopped".
-            self.draw_card_layout(printer, blocks, "IDLE", None, None);
+            let area = Region::new(0, printer.size.x);
+            self.draw_card_layout(printer, area, blocks, "IDLE", None, None);
         } else {
             let height = printer.size.y;
             let frame = Frame {
@@ -1382,7 +1402,6 @@ impl NowPlayingView {
                 "♥ saved"
             }
         });
-        let footer = self.queue_position();
         let (icon, state) = self.status();
         // The tempo is only shown once the beat detector is sure of it, so the chip
         // stays still rather than counting up and down at the start of every track.
@@ -1390,13 +1409,124 @@ impl NowPlayingView {
             Some(tempo) if self.is_playing() => format!("{icon}  {state}  \u{b7}  {tempo:.0} BPM"),
             _ => format!("{icon}  {state}"),
         };
-        self.draw_card_layout(
+        let blocks = self.blocks(printer, playable, true);
+
+        let Some((card, panel)) = split(printer.size.x) else {
+            let area = Region::new(0, printer.size.x);
+            let footer = self.queue_position();
+            self.draw_card_layout(printer, area, blocks, &chip, saved, footer.as_deref());
+            return;
+        };
+        // Side by side, the queue carries the position, so the card does not repeat it.
+        let (top, bottom) = self.draw_card_layout(printer, card, blocks, &chip, saved, None);
+        self.draw_up_next(printer, panel, top, bottom);
+    }
+
+    /// The queue panel beside the card, between rows `top` and `bottom`.
+    fn draw_up_next(&self, printer: &Printer<'_, '_>, area: Region, top: usize, bottom: usize) {
+        let right = area.start + area.width.saturating_sub(1);
+        let footer = self.queue_position();
+        self.draw_card(
             printer,
-            self.blocks(printer, playable, true),
-            &chip,
-            saved,
+            (area.start, top, right, bottom),
+            "Up Next",
+            None,
             footer.as_deref(),
         );
+
+        let current_index = self.queue.get_current_index();
+        let current = current_index.and_then(|index| self.queue.play_position(index));
+        let selected = self.cursor_position();
+        let len = self.queue.len();
+        // One row of padding at the top, and the bottom row for the key hint when
+        // the panel is tall enough to spare it.
+        let inner = bottom.saturating_sub(top + 1);
+        let hint = inner >= 6;
+        let rows = inner.saturating_sub(1 + usize::from(hint) * 2);
+        let start = up_next::window_start(current, selected, len, rows);
+        let entries: Vec<up_next::Entry> = self
+            .queue
+            .in_play_order(start, rows)
+            .into_iter()
+            .enumerate()
+            .map(|(offset, (index, playable))| up_next::Entry {
+                index,
+                position: start + offset,
+                playable,
+            })
+            .collect();
+
+        let styles = up_next::Styles {
+            text: ColorStyle::primary(),
+            quiet: ColorStyle::secondary(),
+            current: self.playing_style(printer),
+            selected: ColorStyle::highlight(),
+        };
+        let left = area.start + 2;
+        let width = area.width.saturating_sub(4);
+        let hits = up_next::draw(
+            printer,
+            left,
+            top + 2,
+            width,
+            &entries,
+            current,
+            selected,
+            &styles,
+        );
+        let mut hitboxes = self.hitboxes.write().unwrap();
+        for hit in hits {
+            hitboxes.push(Hitbox {
+                row: hit.row,
+                start: area.start + 1,
+                width: area.width.saturating_sub(2),
+                control: Control::Track(hit.index),
+            });
+        }
+        drop(hitboxes);
+
+        if hint {
+            let text = if selected.is_some() {
+                "↑↓ move · ⏎ play · d remove"
+            } else {
+                "↑↓ pick a track · click to play"
+            };
+            up_next::draw_hint(
+                printer,
+                left,
+                bottom - 1,
+                width,
+                text,
+                ColorStyle::secondary(),
+            );
+        }
+    }
+
+    /// Where the queue cursor is, unless the track has changed since it was moved.
+    fn cursor_position(&self) -> Option<usize> {
+        let current = self.queue.get_current_index();
+        let len = self.queue.len();
+        match *self.cursor.read().unwrap() {
+            Some((at, position)) if at == current && position < len => Some(position),
+            _ => None,
+        }
+    }
+
+    /// Move the queue cursor `delta` places, taking it out if it was put away.
+    fn move_cursor(&self, delta: i32) {
+        let current_index = self.queue.get_current_index();
+        let current = current_index.and_then(|index| self.queue.play_position(index));
+        let moved = up_next::step(self.cursor_position(), current, delta, self.queue.len());
+        *self.cursor.write().unwrap() = moved.map(|position| (current_index, position));
+    }
+
+    /// The queue index under the cursor, when the cursor is out.
+    fn cursor_index(&self) -> Option<usize> {
+        let position = self.cursor_position()?;
+        self.queue
+            .in_play_order(position, 1)
+            .first()
+            .map(|(index, _)| *index)
     }
 
     /// Run the control that was clicked. These mirror the default command handlers,
@@ -1428,6 +1558,10 @@ impl NowPlayingView {
                 self.queue.set_repeat(mode);
             }
             Control::Shuffle => self.queue.set_shuffle(!self.queue.get_shuffle()),
+            Control::Track(index) => {
+                *self.cursor.write().unwrap() = None;
+                self.queue.play(index, true, false);
+            }
             Control::Volume => {
                 let volume = u16::MAX as f64 * hitbox.fraction(position);
                 self.spotify
@@ -1449,6 +1583,7 @@ impl NowPlayingView {
                 };
                 self.spotify.set_volume(volume, true);
             }
+            Control::Track(_) => self.move_cursor(-steps),
             _ => self.spotify.seek_relative(-5000 * steps),
         }
     }
@@ -1551,9 +1686,14 @@ impl ViewExt for NowPlayingView {
 
     fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
         match cmd {
-            Command::Play => {
-                self.queue.toggleplayback();
-            }
+            Command::Play => match self.cursor_index() {
+                // With the cursor out in the queue, Enter plays what it is on.
+                Some(index) => {
+                    *self.cursor.write().unwrap() = None;
+                    self.queue.play(index, true, false);
+                }
+                None => self.queue.toggleplayback(),
+            },
             Command::Queue => {
                 if let Some(mut playable) = self.queue.get_current() {
                     playable.queue(&self.queue);
@@ -1590,11 +1730,22 @@ impl ViewExt for NowPlayingView {
                     )));
                 }
             }
-            Command::Delete => {
-                if let Some(mut playable) = self.queue.get_current() {
-                    playable.unsave(&self.library);
+            Command::Delete => match self.cursor_index() {
+                // With the cursor out in the queue, delete takes that item out of the
+                // queue; otherwise it unsaves the playing track, as it always has.
+                Some(index) if Some(index) != self.queue.get_current_index() => {
+                    self.queue.remove(index);
+                    let len = self.queue.len();
+                    if let Some((_, position)) = self.cursor.write().unwrap().as_mut() {
+                        *position = (*position).min(len.saturating_sub(1));
+                    }
                 }
-            }
+                _ => {
+                    if let Some(mut playable) = self.queue.get_current() {
+                        playable.unsave(&self.library);
+                    }
+                }
+            },
             #[cfg(feature = "share_clipboard")]
             Command::Share(_) => {
                 if let Some(url) = self
@@ -1656,18 +1807,46 @@ impl ViewExt for NowPlayingView {
                     }
                 }
             }
-            // A single-item dashboard has no selection to move, search, sort, or shift. Treat
-            // these list-only commands as successful no-ops so shared keybindings remain quiet.
-            Command::Move(_, _)
-            | Command::Shift(_, _)
-            | Command::Jump(_)
-            | Command::Insert(_)
-            | Command::Sort(_, _) => {}
+            // Up and down walk the queue beside the card; `Move(Playing)` puts the
+            // cursor away again.
+            Command::Move(mode, amount) => {
+                let steps = match amount {
+                    MoveAmount::Integer(steps) => *steps,
+                    MoveAmount::Float(_) => 5,
+                    MoveAmount::Extreme => i32::MAX / 2,
+                };
+                match mode {
+                    MoveMode::Up => self.move_cursor(-steps),
+                    MoveMode::Down => self.move_cursor(steps),
+                    MoveMode::Playing => *self.cursor.write().unwrap() = None,
+                    MoveMode::Left | MoveMode::Right => {}
+                }
+            }
+            // The rest of the list commands have nothing to act on here. Treat them as
+            // successful no-ops so shared keybindings remain quiet.
+            Command::Shift(_, _) | Command::Jump(_) | Command::Insert(_) | Command::Sort(_, _) => {}
             _ => return Ok(CommandResult::Ignored),
         }
 
         Ok(CommandResult::Consumed(None))
     }
+}
+
+/// The columns of the card and of the queue beside it, centered as a pair, or
+/// `None` when a `width` wide view cannot fit both and the card goes alone.
+fn split(width: usize) -> Option<(Region, Region)> {
+    let usable = width.saturating_sub(4);
+    if usable < SPLIT_CARD_MIN_WIDTH + SPLIT_GAP + QUEUE_MIN_WIDTH {
+        return None;
+    }
+    let card = min(CARD_MAX_WIDTH, usable - SPLIT_GAP - QUEUE_MIN_WIDTH);
+    let queue = min(QUEUE_MAX_WIDTH, usable - SPLIT_GAP - card);
+    let left = (width - card - SPLIT_GAP - queue) / 2;
+    // The card area carries the four columns `draw_card_layout` pads a card with.
+    Some((
+        Region::new(left.saturating_sub(2), card + 4),
+        Region::new(left + card + SPLIT_GAP, queue),
+    ))
 }
 
 /// Progress in eighths of a cell, so the bar can render sub-cell partial blocks.
@@ -1751,9 +1930,11 @@ mod tests {
     #[cfg(feature = "album_art")]
     use super::ART_MIN_HEIGHT;
     use super::{
-        Block, BlockKind, NowPlayingView, SPECTRUM_MAX_HEIGHT, ViewExt, blocks_height, fit_blocks,
-        percent_complete, progress_eighths, remaining_label, truncate, volume_meter,
+        Block, BlockKind, CARD_MAX_WIDTH, NowPlayingView, QUEUE_MIN_WIDTH, SPECTRUM_MAX_HEIGHT,
+        ViewExt, blocks_height, fit_blocks, percent_complete, progress_eighths, remaining_label,
+        split, truncate, volume_meter,
     };
+    use crate::command::{MoveAmount, MoveMode};
     use cursive::theme::ColorStyle;
 
     fn track(title: &str, artist: &str, album: &str) -> Playable {
@@ -2421,5 +2602,89 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert!(matches!(blocks[0].kind, BlockKind::Line { bold: true, .. }));
         assert!(matches!(blocks[1].kind, BlockKind::Progress));
+    }
+
+    fn album(count: usize) -> Vec<Playable> {
+        (1..=count)
+            .map(|n| track(&format!("Song {n}"), "Zach Bryan", "With Heaven On Top"))
+            .collect()
+    }
+
+    fn name(playable: &Playable) -> String {
+        match playable {
+            Playable::Track(track) => track.title.clone(),
+            Playable::Episode(episode) => episode.name.clone(),
+        }
+    }
+
+    #[test]
+    fn the_queue_goes_beside_the_card_once_both_fit() {
+        assert!(split(97).is_none());
+        let (card, queue) = split(98).expect("both fit at 98");
+        assert_eq!(queue.width, QUEUE_MIN_WIDTH);
+        assert!(card.start + card.width <= queue.start + 2);
+
+        // A wide terminal keeps the card at its usual size and centers the pair.
+        let (card, queue) = split(200).expect("both fit at 200");
+        assert_eq!(card.width, CARD_MAX_WIDTH + 4);
+        let right_margin = 200 - (queue.start + queue.width);
+        assert!((card.start + 2).abs_diff(right_margin) <= 1);
+    }
+
+    #[test]
+    fn the_queue_panel_lists_what_comes_next() {
+        let screen = render(Vec2::new(140, 30), album(12), Some(4));
+        let rows = rows(&screen);
+        let text = rows.join("\n");
+        assert!(text.contains("Up Next"), "{text}");
+        assert!(text.contains("5 / 12"), "{text}");
+        // The track before the playing one stays in view, then the playing one is
+        // marked, then what follows.
+        let playing = rows
+            .iter()
+            .find(|row| row.contains("▸ "))
+            .expect("a playing row");
+        assert!(playing.contains("Song 5"), "{playing}");
+        let order: Vec<usize> = ["Song 4 ", "Song 5 ", "Song 6 ", "Song 7 "]
+            .iter()
+            .map(|name| rows.iter().position(|row| row.contains(name)).expect(name))
+            .collect();
+        assert!(
+            order.windows(2).all(|pair| pair[0] + 1 == pair[1]),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_terminal_keeps_the_card_alone() {
+        let screen = render(Vec2::new(90, 30), album(12), Some(4));
+        assert!(!rows(&screen).join("\n").contains("Up Next"));
+    }
+
+    #[test]
+    fn enter_plays_the_track_under_the_queue_cursor() {
+        let mut siv = cursive::Cursive::new();
+        let mut view = view(album(12), Some(4));
+        let down = Command::Move(MoveMode::Down, MoveAmount::Integer(2));
+        view.on_command(&mut siv, &down).unwrap();
+        assert_eq!(view.cursor_position(), Some(6));
+        view.on_command(&mut siv, &Command::Play).unwrap();
+        assert_eq!(view.queue.get_current_index(), Some(6));
+        // Playing puts the cursor away, so Enter toggles playback again.
+        assert_eq!(view.cursor_position(), None);
+    }
+
+    #[test]
+    fn delete_takes_the_track_under_the_cursor_out_of_the_queue() {
+        let mut siv = cursive::Cursive::new();
+        let mut view = view(album(12), Some(4));
+        let down = Command::Move(MoveMode::Down, MoveAmount::Integer(1));
+        view.on_command(&mut siv, &down).unwrap();
+        view.on_command(&mut siv, &Command::Delete).unwrap();
+        assert_eq!(view.queue.len(), 11);
+        assert_eq!(name(&view.queue.get_current().unwrap()), "Song 5");
+        let next = view.queue.next_index().unwrap();
+        let next = view.queue.queue.read().unwrap()[next].clone();
+        assert_eq!(name(&next), "Song 7");
     }
 }

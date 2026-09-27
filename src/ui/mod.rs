@@ -27,6 +27,7 @@ pub mod show;
 pub mod spectrum;
 pub mod statusbar;
 pub mod tabbedview;
+pub mod up_next;
 
 #[cfg(feature = "cover")]
 pub mod cover;
