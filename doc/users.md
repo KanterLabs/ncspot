@@ -217,15 +217,27 @@ blanking. Covers for the results are fetched in the background, so art for a
 track you play is already on disk.
 
 ### Statusbar
-The statusbar keeps the playing track clear of the readout on its right, and
-scrolls the name when it does not fit in the space that leaves. Its progress bar
-moves in half cells rather than whole ones, takes the playing album's colour, and
-brightens with the beat, which `beat_pulse = false` turns off. While audio is
-playing, the play icon is replaced by a small live equalizer; it comes back as
-soon as there is nothing to show a level for, and `visualizer_fps = 0` keeps the
-icon for good. Keeping the equalizer and the bar moving means the interface
-redraws a few times a second whenever something is playing, wherever you are in
-the app; `visualizer_fps = 0` stops that if you would rather it stayed still.
+The statusbar is a small player of its own, two lines under a hairline rule:
+
+```
+ ▓▓▓▓  Say Why · Zach Bryan         ◀◀  ❚❚  ▶▶   1:16 ━━━━━━━●┄┄┄┄┄┄┄┄┄ 2:23
+ ▓▓▓▓  With Heaven On Top           ▁▂▅▇█▇▅▃▂▁   next  Wait for Me   ⇄ ↻ 57%
+```
+
+The cover sits on the left beside the track (`statusbar_format`, or the title and
+artists when that is unset) and its album. The transport buttons sit in the
+middle with a live equalizer underneath them, and the right hand side holds the
+seek bar, the next track in the queue, the shuffle and repeat toggles and the
+volume. Every button, the seek bar and both toggles respond to a click;
+scrolling over the seek bar seeks and scrolling over the volume changes it, and a
+click anywhere else pauses or resumes. When the terminal narrows, the transport
+goes first and then the cover, so the name and the seek bar keep their room.
+
+Names that do not fit scroll rather than clip. The seek bar and equalizer take
+the playing album's colour and brighten with the beat, which `beat_pulse = false`
+turns off. Keeping them moving means the interface redraws a few times a second
+whenever something is playing, wherever you are in the app; `visualizer_fps = 0`
+stops that if you would rather it stayed still.
 
 ### Lists
 The playing row of any list — library, queue, search results — fills with the
@@ -359,7 +371,7 @@ Possible configuration values are:
 | `library_tabs`                  | Tabs to show in library screen                                 | Array of `"tracks"`, `"albums"`, `"artists"`, `"playlists"`, `"podcasts"`, `"browse"` | All tabs            |
 | `cover_max_scale`<sup>[1]</sup> | Set maximum scaling ratio for cover art                        | Number                                                                                | No limit            |
 | `hide_display_names`            | Hides spotify usernames in the library header and on playlists | `true`, `false`                                                                       | `false`             |
-| `statusbar_format`              | Formatting for tracks in the statusbar                         | See [track_formatting](#track-formatting)                                             | `%artists - %track` |
+| `statusbar_format`              | Formatting for tracks in the statusbar                         | See [track_formatting](#track-formatting)                                             | `%title · %artists` |
 | `visualizer_fps`                | Frame rate of the now playing visualizer, `0` to disable it and the other now playing motion with it | `0` - `60`                                                                            | `20`                |
 | `visualizer_style`              | Shape the now playing visualizer takes                         | `"bars"`, `"mirror"`, `"wave"`, `"vu"`                                                | `"bars"`            |
 | `waveform`                      | Draw the progress bar as the track's own waveform              | `true`, `false`                                                                       | `true`              |
@@ -372,9 +384,9 @@ Possible configuration values are:
 | `ap_port`                       | Set ap-port for librespot (for restrictive firewalls)          | `80`, `443`, `4070`                                                                   |                     |
 
 1. If built with the `cover` feature.
-2. By default the statusbar will show a play icon when a track is playing and
-   a pause icon when playback is stopped. If this setting is enabled, the behavior
-   is reversed.
+2. By default the statusbar's play button shows a pause icon while a track is
+   playing and a play icon while it is not, naming what a click will do. If this
+   setting is enabled, it shows the current state instead.
 3. Run `ncspot -h` for a list of devices.
 4. If built with the `notify` feature.
 

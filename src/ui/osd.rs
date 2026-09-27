@@ -1,7 +1,7 @@
 //! The overlay that says what a keypress just did, and what went wrong.
 //!
 //! Volume and seek are the two commands whose effect is a number in the corner of
-//! a two line statusbar, which is no use at all from across the room. A key that
+//! the statusbar, which is no use at all from across the room. A key that
 //! changes one of them raises a panel in the middle of the screen with the new
 //! value drawn big, and the panel fades out a second later.
 //!
