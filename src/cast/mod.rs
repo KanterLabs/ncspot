@@ -26,8 +26,9 @@ use crate::spotify_api::WebApi;
 use crate::spotify_worker::WorkerCommand;
 use crate::ui::osd;
 
-/// How often the device is asked what it is doing.
-const POLL: Duration = Duration::from_secs(1);
+/// How often the device is asked what it is doing. Every ask is a Web API
+/// request, and those are rate limited, so no more often than the UI needs.
+const POLL: Duration = Duration::from_secs(2);
 /// After a command, how long the device's answers are not taken at their word: it
 /// takes a moment to act, and until it has it still reports the old state.
 const SETTLE: Duration = Duration::from_secs(3);
@@ -125,7 +126,7 @@ pub fn connect(
     let started = Instant::now();
     let mut seen: Option<Vec<Device>> = None;
     while started.elapsed() < ROKU_WAKE {
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_secs(2));
         progress(format!(
             "Spotify is open on {}.\nWaiting for it to come online… {}s",
             roku.name,

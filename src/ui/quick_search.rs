@@ -19,19 +19,22 @@ use crate::queue::Queue;
 use crate::search_cache::{self, SearchCache};
 use crate::spotify::Spotify;
 use crate::traits::ListItem;
+use crate::ui::osd;
 
 /// Results shown, and the number of digit keys that pick one.
 const RESULTS: usize = 4;
 /// How long typing has to pause before a query is sent, so a fast typist makes
 /// one request rather than one per keystroke. Short, because the list is filled
 /// from the library and the cache while the request is in flight.
-const DEBOUNCE: Duration = Duration::from_millis(120);
+const DEBOUNCE: Duration = Duration::from_millis(250);
 /// Results asked of Spotify. More than are shown, so the cache is worth reusing
 /// for the next keystroke and costs no extra round trip.
 const FETCH: u32 = 20;
 /// Station tracks whose art is fetched up front when a radio starts. The rest
 /// of the station is long enough that its art can wait until it is asked for.
 const STATION_PREFETCH: usize = 8;
+/// How many rate limits a radio waits out before giving up.
+const RADIO_RETRIES: usize = 3;
 /// How many library hits can take the top of the list before catalogue results.
 const LOCAL_SLOTS: usize = 2;
 const WIDTH: usize = 62;
@@ -257,8 +260,23 @@ impl QuickSearch {
         let queue = self.queue.clone();
         let events = self.events.clone();
         thread::spawn(move || {
-            let Ok(found) = spotify.api.recommendations(None, None, Some(vec![&id])) else {
+            // A rate limit is waited out rather than ending the station before it
+            // starts; the seed is already playing, so there is time.
+            let mut found = spotify.api.recommendations(None, None, Some(vec![&id]));
+            for _ in 0..RADIO_RETRIES {
+                let Some(wait) = spotify.api.rate_limit_wait().filter(|_| found.is_err()) else {
+                    break;
+                };
+                osd::notify(format!(
+                    "Radio: Spotify is busy, retrying in {}s",
+                    wait.as_secs()
+                ));
+                thread::sleep(wait);
+                found = spotify.api.recommendations(None, None, Some(vec![&id]));
+            }
+            let Ok(found) = found else {
                 debug!("no recommendations for {id}");
+                osd::notify("Couldn't start the radio: Spotify didn't send any tracks");
                 return;
             };
             // Recommendations arrive without an album, and so without cover art;

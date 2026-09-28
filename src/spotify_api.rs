@@ -171,6 +171,12 @@ impl WebApi {
     where
         F: Fn(&AuthCodeSpotify) -> ClientResult<R>,
     {
+        // Inside a rate limit every request is refused, and sending them anyway only
+        // keeps the limit going; callers that can come back later ask for the wait.
+        if let Some(wait) = self.rate_limit_wait() {
+            debug!("rate limited for another {}s, not sending", wait.as_secs());
+            return None;
+        }
         self.refresh_token_if_needed();
         let result = { api_call(&self.api) };
         match result {
