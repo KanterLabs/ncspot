@@ -1443,10 +1443,10 @@ impl NowPlayingView {
         let inner = bottom.saturating_sub(top + 1);
         let hint = inner >= 6;
         let rows = inner.saturating_sub(1 + usize::from(hint) * 2);
-        let start = up_next::window_start(current, selected, len, rows);
+        let (start, count) = up_next::window(current, selected, len, rows);
         let entries: Vec<up_next::Entry> = self
             .queue
-            .in_play_order(start, rows)
+            .in_play_order(start, count)
             .into_iter()
             .enumerate()
             .map(|(offset, (index, playable))| up_next::Entry {

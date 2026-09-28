@@ -38,28 +38,47 @@ pub struct Hit {
     pub index: usize,
 }
 
-/// The first play order position to show in `rows` rows of a `len` long queue.
+/// How many tracks either side of the playing one the panel shows.
+pub const AROUND: usize = 8;
+
+/// The play order positions to show in `rows` rows of a `len` long queue, as a
+/// start and a count.
 ///
-/// The item before the playing one stays in view as context, and the list scrolls
-/// only as far as it must to keep the cursor on screen.
-pub fn window_start(
+/// Up to `AROUND` tracks before the playing one and `AROUND` after it, split
+/// evenly when the panel is too short for all of them. With the cursor out, the
+/// list scrolls only as far as it must to keep the cursor on screen.
+pub fn window(
     current: Option<usize>,
     selected: Option<usize>,
     len: usize,
     rows: usize,
-) -> usize {
-    if rows == 0 || len <= rows {
-        return 0;
+) -> (usize, usize) {
+    let rows = rows.min(2 * AROUND + 1).min(len);
+    if rows == 0 {
+        return (0, 0);
     }
-    let mut start = current.map_or(0, |current| current.saturating_sub(1));
-    if let Some(selected) = selected {
+    let current = current.unwrap_or(0).min(len - 1);
+    let wanted_before = current.min(AROUND);
+    let wanted_after = (len - 1 - current).min(AROUND);
+    // Short of room, each side keeps half, and a side that wants less than its
+    // half hands the rest to the other.
+    let half = (rows - 1) / 2;
+    let before = wanted_before.min(half.max((rows - 1).saturating_sub(wanted_after)));
+    let after = wanted_after.min(rows - 1 - before);
+    let mut start = current - before;
+    let mut count = before + 1 + after;
+
+    if let Some(selected) = selected.filter(|&selected| selected < len) {
+        // Following the cursor, the panel uses all of its rows.
+        count = rows;
         if selected < start {
             start = selected;
-        } else if selected >= start + rows {
-            start = selected + 1 - rows;
+        } else if selected >= start + count {
+            start = selected + 1 - count;
         }
+        start = start.min(len - count);
     }
-    start.min(len - rows)
+    (start, count)
 }
 
 /// Move a cursor `delta` places through a `len` long queue. A cursor that is not
@@ -202,23 +221,30 @@ fn truncate(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{step, truncate, window_start};
+    use super::{step, truncate, window};
 
     #[test]
-    fn the_track_before_the_playing_one_stays_in_view() {
-        assert_eq!(window_start(Some(10), None, 50, 8), 9);
-        assert_eq!(window_start(Some(0), None, 50, 8), 0);
-        // Near the end the list fills the panel rather than trailing off.
-        assert_eq!(window_start(Some(48), None, 50, 8), 42);
-        // A short queue is shown whole.
-        assert_eq!(window_start(Some(3), None, 5, 8), 0);
+    fn eight_either_side_of_the_playing_track() {
+        assert_eq!(window(Some(20), None, 50, 30), (12, 17));
+        // Near either end there is less to show on that side, and the other side
+        // does not grow to make up for it.
+        assert_eq!(window(Some(3), None, 50, 30), (0, 12));
+        assert_eq!(window(Some(47), None, 50, 30), (39, 11));
+        assert_eq!(window(Some(3), None, 5, 30), (0, 5));
+    }
+
+    #[test]
+    fn a_short_panel_keeps_the_playing_track_in_the_middle() {
+        assert_eq!(window(Some(20), None, 50, 9), (16, 9));
+        // Close to the start, the rows the past cannot use go to what is next.
+        assert_eq!(window(Some(1), None, 50, 9), (0, 9));
     }
 
     #[test]
     fn the_list_scrolls_just_far_enough_to_follow_the_cursor() {
-        assert_eq!(window_start(Some(10), Some(16), 50, 8), 9);
-        assert_eq!(window_start(Some(10), Some(17), 50, 8), 10);
-        assert_eq!(window_start(Some(10), Some(4), 50, 8), 4);
+        assert_eq!(window(Some(20), Some(28), 50, 30), (12, 17));
+        assert_eq!(window(Some(20), Some(31), 50, 30), (15, 17));
+        assert_eq!(window(Some(20), Some(4), 50, 30), (4, 17));
     }
 
     #[test]

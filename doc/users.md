@@ -187,8 +187,9 @@ a font that carries them (most monospace fonts do) gives the most detail.
 
 When the terminal is wide enough for both (about 100 columns), the queue sits in
 an **Up Next** panel beside the card. It lists the tracks in the order they
-will play, shuffle included: the one that just played, the playing one (marked
-▸), then what follows. Click a track to play it. <kbd>↑</kbd>/<kbd>↓</kbd> (or
+will play, shuffle included: the eight tracks before the playing one, the
+playing one (marked ▸), then the eight after it. A shorter panel keeps the
+playing track in the middle. Click a track to play it. <kbd>↑</kbd>/<kbd>↓</kbd> (or
 <kbd>j</kbd>/<kbd>k</kbd>) move a cursor through the list, <kbd>Enter</kbd>
 plays the track under it and <kbd>d</kbd> takes it out of the queue. The cursor
 goes away again when the track changes. While it is out of sight,
