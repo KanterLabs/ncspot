@@ -8,7 +8,7 @@ use cursive::Cursive;
 use cursive::traits::Scrollable;
 use cursive::views::{Dialog, SelectView, TextView};
 
-use crate::cast::{self, Target};
+use crate::cast::{self, Target, roku};
 use crate::model::playable::Playable;
 use crate::queue::Queue;
 use crate::spotify::{PlayerEvent, Spotify};
@@ -70,10 +70,10 @@ fn picker(spotify: Spotify, queue: Arc<Queue>, targets: Vec<Target>) -> Modal<Di
                 format!("▸  {name}  ({kind}, playing)")
             }
             Target::Connect { name, kind, .. } => format!("   {name}  ({kind})"),
-            Target::Roku(roku) if roku.has_spotify => {
-                format!("   {}  (Roku, opens Spotify)", roku.name)
-            }
-            Target::Roku(roku) => format!("   {}  (Roku, no Spotify app)", roku.name),
+            Target::Roku(roku) => match roku.spotify {
+                roku::SpotifyApp::Missing => format!("   {}  (Roku, no Spotify app)", roku.name),
+                _ => format!("   {}  (Roku, opens Spotify)", roku.name),
+            },
         };
         select.add_item(label, Choice::Target(target));
     }

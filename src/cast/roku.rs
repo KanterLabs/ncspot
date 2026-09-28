@@ -26,7 +26,20 @@ pub struct Roku {
     /// `http://<address>:8060`
     pub base: String,
     /// Whether the Spotify app is installed. Without it there is nothing to cast to.
-    pub has_spotify: bool,
+    pub spotify: SpotifyApp,
+}
+
+/// What the Roku said about its Spotify app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpotifyApp {
+    /// Installed, under this app id.
+    Installed(String),
+    /// The Roku listed its apps, and Spotify is not among them.
+    Missing,
+    /// The Roku would not list its apps. Rokus set to limit what the network may
+    /// ask of them refuse this while still answering everything else, so it says
+    /// nothing about whether Spotify is there; opening it is worth a try.
+    Unknown,
 }
 
 /// Find the Rokus on the network: those that answer an SSDP search within
@@ -45,12 +58,16 @@ pub fn discover(timeout: Duration, hosts: &[String]) -> Vec<Roku> {
         .filter_map(|base| {
             let info = get(&client, &format!("{base}/query/device-info"))?;
             let name = device_name(&info)?;
-            let has_spotify = get(&client, &format!("{base}/query/apps"))
-                .is_some_and(|apps| lists_app(&apps, SPOTIFY_APP_ID));
+            let spotify = match get(&client, &format!("{base}/query/apps")) {
+                Some(apps) => {
+                    find_spotify(&apps).map_or(SpotifyApp::Missing, SpotifyApp::Installed)
+                }
+                None => SpotifyApp::Unknown,
+            };
             Some(Roku {
                 name,
                 base,
-                has_spotify,
+                spotify,
             })
         })
         .collect()
@@ -58,13 +75,32 @@ pub fn discover(timeout: Duration, hosts: &[String]) -> Vec<Roku> {
 
 /// Open the Spotify app on `roku`, bringing it to the front if it is already open.
 pub fn launch_spotify(roku: &Roku) -> Result<(), String> {
-    let url = format!("{}/launch/{SPOTIFY_APP_ID}", roku.base);
-    client()
+    let id = match &roku.spotify {
+        SpotifyApp::Installed(id) => id.as_str(),
+        _ => SPOTIFY_APP_ID,
+    };
+    let url = format!("{}/launch/{id}", roku.base);
+    let response = client()
         .post(&url)
         .send()
-        .and_then(|response| response.error_for_status())
-        .map(|_| ())
-        .map_err(|e| format!("could not open Spotify on {}: {e}", roku.name))
+        .map_err(|e| format!("Could not reach {}: {e}", roku.name))?;
+    match response.status().as_u16() {
+        200..=299 => Ok(()),
+        // Refused, rather than failed: the Roku is limiting what the network may do.
+        401 | 403 => Err(format!(
+            "{} refused to open Spotify. On the Roku, set Settings > System > Advanced \
+             system settings > Control by mobile apps > Network access to Permissive.",
+            roku.name
+        )),
+        404 => Err(format!(
+            "{} does not have the Spotify app installed.",
+            roku.name
+        )),
+        status => Err(format!(
+            "{} could not open Spotify (HTTP {status}).",
+            roku.name
+        )),
+    }
 }
 
 /// Send an SSDP search and collect the ECP base URL of every Roku that answers.
@@ -171,8 +207,34 @@ fn device_name(info: &str) -> Option<String> {
     .map(unescape)
 }
 
-fn lists_app(apps: &str, id: &str) -> bool {
-    apps.contains(&format!("id=\"{id}\""))
+/// The id of the Spotify app in a Roku's app list: the store's usual id, or any
+/// app named Spotify, since the id is not the same in every region.
+fn find_spotify(apps: &str) -> Option<String> {
+    let mut named = None;
+    for entry in apps.split("<app ").skip(1) {
+        let Some((attributes, rest)) = entry.split_once('>') else {
+            continue;
+        };
+        let Some(id) = attribute(attributes, "id") else {
+            continue;
+        };
+        if id == SPOTIFY_APP_ID {
+            return Some(id.to_string());
+        }
+        let title = rest.split("</app>").next().unwrap_or_default();
+        if named.is_none() && title.to_lowercase().contains("spotify") {
+            named = Some(id.to_string());
+        }
+    }
+    named
+}
+
+/// The value of `name="..."` among an element's attributes.
+fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!("{name}=\"");
+    let start = attributes.find(&key)? + key.len();
+    let end = start + attributes[start..].find('"')?;
+    Some(&attributes[start..end])
 }
 
 fn unescape(text: &str) -> String {
@@ -190,11 +252,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::{base_for, device_name, discover, launch_spotify, lists_app, location};
+    use super::{
+        SpotifyApp, base_for, device_name, discover, find_spotify, launch_spotify, location,
+    };
 
     /// A stand in for a Roku's ECP server: answers the two queries and records
     /// every request line it is sent.
-    fn fake_roku() -> (String, Arc<Mutex<Vec<String>>>) {
+    fn fake_roku(refuse_apps: bool) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -218,9 +282,16 @@ mod tests {
                     ""
                 };
                 log.lock().unwrap().push(request.trim().to_string());
+                // A Roku limiting network access refuses the app list with a 403.
+                let refused = refuse_apps && request.contains("/query/apps");
+                let (status, body) = if refused {
+                    ("403 Forbidden", "")
+                } else {
+                    ("200 OK", body)
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .unwrap();
@@ -231,7 +302,7 @@ mod tests {
 
     #[test]
     fn a_configured_roku_is_named_and_spotify_opened_on_it() {
-        let (address, seen) = fake_roku();
+        let (address, seen) = fake_roku(false);
         let found = discover(Duration::from_millis(50), std::slice::from_ref(&address));
         // Anything real on the network that answers the search is listed too, so
         // pick the fake out by its address.
@@ -240,7 +311,7 @@ mod tests {
             .find(|roku| roku.base == format!("http://{address}"))
             .expect("the configured roku is found");
         assert_eq!(roku.name, "Living Room TV");
-        assert!(roku.has_spotify);
+        assert_eq!(roku.spotify, SpotifyApp::Installed("22297".into()));
 
         launch_spotify(roku).expect("the launch is accepted");
         let seen = seen.lock().unwrap();
@@ -278,10 +349,28 @@ mod tests {
     }
 
     #[test]
+    fn a_roku_that_will_not_list_its_apps_is_still_offered() {
+        let (address, _) = fake_roku(true);
+        let found = discover(Duration::from_millis(50), std::slice::from_ref(&address));
+        let roku = found
+            .iter()
+            .find(|roku| roku.base == format!("http://{address}"))
+            .expect("the configured roku is found");
+        assert_eq!(roku.spotify, SpotifyApp::Unknown);
+    }
+
+    #[test]
     fn spotify_is_found_in_the_app_list() {
         let apps = r#"<apps><app id="12" type="appl" version="5.1">Netflix</app>
                       <app id="22297" type="appl" version="7.3">Spotify Music</app></apps>"#;
-        assert!(lists_app(apps, "22297"));
-        assert!(!lists_app(apps, "2213"));
+        assert_eq!(find_spotify(apps).as_deref(), Some("22297"));
+
+        // Listed under another id, it is still found by its name.
+        let elsewhere = r#"<apps><app id="12" type="appl">Netflix</app>
+                           <app id="551012" type="appl" version="1.0">Spotify</app></apps>"#;
+        assert_eq!(find_spotify(elsewhere).as_deref(), Some("551012"));
+
+        let without = r#"<apps><app id="12" type="appl">Netflix</app></apps>"#;
+        assert_eq!(find_spotify(without), None);
     }
 }

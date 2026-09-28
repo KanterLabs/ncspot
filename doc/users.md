@@ -262,7 +262,10 @@ The picker lists the Spotify Connect devices your account can see, plus the
 Rokus on your network. Picking a Roku opens its Spotify app first and waits
 for it to come online, so the TV does not need to be on the Spotify app
 already. The Roku needs the Spotify app installed and signed in to the same
-account. Rokus are found by an SSDP search of the local network. If yours is
+account. If the Roku refuses to open it, set **Settings > System >
+Advanced system settings > Control by mobile apps > Network access** to
+*Permissive* on the Roku: some Roku software limits what other devices on the
+network may ask of it. Rokus are found by an SSDP search of the local network. If yours is
 not found, for instance because the network drops multicast, list its address
 in the config:
 

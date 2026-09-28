@@ -102,7 +102,7 @@ pub fn connect(api: &WebApi, target: &Target) -> Result<(String, String), String
         Target::Connect { id, name, .. } => return Ok((id.clone(), name.clone())),
         Target::Roku(roku) => roku,
     };
-    if !roku.has_spotify {
+    if roku.spotify == roku::SpotifyApp::Missing {
         return Err(format!(
             "{} does not have the Spotify app. Install it from the Roku channel store.",
             roku.name
