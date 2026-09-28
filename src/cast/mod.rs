@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use log::{debug, info, warn};
-use rspotify::model::{DeviceType, PlayableItem};
+use rspotify::model::{Device, DeviceType, PlayableItem};
 use rspotify::prelude::Id;
 
 use crate::events::{Event, EventManager};
@@ -96,8 +96,12 @@ pub fn targets(api: &WebApi, roku_hosts: &[String]) -> Vec<Target> {
 }
 
 /// Turn `target` into a Connect device to play on, opening Spotify on a Roku and
-/// waiting for it to come up.
-pub fn connect(api: &WebApi, target: &Target) -> Result<(String, String), String> {
+/// waiting for it to come up. `progress` is told what is happening while it waits.
+pub fn connect(
+    api: &WebApi,
+    target: &Target,
+    progress: &dyn Fn(String),
+) -> Result<(String, String), String> {
     let roku = match target {
         Target::Connect { id, name, .. } => return Ok((id.clone(), name.clone())),
         Target::Roku(roku) => roku,
@@ -115,33 +119,82 @@ pub fn connect(api: &WebApi, target: &Target) -> Result<(String, String), String
         .into_iter()
         .filter_map(|device| device.id)
         .collect();
+    progress(format!("Opening Spotify on {}…", roku.name));
     roku::launch_spotify(roku)?;
 
-    let deadline = Instant::now() + ROKU_WAKE;
-    while Instant::now() < deadline {
+    let started = Instant::now();
+    let mut seen: Option<Vec<Device>> = None;
+    while started.elapsed() < ROKU_WAKE {
         thread::sleep(Duration::from_secs(1));
-        let devices = api.devices().unwrap_or_default();
-        // The app usually names itself after the Roku; failing that, a TV that
-        // was not there before it was opened is the one.
-        let found = devices
-            .iter()
-            .find(|device| same_name(&device.name, &roku.name))
-            .or_else(|| {
-                devices.iter().find(|device| {
-                    device._type == DeviceType::Tv
-                        && device.id.as_ref().is_some_and(|id| !before.contains(id))
-                })
-            });
-        if let Some(device) = found
+        progress(format!(
+            "Spotify is open on {}.\nWaiting for it to come online… {}s",
+            roku.name,
+            started.elapsed().as_secs()
+        ));
+        let Some(devices) = api.devices() else {
+            continue;
+        };
+        debug!(
+            "devices while waiting for {}: {:?}",
+            roku.name,
+            devices
+                .iter()
+                .map(|device| (&device.name, &device._type))
+                .collect::<Vec<_>>()
+        );
+        if let Some(device) = pick(&devices, roku, &before)
             && let Some(id) = &device.id
         {
             return Ok((id.clone(), device.name.clone()));
         }
+        seen = Some(devices);
     }
+
+    let listing = match seen {
+        None => "Spotify would not say which devices are online.".to_string(),
+        Some(devices) if devices.is_empty() => {
+            "Spotify reported no devices online at all.".to_string()
+        }
+        Some(devices) => {
+            let lines: Vec<String> = devices
+                .iter()
+                .map(|device| format!("  • {} ({})", device.name, kind(&device._type)))
+                .collect();
+            format!("Spotify reported these devices:\n{}", lines.join("\n"))
+        }
+    };
     Err(format!(
-        "Spotify opened on {} but did not come online. Check it is signed in to this account.",
+        "Spotify opened on {} but never came online for this account.\n\n{listing}\n\n\
+         Check the Spotify app on the TV is signed in to the same account. Picking a \
+         device from the Spotify app on your phone once can also wake it up.",
         roku.name
     ))
+}
+
+/// Which of `devices` is the Spotify app on `roku`, most certain match first: one
+/// named after any of the Roku's names; a TV that came online since the app was
+/// opened; anything that came online since; or the only TV there is.
+fn pick<'a>(devices: &'a [Device], roku: &roku::Roku, before: &[String]) -> Option<&'a Device> {
+    let usable = |device: &&Device| device.id.is_some() && device.name != "ncspot";
+    let is_new = |device: &&Device| device.id.as_ref().is_some_and(|id| !before.contains(id));
+    let is_tv = |device: &&Device| matches!(device._type, DeviceType::Tv | DeviceType::Stb);
+
+    devices
+        .iter()
+        .filter(usable)
+        .find(|device| roku.names.iter().any(|name| same_name(&device.name, name)))
+        .or_else(|| {
+            devices
+                .iter()
+                .filter(usable)
+                .find(|d| is_new(d) && is_tv(d))
+        })
+        .or_else(|| devices.iter().filter(usable).find(is_new))
+        .or_else(|| {
+            let mut tvs = devices.iter().filter(usable).filter(is_tv);
+            let only = tvs.next()?;
+            tvs.next().is_none().then_some(only)
+        })
 }
 
 /// Names match ignoring case, spacing and punctuation, or when one contains the
@@ -485,7 +538,10 @@ mod tests {
     use crate::model::track::Track;
     use crate::spotify::Spotify;
 
-    use super::{Loaded, Observed, Remote, Reported, same_name};
+    use rspotify::model::{Device, DeviceType};
+
+    use super::roku::{Roku, SpotifyApp};
+    use super::{Loaded, Observed, Remote, Reported, pick, same_name};
 
     const SONG: &str = "spotify:track:say";
 
@@ -589,6 +645,74 @@ mod tests {
         assert!(remote.observe(Some(SONG), false, 0, true).is_none());
         remote.quiet_until = Instant::now() - Duration::from_secs(1);
         assert!(remote.observe(Some(SONG), true, 500, false).is_some());
+    }
+
+    fn device(id: &str, name: &str, kind: DeviceType) -> Device {
+        Device {
+            id: Some(id.into()),
+            is_active: false,
+            is_private_session: false,
+            is_restricted: false,
+            name: name.into(),
+            _type: kind,
+            volume_percent: None,
+        }
+    }
+
+    fn roku() -> Roku {
+        Roku {
+            name: "Living Room TV".into(),
+            names: vec!["Living Room TV".into(), "TCL Roku TV".into()],
+            base: "http://10.0.0.41:8060".into(),
+            spotify: SpotifyApp::Unknown,
+        }
+    }
+
+    #[test]
+    fn the_app_is_found_under_any_of_the_rokus_names() {
+        let devices = [
+            device("phone", "Pixel", DeviceType::Smartphone),
+            device("tv", "TCL Roku TV", DeviceType::Tv),
+        ];
+        // Known before it was opened, but its name gives it away.
+        let before = ["phone".to_string(), "tv".to_string()];
+        assert_eq!(
+            pick(&devices, &roku(), &before).unwrap().name,
+            "TCL Roku TV"
+        );
+    }
+
+    #[test]
+    fn a_newly_online_device_is_the_app_whatever_it_calls_itself() {
+        let devices = [
+            device("phone", "Pixel", DeviceType::Smartphone),
+            device("new", "Spotify", DeviceType::Unknown),
+        ];
+        let before = ["phone".to_string()];
+        assert_eq!(
+            pick(&devices, &roku(), &before).unwrap().id.as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn the_only_tv_is_taken_when_nothing_else_fits() {
+        let devices = [
+            device("phone", "Pixel", DeviceType::Smartphone),
+            device("tv", "Bedroom", DeviceType::Tv),
+        ];
+        let before = ["phone".to_string(), "tv".to_string()];
+        assert_eq!(
+            pick(&devices, &roku(), &before).unwrap().id.as_deref(),
+            Some("tv")
+        );
+
+        let two = [
+            device("a", "Bedroom", DeviceType::Tv),
+            device("b", "Den", DeviceType::Tv),
+        ];
+        let before = ["a".to_string(), "b".to_string()];
+        assert!(pick(&two, &roku(), &before).is_none());
     }
 
     #[test]

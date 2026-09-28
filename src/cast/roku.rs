@@ -23,6 +23,9 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct Roku {
     /// What the owner named it, such as "Living Room TV".
     pub name: String,
+    /// Every name the Roku goes by, the owner's first: the Spotify app may name
+    /// itself after any of them.
+    pub names: Vec<String>,
     /// `http://<address>:8060`
     pub base: String,
     /// Whether the Spotify app is installed. Without it there is nothing to cast to.
@@ -57,7 +60,8 @@ pub fn discover(timeout: Duration, hosts: &[String]) -> Vec<Roku> {
         .into_keys()
         .filter_map(|base| {
             let info = get(&client, &format!("{base}/query/device-info"))?;
-            let name = device_name(&info)?;
+            let names = device_names(&info);
+            let name = names.first()?.clone();
             let spotify = match get(&client, &format!("{base}/query/apps")) {
                 Some(apps) => {
                     find_spotify(&apps).map_or(SpotifyApp::Missing, SpotifyApp::Installed)
@@ -66,6 +70,7 @@ pub fn discover(timeout: Duration, hosts: &[String]) -> Vec<Roku> {
             };
             Some(Roku {
                 name,
+                names,
                 base,
                 spotify,
             })
@@ -193,18 +198,24 @@ fn element<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     (!text.is_empty()).then_some(text)
 }
 
-/// The name to show for a Roku: the one its owner gave it, or failing that the
-/// one it came with.
-fn device_name(info: &str) -> Option<String> {
-    [
+/// Every name a Roku goes by, best first: the one its owner gave it, then the ones
+/// it came with.
+fn device_names(info: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for tag in [
         "user-device-name",
         "friendly-device-name",
         "friendly-model-name",
         "model-name",
-    ]
-    .into_iter()
-    .find_map(|tag| element(info, tag))
-    .map(unescape)
+        "default-device-name",
+    ] {
+        if let Some(name) = element(info, tag).map(unescape)
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// The id of the Spotify app in a Roku's app list: the store's usual id, or any
@@ -253,7 +264,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        SpotifyApp, base_for, device_name, discover, find_spotify, launch_spotify, location,
+        SpotifyApp, base_for, device_names, discover, find_spotify, launch_spotify, location,
     };
 
     /// A stand in for a Roku's ECP server: answers the two queries and records
@@ -341,11 +352,14 @@ mod tests {
         let info = "<device-info><model-name>Roku Ultra</model-name>\
                     <friendly-device-name>Roku Ultra - X001</friendly-device-name>\
                     <user-device-name>Shane&apos;s TV</user-device-name></device-info>";
-        assert_eq!(device_name(info).as_deref(), Some("Shane's TV"));
+        assert_eq!(
+            device_names(info),
+            ["Shane's TV", "Roku Ultra - X001", "Roku Ultra"]
+        );
 
         let unnamed = "<device-info><user-device-name></user-device-name>\
                        <friendly-device-name>Roku Ultra - X001</friendly-device-name></device-info>";
-        assert_eq!(device_name(unnamed).as_deref(), Some("Roku Ultra - X001"));
+        assert_eq!(device_names(unnamed), ["Roku Ultra - X001"]);
     }
 
     #[test]

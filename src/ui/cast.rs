@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::thread;
 
 use cursive::Cursive;
-use cursive::traits::Scrollable;
+use cursive::traits::{Nameable, Scrollable};
 use cursive::views::{Dialog, SelectView, TextView};
 
 use crate::cast::{self, Target, roku};
@@ -14,6 +14,9 @@ use crate::queue::Queue;
 use crate::spotify::{PlayerEvent, Spotify};
 use crate::ui::modal::Modal;
 use crate::ui::osd;
+
+/// The text of the dialog shown while a device is woken.
+const STATUS: &str = "cast_status";
 
 #[derive(Clone)]
 enum Choice {
@@ -103,16 +106,21 @@ fn start(s: &mut Cursive, spotify: Spotify, queue: Arc<Queue>, target: Target) {
     let waking = matches!(target, Target::Roku(_));
     if waking {
         s.add_layer(Modal::new(
-            Dialog::around(TextView::new(format!(
-                "Opening Spotify on {}…",
-                target.name()
-            )))
+            Dialog::around(
+                TextView::new(format!("Opening Spotify on {}…", target.name())).with_name(STATUS),
+            )
             .title("Cast"),
         ));
     }
     let sink = s.cb_sink().clone();
     thread::spawn(move || {
-        let connected = cast::connect(&spotify.api, &target);
+        let status = sink.clone();
+        let progress = move |text: String| {
+            let _ = status.send(Box::new(move |s: &mut Cursive| {
+                s.call_on_name(STATUS, |view: &mut TextView| view.set_content(text));
+            }));
+        };
+        let connected = cast::connect(&spotify.api, &target, &progress);
         let _ = sink.send(Box::new(move |s: &mut Cursive| {
             if waking {
                 s.pop_layer();
@@ -122,7 +130,13 @@ fn start(s: &mut Cursive, spotify: Spotify, queue: Arc<Queue>, target: Target) {
                     spotify.cast_to(id, name.clone(), resume_point(&spotify, &queue));
                     osd::notify(format!("Casting to {name}"));
                 }
-                Err(message) => osd::notify(message),
+                // A failure here has things to say, and a notice fades before
+                // they can be read, so it stays up until dismissed.
+                Err(message) => s.add_layer(Modal::new(
+                    Dialog::around(TextView::new(message))
+                        .title("Could not cast")
+                        .dismiss_button("Close"),
+                )),
             }
         }));
     });
