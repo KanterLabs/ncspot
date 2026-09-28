@@ -106,6 +106,7 @@ playback depending on your desktop environment settings. Have a look at the
 | <kbd>]</kbd>                  | Increase volume by 5%.                                         |
 | <kbd>R</kbd>                  | Toggle _Repeat_ mode.                                          |
 | <kbd>Z</kbd>                  | Toggle _Shuffle_ state.                                        |
+| <kbd>Shift</kbd>+<kbd>C</kbd> | Cast to a TV or speaker (see [Casting](#casting)).             |
 
 ### Context Menus
 | Key                           | Command                                                                                                   |
@@ -250,6 +251,36 @@ turns off. Keeping them moving means the interface redraws a few times a second
 whenever something is playing, wherever you are in the app; `visualizer_fps = 0`
 stops that if you would rather it stayed still.
 
+### Casting
+<kbd>Shift</kbd>+<kbd>C</kbd> (or `:cast`) moves playback to another device:
+a Roku TV, a speaker, a console, or anything else signed in to Spotify. ncspot
+stays the remote. The queue, shuffle, repeat, the transport keys, seeking and
+the volume all work as before, and the Now Playing screen and statusbar follow
+what the device is playing.
+
+The picker lists the Spotify Connect devices your account can see, plus the
+Rokus on your network. Picking a Roku opens its Spotify app first and waits
+for it to come online, so the TV does not need to be on the Spotify app
+already. The Roku needs the Spotify app installed and signed in to the same
+account. Rokus are found by an SSDP search of the local network. If yours is
+not found, for instance because the network drops multicast, list its address
+in the config:
+
+```toml
+roku_hosts = ["10.0.0.41"]
+```
+
+While casting, the statusbar shows the device's name. Click it to pick another
+device. `:cast stop`, or the first entry in the picker, brings playback back to
+this machine, carrying on from the same point. If the device goes away (it is
+turned off, or someone else starts playing on it), ncspot waits a few seconds
+and then brings playback home, paused.
+
+The device plays one track at a time, with ncspot's queue choosing what comes
+next, so there can be a second of silence between tracks. The visualizer has no
+audio to analyse while casting, so it falls back to its animated band. Casting
+needs Spotify Premium, like ncspot itself.
+
 ### Lists
 The playing row of any list — library, queue, search results — fills with the
 album's colour as the track plays, so a glance at a list says how far through it
@@ -303,6 +334,7 @@ Note: \<FOO\> - mandatory arg; [BAR] - optional arg
 | `noop`                                                           | Do nothing. Useful for disabling default keybindings. See [custom keybindings](#custom-keybindings).                                                                                                                                                            |
 | `reload`                                                         | Reload the configuration from disk. See [Configuration](#configuration).                                                                                                                                                                                        |
 | `reconnect`                                                      | Reconnect to Spotify (useful when session has expired or connection was lost)                                                                                                                                                                                   |
+| `cast [stop]`                                                    | Pick a device to cast to, or with `stop` bring playback back to this machine. See [Casting](#casting).                                                                                                                                                          |
 | `add [current]`                                                  | Add selected track to playlist, if `current` is passed the currently playing track will be added                                                                                                                                                                |
 | `save [current]`                                                 | Save selected item, if `current` is passed the currently playing item will be saved                                                                                                                                                                             |
 
@@ -364,6 +396,7 @@ Possible configuration values are:
 |---------------------------------|----------------------------------------------------------------|---------------------------------------------------------------------------------------|---------------------|
 | `command_key`                   | Key to open command line                                       | Single character                                                                      | `:`                 |
 | `initial_screen`                | Screen to show after startup                                   | `"library"`, `"search"`, `"queue"`, `"playing"`, `"cover"`<sup>[1]</sup>              | `"library"`         |
+| `roku_hosts`                    | Addresses of Rokus to offer for casting, if the network search does not find them | List of addresses, e.g. `["10.0.0.41"]`                              |                     |
 | `use_nerdfont`                  | Turn nerdfont glyphs on/off                                    | `true`, `false`                                                                       | `false`             |
 | `flip_status_indicators`        | Reverse play/pause icon meaning<sup>[2]</sup>                  | `true`, `false`                                                                       | `false`             |
 | `backend`                       | Audio backend to use                                           | String<sup>[3]</sup>                                                                  |                     |

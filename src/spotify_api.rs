@@ -7,10 +7,11 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use log::{debug, error, info};
 use rspotify::http::HttpError;
 use rspotify::model::{
-    AlbumId, AlbumType, ArtistId, CursorBasedPage, EpisodeId, FullAlbum, FullArtist, FullEpisode,
-    FullPlaylist, FullShow, FullTrack, ItemPositions, LibraryId, Market, Page, PlayableId,
-    PlaylistId, PlaylistResult, PrivateUser, Recommendations, SavedAlbum, SavedTrack, SearchResult,
-    SearchType, Show, ShowId, SimplifiedTrack, TrackId, UserId,
+    AdditionalType, AlbumId, AlbumType, ArtistId, CurrentPlaybackContext, CursorBasedPage, Device,
+    EpisodeId, FullAlbum, FullArtist, FullEpisode, FullPlaylist, FullShow, FullTrack,
+    ItemPositions, LibraryId, Market, Page, PlayableId, PlaylistId, PlaylistResult, PrivateUser,
+    Recommendations, SavedAlbum, SavedTrack, SearchResult, SearchType, Show, ShowId,
+    SimplifiedTrack, TrackId, UserId,
 };
 use rspotify::{AuthCodeSpotify, ClientError, ClientResult, Config, prelude::*};
 use tokio::sync::mpsc;
@@ -849,6 +850,66 @@ impl WebApi {
     /// Get details about the logged in user.
     pub fn current_user(&self) -> Result<PrivateUser, ()> {
         self.api_with_retry(|api| api.current_user()).ok_or(())
+    }
+
+    /// The Spotify Connect devices the account can play on right now.
+    pub fn devices(&self) -> Option<Vec<Device>> {
+        self.api_with_retry(|api| api.device())
+    }
+
+    /// Play `playable` from `position_ms` on the Connect device `device_id`.
+    pub fn play_on(&self, device_id: &str, playable: &Playable, position_ms: u32) -> bool {
+        let uri = playable.uri();
+        let id = match playable {
+            Playable::Track(_) => {
+                TrackId::from_uri(&uri).map(|id| PlayableId::Track(id.into_static()))
+            }
+            Playable::Episode(_) => {
+                EpisodeId::from_uri(&uri).map(|id| PlayableId::Episode(id.into_static()))
+            }
+        };
+        let Ok(id) = id else {
+            error!("cannot cast {uri}: not a playable id");
+            return false;
+        };
+        let position = ChronoDuration::milliseconds(i64::from(position_ms));
+        self.api_with_retry(|api| {
+            api.start_uris_playback([id.clone()], Some(device_id), None, Some(position))
+        })
+        .is_some()
+    }
+
+    pub fn resume_on(&self, device_id: &str) -> bool {
+        self.api_with_retry(|api| api.resume_playback(Some(device_id), None))
+            .is_some()
+    }
+
+    pub fn pause_on(&self, device_id: &str) -> bool {
+        self.api_with_retry(|api| api.pause_playback(Some(device_id)))
+            .is_some()
+    }
+
+    pub fn seek_on(&self, device_id: &str, position_ms: u32) -> bool {
+        let position = ChronoDuration::milliseconds(i64::from(position_ms));
+        self.api_with_retry(|api| api.seek_track(position, Some(device_id)))
+            .is_some()
+    }
+
+    pub fn volume_on(&self, device_id: &str, percent: u8) -> bool {
+        self.api_with_retry(|api| api.volume(percent.min(100), Some(device_id)))
+            .is_some()
+    }
+
+    /// What the account is playing and where, or `None` when nothing is active or
+    /// the request failed.
+    pub fn playback(&self) -> Option<CurrentPlaybackContext> {
+        self.api_with_retry(|api| {
+            api.current_playback(
+                None,
+                Some([&AdditionalType::Track, &AdditionalType::Episode]),
+            )
+        })
+        .flatten()
     }
 }
 

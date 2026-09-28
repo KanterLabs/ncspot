@@ -309,6 +309,15 @@ impl CommandManager {
                 self.spotify.shutdown();
                 Ok(None)
             }
+            Command::Cast(true) => {
+                crate::ui::cast::come_home(&self.spotify, &self.queue);
+                Ok(None)
+            }
+            Command::Cast(false) => {
+                let hosts = self.config.values().roku_hosts.clone().unwrap_or_default();
+                crate::ui::cast::open(s, self.spotify.clone(), self.queue.clone(), hosts);
+                Ok(None)
+            }
             Command::AddCurrent => {
                 if let Some(track) = self.queue.get_current()
                     && let Some(track) = track.track()
@@ -446,6 +455,7 @@ impl CommandManager {
         kb.insert("<".into(), vec![Command::Previous]);
         kb.insert(">".into(), vec![Command::Next]);
         kb.insert("c".into(), vec![Command::Clear]);
+        kb.insert("Shift+c".into(), vec![Command::Cast(false)]);
         kb.insert(
             "Space".into(),
             vec![

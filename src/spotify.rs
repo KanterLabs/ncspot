@@ -23,6 +23,7 @@ use url::Url;
 
 use crate::application::ASYNC_RUNTIME;
 use crate::authentication::SPOTIFY_CLIENT_ID;
+use crate::cast;
 use crate::config;
 use crate::events::{Event, EventManager};
 use crate::model::playable::Playable;
@@ -78,6 +79,9 @@ pub struct Spotify {
     since: Arc<RwLock<Option<SystemTime>>>,
     /// Channel to send commands to the worker thread.
     channel: Arc<RwLock<Option<mpsc::UnboundedSender<WorkerCommand>>>>,
+    /// The cast running, if playback is on another device: player commands go to
+    /// it instead of the worker while it is.
+    cast: Arc<RwLock<Option<Arc<cast::Session>>>>,
     /// The audio on its way to the speakers, for the visualizer to read.
     tap: Arc<AudioTap>,
 }
@@ -99,6 +103,7 @@ impl Spotify {
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),
+            cast: Arc::new(RwLock::new(None)),
             tap: AudioTap::new(),
         };
 
@@ -138,6 +143,7 @@ impl Spotify {
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),
+            cast: Arc::new(RwLock::new(None)),
             tap: AudioTap::new(),
         }
     }
@@ -457,8 +463,19 @@ impl Spotify {
         }
     }
 
-    /// Send a [WorkerCommand] to the worker thread.
+    /// Send a [WorkerCommand] to the worker thread, or to the device being cast to.
     fn send_worker(&self, cmd: WorkerCommand) {
+        let session = self.cast.read().unwrap().clone();
+        if let Some(session) = session
+            && session.handle(&cmd)
+        {
+            return;
+        }
+        self.send_to_local(cmd);
+    }
+
+    /// Send a [WorkerCommand] to the local worker thread, whatever is being cast.
+    fn send_to_local(&self, cmd: WorkerCommand) {
         info!("sending command to worker: {cmd:?}");
         let channel = self.channel.read().unwrap();
         match channel.as_ref() {
@@ -538,6 +555,54 @@ impl Spotify {
     /// Shut down the worker thread.
     pub fn shutdown(&self) {
         self.send_worker(WorkerCommand::Shutdown);
+    }
+
+    pub fn events(&self) -> EventManager {
+        self.events.clone()
+    }
+
+    /// The name of the device being cast to, if playback is on one.
+    pub fn cast_target(&self) -> Option<String> {
+        self.cast
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|session| session.name().to_string())
+    }
+
+    /// Move playback to the Connect device `device_id`, carrying on with `resume`
+    /// (the item, where in it, and whether it was playing) when there is one.
+    pub fn cast_to(&self, device_id: String, name: String, resume: Option<(Playable, u32, bool)>) {
+        if let Some(previous) = self.cast.write().unwrap().take() {
+            previous.end(true);
+        }
+        self.send_to_local(WorkerCommand::Pause);
+        let session = cast::Session::start(self.clone(), device_id, name);
+        *self.cast.write().unwrap() = Some(session);
+        if let Some((playable, position_ms, playing)) = resume {
+            self.load(&playable, playing, position_ms);
+        }
+    }
+
+    /// Bring playback back to this machine, pausing the device, and carry on with
+    /// `resume` here.
+    pub fn stop_cast(&self, resume: Option<(Playable, u32, bool)>) {
+        let Some(session) = self.cast.write().unwrap().take() else {
+            return;
+        };
+        session.end(true);
+        if let Some((playable, position_ms, playing)) = resume {
+            self.load(&playable, playing, position_ms);
+        }
+    }
+
+    /// The cast device went away on its own: stop sending it commands, and have
+    /// the item it was playing ready here, paused where it got to.
+    pub(crate) fn cast_lost(&self, resume: Option<(Playable, u32)>) {
+        self.cast.write().unwrap().take();
+        if let Some((playable, position_ms)) = resume {
+            self.load(&playable, false, position_ms);
+        }
     }
 
     #[cfg(feature = "mpris")]

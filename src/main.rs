@@ -13,6 +13,7 @@ use ncspot::program_arguments;
 mod application;
 mod audio_tap;
 mod authentication;
+mod cast;
 mod cli;
 mod command;
 mod commands;

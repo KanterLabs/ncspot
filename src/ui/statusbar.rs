@@ -48,6 +48,9 @@ const MIN_TEXT_WIDTH: usize = 14;
 const RIGHT_MIN_WIDTH: usize = 24;
 const RIGHT_MAX_WIDTH: usize = 56;
 
+/// The most of a cast device's name the bar shows.
+const CAST_NAME_WIDTH: usize = 18;
+
 /// Rows of the mini player within the statusbar.
 const TOP: usize = 1;
 const BOTTOM: usize = 2;
@@ -62,6 +65,8 @@ enum Control {
     Shuffle,
     Repeat,
     Volume,
+    /// The cast device's name: a click opens the cast picker.
+    Cast,
 }
 
 /// A run of cells on one row that responds to the mouse, rebuilt on every draw.
@@ -473,6 +478,24 @@ impl StatusBar {
             printer.with_color(inks.text, |printer| printer.print((x, BOTTOM), updating));
         }
 
+        // Where the sound is coming from, while it is not this machine.
+        if let Some(device) = self.spotify.cast_target() {
+            let glyph = if self.use_nerdfont() {
+                "\u{f0118}"
+            } else {
+                "⇢"
+            };
+            let label = format!("{glyph} {}", truncate_name(&device, CAST_NAME_WIDTH));
+            x = x.saturating_sub(label.width() + 2);
+            printer.with_color(inks.bar, |printer| printer.print((x, BOTTOM), &label));
+            hitboxes.push(Hitbox {
+                row: BOTTOM,
+                start: x,
+                width: label.width(),
+                control: Control::Cast,
+            });
+        }
+
         let room = x.saturating_sub(geometry.right_start + 1);
         const LABEL: &str = "next  ";
         if let Some(next) = self.next_up()
@@ -517,6 +540,8 @@ impl StatusBar {
             }
             // The number is too small a target to click a level into; it scrolls.
             Control::Volume => {}
+            // Needs the Cursive root, so `on_event` opens the picker itself.
+            Control::Cast => {}
         }
     }
 
@@ -650,6 +675,22 @@ impl View for StatusBar {
             .copied()
             .find(|hitbox| hitbox.contains(position));
 
+        if let (MouseEvent::Press(MouseButton::Left), Some(hitbox)) = (event, hit)
+            && hitbox.control == Control::Cast
+        {
+            let spotify = self.spotify.clone();
+            let queue = self.queue.clone();
+            let hosts = self
+                .library
+                .cfg
+                .values()
+                .roku_hosts
+                .clone()
+                .unwrap_or_default();
+            return EventResult::with_cb(move |s| {
+                crate::ui::cast::open(s, spotify.clone(), queue.clone(), hosts.clone());
+            });
+        }
         match (event, hit) {
             (MouseEvent::Press(MouseButton::Left), Some(hitbox)) => {
                 self.activate(hitbox.control, hitbox, position);
@@ -665,6 +706,22 @@ impl View for StatusBar {
         }
         EventResult::Consumed(None)
     }
+}
+
+/// `name` cut to `width` columns with an ellipsis.
+fn truncate_name(name: &str, width: usize) -> String {
+    if name.width() <= width {
+        return name.to_string();
+    }
+    let mut cut = String::new();
+    for character in name.chars() {
+        if cut.width() + 1 >= width {
+            break;
+        }
+        cut.push(character);
+    }
+    cut.push('…');
+    cut
 }
 
 #[cfg(test)]

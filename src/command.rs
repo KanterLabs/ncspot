@@ -159,6 +159,8 @@ pub enum Command {
     Redraw,
     Execute(String),
     Reconnect,
+    /// Open the cast picker, or with `true` stop casting and play here again.
+    Cast(bool),
 }
 
 impl fmt::Display for Command {
@@ -201,6 +203,8 @@ impl fmt::Display for Command {
             Self::Sort(key, direction) => vec![key.to_string(), direction.to_string()],
             Self::ShowRecommendations(mode) => vec![mode.to_string()],
             Self::Execute(cmd) => vec![cmd.to_owned()],
+            Self::Cast(true) => vec!["stop".to_string()],
+            Self::Cast(false) => vec![],
             Self::Quit
             | Self::TogglePlay
             | Self::Stop
@@ -279,6 +283,7 @@ impl Command {
             Self::Redraw => "redraw",
             Self::Execute(_) => "exec",
             Self::Reconnect => "reconnect",
+            Self::Cast(_) => "cast",
         }
     }
 }
@@ -785,6 +790,15 @@ pub fn parse(input: &str) -> Result<Vec<Command>, CommandParseError> {
                 "redraw" => Command::Redraw,
                 "exec" => Command::Execute(args.join(" ")),
                 "reconnect" => Command::Reconnect,
+                "cast" => match args.first().cloned() {
+                    Some("stop") => Ok(Command::Cast(true)),
+                    Some(arg) => Err(E::BadEnumArg {
+                        arg: arg.into(),
+                        accept: vec!["stop".into()],
+                        optional: true,
+                    }),
+                    None => Ok(Command::Cast(false)),
+                }?,
                 _ => {
                     return Err(E::NoSuchCommand {
                         cmd: command.into(),

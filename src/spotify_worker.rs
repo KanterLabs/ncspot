@@ -15,7 +15,7 @@ use tokio::time;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum WorkerCommand {
     Load(Playable, bool, u32),
     Play,

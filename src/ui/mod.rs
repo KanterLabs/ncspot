@@ -8,6 +8,7 @@ pub mod album_art;
 pub mod anim;
 pub mod artist;
 pub mod browse;
+pub mod cast;
 pub mod contextmenu;
 pub mod help;
 pub mod layout;

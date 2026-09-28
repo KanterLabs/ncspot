@@ -77,6 +77,9 @@ impl NotificationFormat {
 pub struct ConfigValues {
     pub command_key: Option<char>,
     pub initial_screen: Option<String>,
+    /// Addresses of Rokus to offer for casting, for networks where they cannot be
+    /// found by searching.
+    pub roku_hosts: Option<Vec<String>>,
     pub default_keybindings: Option<bool>,
     pub keybindings: Option<HashMap<String, String>>,
     pub theme: Option<ConfigTheme>,
