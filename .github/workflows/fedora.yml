@@ -9,6 +9,11 @@ name: Fedora
 #
 # Every push to main leaves a downloadable binary on the run, so the laptop
 # never has to compile; tags additionally attach it to the release.
+#
+# Speed: dependencies come from the cache, so a build compiles only ncspot itself.
+# Under the `release` profile's fat LTO and single codegen unit that one crate took
+# about two and a half minutes, cached or not, so branch builds use the
+# `optimized` profile (no LTO, parallel codegen) and only tags pay for `release`.
 
 on:
   push:
@@ -26,6 +31,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   TERM: xterm
+  # Full LTO for release assets; a fast parallel build for everything else.
+  PROFILE: ${{ startsWith(github.ref, 'refs/tags/') && 'release' || 'optimized' }}
 
 concurrency:
   group: fedora-${{ github.ref }}
@@ -72,21 +79,24 @@ jobs:
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # Only rustc, cargo and the standard library. Left to itself, the first cargo
+      # call would install every component rust-toolchain.toml lists for editors
+      # (rustfmt, clippy, rust-analyzer), which a build never runs.
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          "$HOME/.cargo/bin/rustup" toolchain install "$channel" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
 
-      - uses: actions/cache@v6
+      # Keyed on the toolchain, the lockfile and the profile, and saved with
+      # ncspot's own artifacts pruned, so what is restored is only dependencies.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: fedora${{ inputs.fedora_version || '43' }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: fedora${{ inputs.fedora_version || '43' }}-cargo-
+          prefix-key: fedora${{ inputs.fedora_version || '43' }}
+          key: ${{ env.PROFILE }}
 
       - name: Resolve release name
         id: name
@@ -101,10 +111,10 @@ jobs:
           echo "asset=ncspot-${version}-fedora${fedora}-x86_64" >> "$GITHUB_OUTPUT"
 
       - name: Running cargo build
-        run: cargo build --release --locked
+        run: cargo build --profile "$PROFILE" --locked
 
       - name: Packaging assets
-        working-directory: target/release
+        working-directory: target/${{ env.PROFILE }}
         run: |
           asset="${{ steps.name.outputs.asset }}"
           strip ncspot
@@ -114,13 +124,13 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.name.outputs.asset }}
-          path: target/release/${{ steps.name.outputs.asset }}.*
+          path: target/${{ env.PROFILE }}/${{ steps.name.outputs.asset }}.*
           if-no-files-found: error
 
       - name: Releasing assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
-          files: target/release/${{ steps.name.outputs.asset }}.*
+          files: target/${{ env.PROFILE }}/${{ steps.name.outputs.asset }}.*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
