@@ -2,6 +2,7 @@ use crate::events::{Event, EventManager};
 use crate::model::playable::Playable;
 use crate::queue::QueueEvent;
 use crate::spotify::PlayerEvent;
+use crate::ui::osd;
 use librespot_core::SpotifyUri;
 use librespot_core::session::Session;
 use librespot_playback::mixer::Mixer;
@@ -33,6 +34,22 @@ enum PlayerStatus {
     Stopped,
 }
 
+/// How far the track last asked for got.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Attempt {
+    /// Asked for, not heard from yet.
+    Loading,
+    /// It played, so its end is a real end.
+    Started,
+    /// It failed and that has been dealt with.
+    Failed,
+}
+
+/// Tracks in a row that may fail to play before ncspot stops trying the next one.
+/// One bad track is skipped; a run of them means Spotify isn't streaming to this
+/// session at all, and skipping through the rest of the queue would only hide it.
+const MAX_FAILURES: u32 = 3;
+
 pub struct Worker {
     events: EventManager,
     player_events: UnboundedReceiverStream<LibrespotPlayerEvent>,
@@ -41,6 +58,8 @@ pub struct Worker {
     player: Arc<Player>,
     player_status: PlayerStatus,
     mixer: Arc<dyn Mixer>,
+    attempt: Attempt,
+    failures: u32,
 }
 
 impl Worker {
@@ -60,6 +79,30 @@ impl Worker {
             session,
             player_status: PlayerStatus::Stopped,
             mixer,
+            attempt: Attempt::Started,
+            failures: 0,
+        }
+    }
+
+    /// The track last asked for could not be played: skip it, unless tracks keep
+    /// failing, in which case stop and say so.
+    fn failed(&mut self) {
+        self.attempt = Attempt::Failed;
+        self.failures += 1;
+        if self.failures >= MAX_FAILURES {
+            error!("{} tracks in a row failed to play, stopping", self.failures);
+            self.failures = 0;
+            self.player.stop();
+            self.player_status = PlayerStatus::Stopped;
+            self.events.send(Event::Player(PlayerEvent::Stopped));
+            osd::notify(format!(
+                "Stopped: Spotify wouldn't stream the last {MAX_FAILURES} tracks. \
+                 Run ncspot -d <file> to see why"
+            ));
+        } else {
+            warn!("track failed to play, skipping it");
+            osd::notify("Couldn't play that track, skipping it");
+            self.events.send(Event::Player(PlayerEvent::FinishedTrack));
         }
     }
 
@@ -83,6 +126,7 @@ impl Worker {
                                     warn!("track is not playable");
                                     self.events.send(Event::Player(PlayerEvent::FinishedTrack));
                                 } else {
+                                    self.attempt = Attempt::Loading;
                                     self.player.load(uri, start_playing, position_ms);
                                 }
                             }
@@ -130,6 +174,8 @@ impl Worker {
                         self.events
                             .send(Event::Player(PlayerEvent::Playing(playback_start)));
                         self.player_status = PlayerStatus::Playing;
+                        self.attempt = Attempt::Started;
+                        self.failures = 0;
                     }
                     Some(LibrespotPlayerEvent::Paused {
                         play_request_id: _,
@@ -145,8 +191,22 @@ impl Worker {
                         self.events.send(Event::Player(PlayerEvent::Stopped));
                         self.player_status = PlayerStatus::Stopped;
                     }
-                    Some(LibrespotPlayerEvent::EndOfTrack { .. }) => {
-                        self.events.send(Event::Player(PlayerEvent::FinishedTrack));
+                    Some(LibrespotPlayerEvent::EndOfTrack { .. }) => match self.attempt {
+                        Attempt::Started => {
+                            self.events.send(Event::Player(PlayerEvent::FinishedTrack));
+                        }
+                        // Ended without ever playing: it never streamed.
+                        Attempt::Loading => self.failed(),
+                        Attempt::Failed => {}
+                    },
+                    // Librespot leaves a track that could not load where it is, so
+                    // without this the player would sit stopped at 0:00. The same
+                    // event for a preload that failed is harmless: the track is
+                    // tried again when its turn comes.
+                    Some(LibrespotPlayerEvent::Unavailable { .. }) => {
+                        if self.attempt == Attempt::Loading {
+                            self.failed();
+                        }
                     }
                     Some(LibrespotPlayerEvent::TimeToPreloadNextTrack { .. }) => {
                         self.events
