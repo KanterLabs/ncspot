@@ -9,8 +9,6 @@ use cursive::{Printer, Vec2, View};
 use rspotify::model::{SearchResult, SearchType};
 use unicode_width::UnicodeWidthStr;
 
-use log::debug;
-
 use crate::events::EventManager;
 use crate::library::Library;
 use crate::model::playable::Playable;
@@ -19,7 +17,7 @@ use crate::queue::Queue;
 use crate::search_cache::{self, SearchCache};
 use crate::spotify::Spotify;
 use crate::traits::ListItem;
-use crate::ui::osd;
+use crate::ui::radio;
 
 /// Results shown, and the number of digit keys that pick one.
 const RESULTS: usize = 4;
@@ -30,11 +28,6 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 /// Results asked of Spotify. More than are shown, so the cache is worth reusing
 /// for the next keystroke and costs no extra round trip.
 const FETCH: u32 = 20;
-/// Station tracks whose art is fetched up front when a radio starts. The rest
-/// of the station is long enough that its art can wait until it is asked for.
-const STATION_PREFETCH: usize = 8;
-/// How many rate limits a radio waits out before giving up.
-const RADIO_RETRIES: usize = 3;
 /// How many library hits can take the top of the list before catalogue results.
 const LOCAL_SLOTS: usize = 2;
 const WIDTH: usize = 62;
@@ -178,7 +171,7 @@ impl QuickSearch {
         // there is nothing left to ask for.
         if self.show_known(&query) {
             self.results.write().unwrap().searching = false;
-            prefetch_covers(&self.tracks());
+            radio::prefetch_covers(&self.tracks());
             return;
         }
         self.results.write().unwrap().searching = true;
@@ -216,7 +209,7 @@ impl QuickSearch {
                     // keystroke has something to fall back on.
                     cache.store(&query, fetched);
                     cache.save();
-                    prefetch_covers(&shown);
+                    radio::prefetch_covers(&shown);
                 }
                 Ok(_) => {}
                 Err(()) => {
@@ -249,55 +242,8 @@ impl QuickSearch {
     /// The seed plays straight away so the key press is felt at once; the rest of
     /// the station arrives behind it when Spotify answers.
     fn start_radio(&self, track: Track) {
-        let seed = track.uri.clone();
-        let id = track.id.clone();
-        Playable::Track(track).play(&self.queue);
-
-        let Some(id) = id else {
-            return;
-        };
-        let spotify = self.spotify.clone();
-        let queue = self.queue.clone();
-        let events = self.events.clone();
-        thread::spawn(move || {
-            // A rate limit is waited out rather than ending the station before it
-            // starts; the seed is already playing, so there is time.
-            let mut found = spotify.api.recommendations(None, None, Some(vec![&id]));
-            for _ in 0..RADIO_RETRIES {
-                let Some(wait) = spotify.api.rate_limit_wait().filter(|_| found.is_err()) else {
-                    break;
-                };
-                osd::notify(format!(
-                    "Radio: Spotify is busy, retrying in {}s",
-                    wait.as_secs()
-                ));
-                thread::sleep(wait);
-                found = spotify.api.recommendations(None, None, Some(vec![&id]));
-            }
-            let Ok(found) = found else {
-                debug!("no recommendations for {id}");
-                osd::notify("Couldn't start the radio: Spotify didn't send any tracks");
-                return;
-            };
-            // Recommendations arrive without an album, and so without cover art;
-            // looking them up in full is what gives the whole station artwork
-            // rather than just the seed.
-            let tracks = spotify.api.hydrate_tracks(&found.tracks);
-            let station: Vec<Playable> = tracks
-                .iter()
-                // The seed is already playing, so it does not want queueing again.
-                .filter(|track| track.uri != seed)
-                .cloned()
-                .map(Playable::Track)
-                .collect();
-            if !station.is_empty() {
-                queue.append_next(&station);
-            }
-            // Only the front of the station is worth warming; the rest will have
-            // been fetched long before it is reached.
-            prefetch_covers(&tracks[..tracks.len().min(STATION_PREFETCH)]);
-            events.trigger();
-        });
+        Playable::Track(track.clone()).play(&self.queue);
+        radio::start(self.queue.clone(), self.events.clone(), track);
     }
 
     fn draw_frame(&self, printer: &Printer<'_, '_>) {
@@ -572,20 +518,6 @@ fn merge(local: Vec<Track>, remote: Vec<Track>) -> Vec<Track> {
         }
     }
     merged
-}
-
-/// Warm the cover cache for what is on screen, so art for a track that gets played
-/// is already on disk.
-fn prefetch_covers(tracks: &[Track]) {
-    #[cfg(feature = "album_art")]
-    crate::ui::album_art::prefetch_covers(
-        tracks
-            .iter()
-            .filter_map(|track| track.cover_url.clone())
-            .collect(),
-    );
-    #[cfg(not(feature = "album_art"))]
-    let _ = tracks;
 }
 
 fn truncate(text: &str, max_width: usize) -> String {

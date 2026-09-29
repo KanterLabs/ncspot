@@ -203,22 +203,38 @@ impl Queue {
     /// Append `tracks` after the currently playing item, taking into account
     /// shuffle status. Returns the first index(in `self.queue`) of added items.
     pub fn append_next(&self, tracks: &[Playable]) -> usize {
+        let mut random_order = self.random_order.write().unwrap();
         let mut q = self.queue.write().unwrap();
 
-        {
-            let mut random_order = self.random_order.write().unwrap();
-            if let Some(order) = random_order.as_mut() {
-                order.extend((q.len().saturating_sub(1))..(q.len() + tracks.len()));
-            }
-        }
-
-        let first = match *self.current_track.read().unwrap() {
+        let current = *self.current_track.read().unwrap();
+        let first = match current {
             Some(index) => index + 1,
             None => q.len(),
         };
 
-        for (i, track) in (first..).zip(tracks.iter()) {
-            q.insert(i, track.clone());
+        if !tracks.is_empty() {
+            if let Some(order) = random_order.as_mut() {
+                let insertion_position = current
+                    .and_then(|index| order.iter().position(|&item| item == index))
+                    .map_or(order.len(), |position| position + 1);
+
+                // Inserting into the raw queue shifts every existing item at or
+                // after `first`; update their shuffle indices before adding the
+                // new indices immediately after the current play position.
+                for index in order.iter_mut() {
+                    if *index >= first {
+                        *index += tracks.len();
+                    }
+                }
+                order.splice(
+                    insertion_position..insertion_position,
+                    first..first + tracks.len(),
+                );
+            }
+
+            for (i, track) in (first..).zip(tracks.iter()) {
+                q.insert(i, track.clone());
+            }
         }
 
         first
@@ -751,6 +767,79 @@ mod tests {
         let first = q.append_next(&[make_track(2)]);
         assert_eq!(first, 2);
         assert_eq!(q.len(), 3);
+    }
+
+    #[test]
+    fn test_append_next_in_shuffle_mode_preserves_play_order() {
+        // Raw queue [0,1,2,3,4], current=1, play order [3,0,1,4,2].
+        let q = make_queue(
+            vec![
+                make_track(0),
+                make_track(1),
+                make_track(2),
+                make_track(3),
+                make_track(4),
+            ],
+            Some(1),
+        );
+        q.set_shuffle(true);
+        *q.random_order.write().unwrap() = Some(vec![3, 0, 1, 4, 2]);
+
+        let first = q.append_next(&[make_track(5), make_track(6)]);
+
+        assert_eq!(first, 2);
+        let queue = q.queue.read().unwrap();
+        let ids: Vec<&str> = queue.iter().map(track_id).collect();
+        assert_eq!(
+            ids,
+            ["id_0", "id_1", "id_5", "id_6", "id_2", "id_3", "id_4"]
+        );
+        drop(queue);
+        assert_eq!(
+            q.get_random_order(),
+            Some(vec![5, 0, 1, 2, 3, 6, 4]),
+            "new tracks must follow the current while existing tracks keep their order"
+        );
+        let play_order = q.in_play_order(0, q.len());
+        let play_ids: Vec<String> = play_order
+            .iter()
+            .map(|(_, track)| track_id(track).to_owned())
+            .collect();
+        assert_eq!(
+            play_ids,
+            ["id_3", "id_0", "id_1", "id_5", "id_6", "id_4", "id_2"]
+        );
+    }
+
+    #[test]
+    fn test_append_next_in_shuffle_mode_without_current_appends_in_play_order() {
+        let q = make_queue(vec![make_track(0), make_track(1), make_track(2)], None);
+        q.set_shuffle(true);
+        *q.random_order.write().unwrap() = Some(vec![2, 0, 1]);
+
+        let first = q.append_next(&[make_track(3), make_track(4)]);
+
+        assert_eq!(first, 3);
+        assert_eq!(q.get_random_order(), Some(vec![2, 0, 1, 3, 4]));
+        let play_order = q.in_play_order(0, q.len());
+        let play_ids: Vec<String> = play_order
+            .iter()
+            .map(|(_, track)| track_id(track).to_owned())
+            .collect();
+        assert_eq!(play_ids, ["id_2", "id_0", "id_1", "id_3", "id_4"]);
+    }
+
+    #[test]
+    fn test_append_next_empty_preserves_shuffle_order() {
+        let q = make_queue(vec![make_track(0), make_track(1), make_track(2)], Some(1));
+        q.set_shuffle(true);
+        *q.random_order.write().unwrap() = Some(vec![2, 0, 1]);
+
+        let first = q.append_next(&[]);
+
+        assert_eq!(first, 2);
+        assert_eq!(q.len(), 3);
+        assert_eq!(q.get_random_order(), Some(vec![2, 0, 1]));
     }
 
     #[test]

@@ -88,6 +88,7 @@ enum Control {
     Next,
     Repeat,
     Shuffle,
+    Radio,
     /// Set the volume to the clicked fraction of the meter.
     Volume,
     /// Play the item at this index in the queue.
@@ -1164,6 +1165,17 @@ impl NowPlayingView {
             ));
         }
 
+        if matches!(playable, Playable::Track(track) if track.id.is_some() && !track.is_local) {
+            blocks.push(Block::new(
+                BlockKind::Segments(vec![Segment::button(
+                    "[ Radio  Shift+R ]",
+                    self.accent_style(printer),
+                    Control::Radio,
+                )]),
+                2,
+            ));
+        }
+
         blocks
     }
 
@@ -1529,6 +1541,19 @@ impl NowPlayingView {
             .map(|(index, _)| *index)
     }
 
+    /// Build a station from the playing song without restarting it.
+    fn start_radio(&self) {
+        let Some(Playable::Track(track)) = self.queue.get_current() else {
+            crate::ui::osd::notify("Radio needs a playing Spotify song");
+            return;
+        };
+        if track.id.is_none() || track.is_local {
+            crate::ui::osd::notify("Radio isn't available for this song");
+            return;
+        }
+        crate::ui::radio::start(self.queue.clone(), self.events.clone(), track);
+    }
+
     /// Run the control that was clicked. These mirror the default command handlers,
     /// so a click and its key do the same thing.
     fn activate(&self, hitbox: Hitbox, position: Vec2) {
@@ -1558,6 +1583,7 @@ impl NowPlayingView {
                 self.queue.set_repeat(mode);
             }
             Control::Shuffle => self.queue.set_shuffle(!self.queue.get_shuffle()),
+            Control::Radio => self.start_radio(),
             Control::Track(index) => {
                 *self.cursor.write().unwrap() = None;
                 self.queue.play(index, true, false);
@@ -1621,6 +1647,11 @@ impl View for NowPlayingView {
     }
 
     fn on_event(&mut self, event: Event) -> EventResult {
+        if event == Event::Char('R') {
+            self.start_radio();
+            return EventResult::consumed();
+        }
+
         // `/` is the jump key elsewhere, but a single item dashboard has no list to
         // jump through, so it is free here and keeps its "search" meaning.
         if event == Event::Char('/') {
@@ -1935,6 +1966,7 @@ mod tests {
         split, truncate, volume_meter,
     };
     use crate::command::{MoveAmount, MoveMode};
+    use cursive::View;
     use cursive::theme::ColorStyle;
 
     fn track(title: &str, artist: &str, album: &str) -> Playable {
@@ -2079,6 +2111,55 @@ mod tests {
     fn clicking_next_skips_to_the_following_track() {
         let (queue, _) = click(Vec2::new(90, 30), "▶▶");
         assert_eq!(queue.get_current_index(), Some(1));
+    }
+
+    #[test]
+    fn radio_button_is_visible_in_card_and_compact_layouts() {
+        for size in [Vec2::new(90, 30), Vec2::new(40, 15), Vec2::new(38, 14)] {
+            let text = rows(&render(size, queued(), Some(0))).join("\n");
+            assert!(text.contains("[ Radio  Shift+R ]"), "{size:?}: {text}");
+        }
+    }
+
+    #[test]
+    fn local_songs_do_not_offer_radio() {
+        let mut local = match track("Local", "Artist", "Album") {
+            Playable::Track(track) => track,
+            _ => unreachable!(),
+        };
+        local.is_local = true;
+        let text = rows(&render(
+            Vec2::new(90, 30),
+            vec![Playable::Track(local.clone())],
+            Some(0),
+        ))
+        .join("\n");
+        assert!(!text.contains("Radio"), "{text}");
+
+        let mut view = view(vec![Playable::Track(local)], Some(0));
+        assert!(
+            view.on_event(cursive::event::Event::Char('R'))
+                .is_consumed()
+        );
+        assert_eq!(view.queue.len(), 1);
+        assert_eq!(view.queue.get_current_index(), Some(0));
+        assert_eq!(view.spotify.get_current_progress(), Duration::from_secs(62));
+        // Lowercase r still falls through to the configured repeat binding.
+        assert!(
+            !view
+                .on_event(cursive::event::Event::Char('r'))
+                .is_consumed()
+        );
+    }
+
+    #[test]
+    fn radio_shortcut_is_safe_with_nothing_playing() {
+        let mut view = view(Vec::new(), None);
+        assert!(
+            view.on_event(cursive::event::Event::Char('R'))
+                .is_consumed()
+        );
+        assert_eq!(view.queue.len(), 0);
     }
 
     #[test]

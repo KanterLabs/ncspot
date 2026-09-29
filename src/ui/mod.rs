@@ -22,6 +22,7 @@ pub mod playlist;
 pub mod playlists;
 pub mod queue;
 pub mod quick_search;
+pub(super) mod radio;
 pub mod search;
 pub mod search_results;
 pub mod show;

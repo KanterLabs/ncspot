@@ -186,6 +186,12 @@ metadata when the terminal is wide enough and `ncspot` was built with the
 `album_art` feature (on by default). It is drawn with quadrant block glyphs, so
 a font that carries them (most monospace fonts do) gives the most detail.
 
+Click **Radio** or press <kbd>Shift</kbd>+<kbd>R</kbd> to start a radio from the
+currently playing song. It keeps playing from the same position while similar
+songs load into the queue immediately after it. The existing queue stays behind
+the radio tracks. Radio is available for Spotify songs; local files and podcast
+episodes cannot seed a station.
+
 When the terminal is wide enough for both (about 100 columns), the queue sits in
 an **Up Next** panel beside the card. It lists the tracks in the order they
 will play, shuffle included: the eight tracks before the playing one, the
@@ -200,6 +206,7 @@ unsaving the playing track.
 | Key                                         | Command                                              |
 |---------------------------------------------|------------------------------------------------------|
 | <kbd>/</kbd>                                 | Open quick search (see below).                       |
+| <kbd>Shift</kbd>+<kbd>R</kbd>                 | Start radio from the currently playing song.         |
 | <kbd>Ctrl</kbd>+<kbd>F</kbd>                 | Open quick search, from any view.                    |
 | <kbd>1</kbd> - <kbd>4</kbd>                  | Pick the result with that number.                    |
 | <kbd>Enter</kbd>                             | Pick the first result.                               |
