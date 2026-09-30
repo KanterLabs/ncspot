@@ -47,8 +47,8 @@ until a Resonance package is published.
 
 ## Spotify app setup
 
-Resonance uses a KanterLabs Spotify app identity by default. You can use a client ID from your own
-Spotify developer dashboard instead. The client ID is public application metadata; Resonance uses
+Resonance uses a KanterLabs Spotify app identity for Web API requests by default. You can use a
+client ID from your own Spotify developer dashboard instead. The client ID is public application metadata; Resonance uses
 the browser authorization flow with PKCE and does not require a client secret.
 
 Add the callback URI below to the app's Redirect URIs, exactly as written:
@@ -78,6 +78,11 @@ Resonance keeps an existing ncspot configuration directory when it finds one, so
 not reset a user's settings or library state. Its credentials are stored in separate client-ID-
 specific cache names, so changing the client ID cannot silently reuse or replace an upstream
 account's cached credentials.
+
+Audio playback uses librespot's separate streaming authentication identity. The custom developer
+app ID applies to the Web API; it does not replace that streaming identity. Existing legacy
+playback credentials can be reused without modifying their original files. After an affected
+upgrade, a fresh playback login may be needed.
 
 ## Configuration
 

@@ -13,6 +13,11 @@ use crate::config;
 const CLIENT_ID_ENV: &str = "RESONANCE_SPOTIFY_CLIENT_ID";
 const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 pub const DEFAULT_CLIENT_ID: &str = "b7f3b8a9271c4848bd9d36d7b0b3d997";
+/// Client ID used by librespot playback. This is intentionally independent of the Web API app.
+pub const PLAYBACK_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
+/// Fixed loopback callback registered for the playback app.
+pub const PLAYBACK_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
+const LEGACY_IMPORT_MARKER: &str = "legacy-imported";
 
 #[cfg(test)]
 const TEST_CLIENT_ID: &str = "00000000000000000000000000000000";
@@ -44,6 +49,15 @@ static OAUTH_SCOPES: &[&str] = &[
     "playlist-modify-private",
     "user-follow-read",
     "user-follow-modify",
+];
+
+/// Scopes accepted by Spotify's librespot playback app.
+pub const PLAYBACK_SCOPES: &[&str] = &[
+    "streaming",
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "user-read-currently-playing",
+    "user-personalized",
 ];
 
 fn validate_client_id(value: &str) -> Result<String, String> {
@@ -171,23 +185,63 @@ pub fn api_token_path() -> std::path::PathBuf {
     config::cache_path(&format!("rspotify_token-{}.json", client_id()))
 }
 
-/// Path to the current app identity's librespot cache.
+/// Path to the dedicated playback app's librespot cache.
 pub fn playback_cache_path() -> std::path::PathBuf {
-    config::cache_path(&format!("librespot-{}", client_id()))
+    config::cache_path(&playback_cache_name())
+}
+
+fn playback_cache_name() -> String {
+    format!("librespot-playback-{PLAYBACK_CLIENT_ID}")
+}
+
+fn read_cached_credentials(path: &std::path::Path) -> Option<RespotCredentials> {
+    let credentials_json = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&credentials_json).ok()
+}
+
+fn import_legacy_credentials(
+    playback_cache_path: &std::path::Path,
+    legacy_credentials_path: &std::path::Path,
+) -> Option<RespotCredentials> {
+    let marker_path = playback_cache_path.join(LEGACY_IMPORT_MARKER);
+    if marker_path.exists() {
+        return None;
+    }
+
+    let credentials = read_cached_credentials(legacy_credentials_path)?;
+    if let Err(error) = fs::write(&marker_path, b"legacy playback credentials imported\n") {
+        warn!("Could not mark legacy playback credentials as imported: {error}");
+        return None;
+    }
+    Some(credentials)
+}
+
+fn legacy_playback_credentials(playback_cache_path: &std::path::Path) -> Option<RespotCredentials> {
+    let path = config::user_cache_directory()?.join("librespot/credentials.json");
+    import_legacy_credentials(playback_cache_path, &path)
+}
+
+fn cached_playback_credentials<F>(cache: &Cache, legacy_credentials: F) -> Option<RespotCredentials>
+where
+    F: FnOnce() -> Option<RespotCredentials>,
+{
+    cache.credentials().or_else(legacy_credentials)
 }
 
 /// Get credentials for use with librespot. This returns cached credentials if there are any, and
-/// only falls back to the OAuth2 login process when there are none.
+/// reads the pre-Resonance cache once as a migration fallback when the dedicated cache is empty.
+/// The old cache is never written by this migration path.
 ///
 /// The credentials are deliberately not verified here. Doing so used to cost a whole extra
 /// session handshake on every startup, and the session that playback needs is opened moments
 /// later anyway: that one reports a rejection, and the caller offers a fresh login then.
 pub fn get_credentials() -> Result<RespotCredentials, String> {
     let _ = configured_client_id()?;
-    let cache = Cache::new(Some(playback_cache_path()), None, None, None)
+    let cache_path = playback_cache_path();
+    let cache = Cache::new(Some(cache_path.clone()), None, None, None)
         .expect("Could not create librespot cache");
 
-    match cache.credentials() {
+    match cached_playback_credentials(&cache, || legacy_playback_credentials(&cache_path)) {
         Some(credentials) => {
             info!("Using cached credentials");
             Ok(credentials)
@@ -210,9 +264,11 @@ pub fn credentials_prompt(error_message: Option<String>) -> Result<RespotCredent
 pub fn create_credentials() -> Result<RespotCredentials, String> {
     println!("To login you need to perform OAuth2 authorization using your web browser\n");
 
-    let client_id = configured_client_id()?;
-    let client_builder =
-        OAuthClientBuilder::new(&client_id, &redirect_uri(), OAUTH_SCOPES.to_vec());
+    let client_builder = OAuthClientBuilder::new(
+        PLAYBACK_CLIENT_ID,
+        PLAYBACK_REDIRECT_URI,
+        PLAYBACK_SCOPES.to_vec(),
+    );
     let oauth_client = client_builder.build().map_err(|e| e.to_string())?;
 
     oauth_client
@@ -410,5 +466,53 @@ mod test {
         assert!(validate_redirect_uri("http://127.0.0.1:8989/login?token=value").is_err());
         assert!(validate_redirect_uri("http://127.0.0.1:8989/other").is_err());
         assert!(validate_redirect_uri("http://127.0.0.1:8990/login").is_ok());
+    }
+
+    #[test]
+    fn playback_oauth_uses_the_registered_identity_and_scopes() {
+        assert_eq!(PLAYBACK_CLIENT_ID, "65b708073fc0480ea92a077233ca87bd");
+        assert_ne!(PLAYBACK_CLIENT_ID, DEFAULT_CLIENT_ID);
+        assert_eq!(PLAYBACK_REDIRECT_URI, "http://127.0.0.1:8989/login");
+        assert_eq!(
+            PLAYBACK_SCOPES,
+            &[
+                "streaming",
+                "user-read-playback-state",
+                "user-modify-playback-state",
+                "user-read-currently-playing",
+                "user-personalized",
+            ]
+        );
+        assert_eq!(
+            playback_cache_name(),
+            "librespot-playback-65b708073fc0480ea92a077233ca87bd"
+        );
+    }
+
+    #[test]
+    fn legacy_playback_credentials_are_a_read_only_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("resonance-auth-legacy-{}", rand::random::<u64>()));
+        let playback_path = root.join("librespot-playback-65b708073fc0480ea92a077233ca87bd");
+        let legacy_path = root.join("librespot");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let playback_cache = Cache::new(Some(playback_path.as_path()), None, None, None).unwrap();
+        let legacy_cache = Cache::new(Some(legacy_path.as_path()), None, None, None).unwrap();
+        let credentials = RespotCredentials::with_access_token("legacy-access-token");
+        legacy_cache.save_credentials(&credentials);
+        let legacy_file = legacy_path.join("credentials.json");
+        let before = std::fs::read(&legacy_file).unwrap();
+
+        let selected = cached_playback_credentials(&playback_cache, || {
+            import_legacy_credentials(&playback_path, &legacy_file)
+        });
+        assert_eq!(selected, Some(credentials));
+        assert_eq!(std::fs::read(&legacy_file).unwrap(), before);
+        assert!(!playback_path.join("credentials.json").exists());
+        assert!(playback_path.join(LEGACY_IMPORT_MARKER).exists());
+        assert!(import_legacy_credentials(&playback_path, &legacy_file).is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

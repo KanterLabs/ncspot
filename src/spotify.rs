@@ -185,7 +185,7 @@ impl Spotify {
     /// Generate the librespot [SessionConfig] used when creating a [Session].
     pub fn session_config(cfg: &config::Config) -> SessionConfig {
         let mut session_config = librespot_core::SessionConfig {
-            client_id: authentication::client_id(),
+            client_id: authentication::PLAYBACK_CLIENT_ID.to_string(),
             ..Default::default()
         };
         match env::var("http_proxy") {
@@ -676,5 +676,18 @@ mod tests {
     fn parse_playlist_uri() {
         let uri_type = "spotify:playlist:37i9dQZF1DX36Xw4IJIVKA".parse();
         assert!(matches!(uri_type, Ok(UriType::Playlist)));
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn playback_session_uses_streaming_identity_instead_of_web_api_app() {
+        let cfg = config::Config::new_for_test();
+        let session = Spotify::session_config(&cfg);
+        assert_eq!(session.client_id, authentication::PLAYBACK_CLIENT_ID);
+        assert_ne!(session.client_id, authentication::DEFAULT_CLIENT_ID);
     }
 }
