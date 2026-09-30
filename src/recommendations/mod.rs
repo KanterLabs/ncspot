@@ -47,6 +47,7 @@ pub struct Diagnostic {
     pub algorithm: &'static str,
     pub source_count: usize,
     pub shortlist_hit: bool,
+    pub session_played_count: usize,
     pub total_us: u128,
     pub applied: bool,
     pub history_status: String,
@@ -113,6 +114,7 @@ pub fn catalog(queue: &Queue, library: &Library) -> Catalog {
         playlists: memberships,
         saved,
         artist_genres,
+        familiar_artists: HashSet::new(),
     }
 }
 
@@ -150,8 +152,20 @@ fn fingerprint(catalog: &Catalog) -> u64 {
     hash.finish()
 }
 
-fn shortlist(catalog: &Catalog, seed: &Track) -> (Catalog, bool) {
-    let key = fingerprint(catalog);
+fn shortlist(
+    catalog: &Catalog,
+    seed: &Track,
+    feedback: &HashMap<String, history::Feedback>,
+) -> (Catalog, bool) {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    fingerprint(catalog).hash(&mut hash);
+    // History changes invalidate the pools, but changing the dial reuses them.
+    let mut feedback_entries: Vec<_> = feedback.iter().collect();
+    feedback_entries.sort_by(|a, b| a.0.cmp(b.0));
+    serde_json::to_vec(&feedback_entries)
+        .unwrap_or_default()
+        .hash(&mut hash);
+    let key = hash.finish();
     {
         let mut cache = service().shortlists.lock().unwrap();
         if let Some(index) = cache.iter().position(|entry| {
@@ -166,26 +180,33 @@ fn shortlist(catalog: &Catalog, seed: &Track) -> (Catalog, bool) {
                     playlists: catalog.playlists.clone(),
                     saved: catalog.saved.clone(),
                     artist_genres: catalog.artist_genres.clone(),
+                    familiar_artists: catalog.familiar_artists.clone(),
                 },
                 true,
             );
         }
     }
-    let context = Context {
-        seed: seed.clone(),
-        queued: HashSet::new(),
-        recent: Vec::new(),
-        feedback: HashMap::new(),
-        rng_seed: 42,
-        limit: SHORTLIST_SIZE,
-    };
-    let base = engine::rank(catalog, &context);
-    let tracks: Vec<_> = base
-        .selected
-        .into_iter()
-        .map(|selection| selection.track)
-        .chain(std::iter::once(seed.clone()))
-        .collect();
+    let mut seen = HashSet::new();
+    let mut tracks = Vec::new();
+    // Keep both ends of the dial warm without multiplying the cache by level.
+    for level in [0, 100] {
+        let context = Context {
+            seed: seed.clone(),
+            queued: HashSet::new(),
+            session_played: HashSet::new(),
+            recent: Vec::new(),
+            feedback: feedback.clone(),
+            rng_seed: 42,
+            limit: SHORTLIST_SIZE / 2,
+            discovery: Some(level),
+        };
+        for selection in engine::rank(catalog, &context).selected {
+            if seen.insert(selection.track.uri.clone()) {
+                tracks.push(selection.track);
+            }
+        }
+    }
+    tracks.push(seed.clone());
     let mut cache = service().shortlists.lock().unwrap();
     cache.retain(|entry| entry.seed != seed.uri);
     cache.push_back(Cached {
@@ -203,6 +224,7 @@ fn shortlist(catalog: &Catalog, seed: &Track) -> (Catalog, bool) {
             playlists: catalog.playlists.clone(),
             saved: catalog.saved.clone(),
             artist_genres: catalog.artist_genres.clone(),
+            familiar_artists: catalog.familiar_artists.clone(),
         },
         false,
     )
@@ -214,10 +236,12 @@ pub fn preview(queue: &Queue, library: &Library, seed: Track) -> Vec<Track> {
     let context = Context {
         seed,
         queued: HashSet::new(),
+        session_played: queue.session_played(),
         recent: history.recent(),
         feedback: history.snapshot(),
         rng_seed: rand::random(),
         limit: 50,
+        discovery: Some(library.cfg.discovery()),
     };
     engine::rank(&catalog(queue, library), &context)
         .selected
@@ -234,7 +258,7 @@ pub fn recommend(
     limit: usize,
 ) -> (Diagnostic, Replay) {
     let started = Instant::now();
-    let catalog = catalog(queue, library);
+    let mut catalog = catalog(queue, library);
     let source_count = catalog
         .tracks
         .iter()
@@ -252,31 +276,41 @@ pub fn recommend(
     let context = Context {
         seed: seed.clone(),
         queued,
+        session_played: queue.session_played(),
         recent: history.recent(),
         feedback: history.snapshot(),
         rng_seed,
         limit,
+        discovery: Some(library.cfg.discovery()),
     };
-    let (short, shortlist_hit) = shortlist(&catalog, &seed);
+    catalog.familiar_artists = engine::familiar_artists(&catalog, &context.feedback);
+    let (short, shortlist_hit) = shortlist(&catalog, &seed, &context.feedback);
     let mut replay = Replay {
-        version: 1,
+        version: 2,
         catalog: short,
         context,
     };
     let mut report = engine::rank(&replay.catalog, &replay.context);
     // A long queue can consume a shortlist; regenerate from the full pool rather
     // than pretending the catalog is empty or calling a remote recommender.
-    if report.selected.len() < limit && replay.catalog.tracks.len() < catalog.tracks.len() {
+    if (report.selected.len() < limit || report.discovery.as_ref().is_some_and(|d| d.shortfall > 0))
+        && replay.catalog.tracks.len() < catalog.tracks.len()
+    {
         let full = engine::rank(&catalog, &replay.context);
-        if full.selected.len() > report.selected.len() {
+        if full.selected.len() > report.selected.len()
+            || (full.selected.len() == report.selected.len()
+                && full.discovery.as_ref().map(|d| d.shortfall)
+                    < report.discovery.as_ref().map(|d| d.shortfall))
+        {
             replay.catalog = catalog;
             report = full;
         }
     }
     let diagnostic = Diagnostic {
-        algorithm: "local-radio-v1",
+        algorithm: "local-radio-v2",
         source_count,
         shortlist_hit,
+        session_played_count: replay.context.session_played.len(),
         total_us: started.elapsed().as_micros(),
         applied: false,
         history_status: history.status(),
@@ -288,15 +322,19 @@ pub fn recommend(
 
 pub fn remember(diagnostic: Diagnostic, replay: Replay) {
     log::debug!(
-        "radio: seed={} rng={} shortlist_hit={} sources={} selected={} elapsed_us={} applied={}",
+        "radio: seed={} rng={} shortlist_hit={} sources={} selected={} session_played={} elapsed_us={} applied={}",
         diagnostic.report.seed_uri,
         diagnostic.report.rng_seed,
         diagnostic.shortlist_hit,
         diagnostic.source_count,
         diagnostic.report.selected.len(),
+        diagnostic.session_played_count,
         diagnostic.total_us,
         diagnostic.applied
     );
+    if let Some(discovery) = &diagnostic.report.discovery {
+        log::debug!("radio: discovery={discovery:?}");
+    }
     for selection in &diagnostic.report.selected {
         log::debug!(
             "radio: pick {} score={:.3} reasons={:?} components={:?}",
@@ -331,7 +369,16 @@ pub fn remember(diagnostic: Diagnostic, replay: Replay) {
     let _ = replay;
 }
 
-pub fn diagnostics() -> String {
+pub fn diagnostics(queue: &Queue) -> String {
+    let station = if queue.radio_active() {
+        if queue.radio_waiting() {
+            "waiting for metadata"
+        } else {
+            "active"
+        }
+    } else {
+        "off"
+    };
     let last = service().last.lock().unwrap().clone();
     let report = last
         .and_then(|report| serde_json::to_string_pretty(&report).ok())
@@ -339,7 +386,10 @@ pub fn diagnostics() -> String {
             "No radio run yet. Start Radio to capture scores and exclusions.".into()
         });
     format!(
-        "{report}\n\nHistory: {}\nEnrichment: {}\n\nReport: {}\nReplay: {}\nOffline replay: {} radio-debug --replay <replay path>\n",
+        "{report}\n\nRadio: {station}\nStation seed: {:?}\nSession played/attempted: {}\nNext discovery: {}%\n\nHistory: {}\nEnrichment: {}\n\nReport: {}\nReplay: {}\nOffline replay: {} radio-debug --replay <replay path>\n",
+        queue.radio_seed(),
+        queue.session_played().len(),
+        queue.get_library().cfg.discovery(),
         history::shared().status(),
         enrichment::shared().status(),
         config::cache_path("radio-debug.json").display(),
@@ -358,8 +408,10 @@ pub fn prewarm(queue: Arc<Queue>, library: Arc<Library>, events: EventManager) {
     }
     #[cfg(not(test))]
     std::thread::spawn(move || {
-        let catalog = catalog(&queue, &library);
-        let _ = shortlist(&catalog, &seed);
+        let mut catalog = catalog(&queue, &library);
+        let feedback = history::shared().snapshot();
+        catalog.familiar_artists = engine::familiar_artists(&catalog, &feedback);
+        let _ = shortlist(&catalog, &seed, &feedback);
         let related = related_artists(&catalog, &seed);
         enrichment::shared().refresh(queue.get_spotify(), seed, related, events);
     });
@@ -419,7 +471,12 @@ fn cached<T: serde::de::DeserializeOwned>(name: &str) -> Result<Option<T>, Strin
 }
 
 /// A read-only offline snapshot. No Config creation, login, or lazy API loading.
-pub fn offline_report(seed: Option<String>, rng_seed: u64, limit: usize) -> Result<String, String> {
+pub fn offline_report(
+    seed: Option<String>,
+    rng_seed: u64,
+    limit: usize,
+    discovery: u8,
+) -> Result<String, String> {
     let tracks = cached::<Vec<Track>>("tracks.db")?.unwrap_or_default();
     let saved = tracks.iter().map(|track| track.uri.clone()).collect();
     let mut catalog = Catalog {
@@ -427,6 +484,7 @@ pub fn offline_report(seed: Option<String>, rng_seed: u64, limit: usize) -> Resu
         playlists: Vec::new(),
         saved,
         artist_genres: HashMap::new(),
+        familiar_artists: HashSet::new(),
     };
     for playlist in cached::<Vec<Playlist>>("playlists.db")?.unwrap_or_default() {
         if let Some(items) = playlist.tracks {
@@ -490,11 +548,14 @@ pub fn offline_report(seed: Option<String>, rng_seed: u64, limit: usize) -> Resu
     let context = Context {
         seed: track,
         queued: HashSet::new(),
+        session_played: HashSet::new(),
         recent: history.recent(),
         feedback: history.snapshot(),
         rng_seed,
         limit,
+        discovery: Some(discovery.min(100)),
     };
+    catalog.familiar_artists = engine::familiar_artists(&catalog, &context.feedback);
     serde_json::to_string_pretty(&engine::rank(&catalog, &context))
         .map_err(|error| error.to_string())
 }
@@ -502,10 +563,16 @@ pub fn offline_report(seed: Option<String>, rng_seed: u64, limit: usize) -> Resu
 pub fn replay_report(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("Can't read replay {}: {error}", path.display()))?;
-    let replay: Replay =
+    let mut replay: Replay =
         serde_json::from_slice(&bytes).map_err(|error| format!("Invalid replay: {error}"))?;
-    if replay.version != 1 {
+    if replay.version != 1 && replay.version != 2 {
         return Err("Unsupported radio replay version; file left unchanged".into());
+    }
+    if replay.version == 1 {
+        replay.context.discovery = None;
+        replay.context.session_played.clear();
+    } else if replay.context.discovery.is_none() {
+        return Err("Version 2 replay is missing its discovery level".into());
     }
     serde_json::to_string_pretty(&engine::rank(&replay.catalog, &replay.context))
         .map_err(|error| error.to_string())
@@ -545,11 +612,12 @@ mod tests {
             playlists: vec![],
             saved: HashSet::new(),
             artist_genres: HashMap::new(),
+            familiar_artists: HashSet::new(),
         };
-        assert!(!shortlist(&catalog, &seed).1);
-        assert!(shortlist(&catalog, &seed).1);
+        assert!(!shortlist(&catalog, &seed, &HashMap::new()).1);
+        assert!(shortlist(&catalog, &seed, &HashMap::new()).1);
         catalog.tracks[1].is_playable = Some(false);
-        let (updated, hit) = shortlist(&catalog, &seed);
+        let (updated, hit) = shortlist(&catalog, &seed, &HashMap::new());
         assert!(!hit);
         assert!(
             !updated
@@ -569,14 +637,17 @@ mod tests {
                 playlists: vec![],
                 saved: HashSet::new(),
                 artist_genres: HashMap::new(),
+                familiar_artists: HashSet::new(),
             },
             context: Context {
                 seed,
                 queued: HashSet::new(),
+                session_played: HashSet::new(),
                 recent: vec![],
                 feedback: HashMap::new(),
                 rng_seed: 42,
                 limit: 20,
+                discovery: None,
             },
         };
         let loaded: Replay = serde_json::from_slice(&serde_json::to_vec(&replay).unwrap()).unwrap();
@@ -589,10 +660,175 @@ mod tests {
     }
 
     #[test]
+    fn shortlist_reuses_both_modes_and_invalidates_feedback() {
+        let seed = track("discovery-pools-seed");
+        let tracks: Vec<_> = (0..200)
+            .map(|id| track(&format!("pool-{id}")))
+            .chain(std::iter::once(seed.clone()))
+            .collect();
+        let mut feedback = HashMap::new();
+        for song in tracks.iter().take(100) {
+            feedback.insert(
+                song.uri.clone(),
+                history::Feedback {
+                    completed: 2,
+                    plays: 2,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut catalog = Catalog {
+            tracks,
+            playlists: vec![],
+            saved: HashSet::new(),
+            artist_genres: HashMap::new(),
+            familiar_artists: HashSet::new(),
+        };
+        catalog.familiar_artists = engine::familiar_artists(&catalog, &feedback);
+        let (pool, hit) = shortlist(&catalog, &seed, &feedback);
+        assert!(!hit);
+        assert!(pool.tracks.len() <= SHORTLIST_SIZE + 1);
+        for level in [0, 50, 100] {
+            let context = Context {
+                seed: seed.clone(),
+                queued: HashSet::new(),
+                session_played: HashSet::new(),
+                recent: vec![],
+                feedback: feedback.clone(),
+                rng_seed: 42,
+                limit: 20,
+                discovery: Some(level),
+            };
+            let report = engine::rank(&pool, &context);
+            assert_eq!(report.selected.len(), 20);
+            assert_eq!(report.discovery.as_ref().unwrap().shortfall, 0);
+            assert!(shortlist(&catalog, &seed, &feedback).1);
+        }
+        feedback.insert(
+            "spotify:track:pool-150".into(),
+            history::Feedback {
+                skips: 3,
+                plays: 3,
+                ..Default::default()
+            },
+        );
+        assert!(!shortlist(&catalog, &seed, &feedback).1);
+    }
+
+    #[test]
+    fn legacy_json_defaults_preserve_ranking_and_new_replay_captures_level() {
+        let seed = track("json-replay-seed");
+        let replay = Replay {
+            version: 1,
+            catalog: Catalog {
+                tracks: vec![seed.clone(), track("json-replay-next")],
+                playlists: vec![],
+                saved: HashSet::new(),
+                artist_genres: HashMap::new(),
+                familiar_artists: HashSet::new(),
+            },
+            context: Context {
+                seed,
+                queued: HashSet::new(),
+                session_played: HashSet::new(),
+                recent: vec![],
+                feedback: HashMap::new(),
+                rng_seed: 99,
+                limit: 10,
+                discovery: None,
+            },
+        };
+        let mut legacy = serde_json::to_value(&replay).unwrap();
+        legacy["context"]
+            .as_object_mut()
+            .unwrap()
+            .remove("discovery");
+        legacy["catalog"]
+            .as_object_mut()
+            .unwrap()
+            .remove("familiar_artists");
+        let loaded: Replay = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            serde_json::to_value(engine::rank(&replay.catalog, &replay.context).selected).unwrap(),
+            serde_json::to_value(engine::rank(&loaded.catalog, &loaded.context).selected).unwrap()
+        );
+        let mut current = replay;
+        current.version = 2;
+        current.context.discovery = Some(75);
+        let loaded: Replay =
+            serde_json::from_slice(&serde_json::to_vec(&current).unwrap()).unwrap();
+        assert_eq!(loaded.context.discovery, Some(75));
+        assert_eq!(
+            engine::rank(&loaded.catalog, &loaded.context)
+                .discovery
+                .unwrap()
+                .level,
+            75
+        );
+    }
+
+    #[test]
+    fn replay_versions_are_read_only_and_legacy_ignores_new_level() {
+        let seed = track("version-replay-seed");
+        let mut replay = Replay {
+            version: 1,
+            catalog: Catalog {
+                tracks: vec![seed.clone(), track("version-replay-next")],
+                playlists: vec![],
+                saved: HashSet::new(),
+                artist_genres: HashMap::new(),
+                familiar_artists: HashSet::new(),
+            },
+            context: Context {
+                seed,
+                queued: HashSet::new(),
+                session_played: HashSet::new(),
+                recent: vec![],
+                feedback: HashMap::new(),
+                rng_seed: 99,
+                limit: 10,
+                discovery: Some(100),
+            },
+        };
+        let path = std::env::temp_dir().join(format!(
+            "resonance-replay-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for version in [1, 2, 99] {
+            replay.version = version;
+            let bytes = serde_json::to_vec(&replay).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let result = replay_report(&path);
+            if version == 99 {
+                assert!(result.unwrap_err().contains("Unsupported"));
+            } else {
+                let report: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+                if version == 1 {
+                    assert!(report.get("discovery").is_none());
+                } else {
+                    assert_eq!(report["discovery"]["level"], 100);
+                }
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        replay.version = 2;
+        replay.context.discovery = None;
+        let bytes = serde_json::to_vec(&replay).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(replay_report(&path).unwrap_err().contains("missing"));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     #[ignore = "manual warm-cache benchmark"]
     fn warm_shortlist_10k() {
         let seed = track("benchmark-seed");
-        let catalog = Catalog {
+        let mut catalog = Catalog {
             tracks: (0..10_000)
                 .map(|id| track(&id.to_string()))
                 .chain(std::iter::once(seed.clone()))
@@ -600,17 +836,36 @@ mod tests {
             playlists: vec![],
             saved: HashSet::new(),
             artist_genres: HashMap::new(),
+            familiar_artists: HashSet::new(),
         };
-        shortlist(&catalog, &seed);
+        let feedback: HashMap<_, _> = catalog
+            .tracks
+            .iter()
+            .take(5_000)
+            .map(|song| {
+                (
+                    song.uri.clone(),
+                    history::Feedback {
+                        completed: 2,
+                        plays: 2,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        catalog.familiar_artists = engine::familiar_artists(&catalog, &feedback);
+        shortlist(&catalog, &seed, &feedback);
         let start = Instant::now();
-        let (short, hit) = shortlist(&catalog, &seed);
+        let (short, hit) = shortlist(&catalog, &seed, &feedback);
         let context = Context {
             seed,
             queued: HashSet::new(),
+            session_played: HashSet::new(),
             recent: vec![],
-            feedback: HashMap::new(),
+            feedback,
             rng_seed: 42,
             limit: 20,
+            discovery: Some(75),
         };
         let report = engine::rank(&short, &context);
         eprintln!(
@@ -620,5 +875,6 @@ mod tests {
         );
         assert!(hit);
         assert_eq!(report.selected.len(), 20);
+        assert_eq!(report.discovery.unwrap().selected_unplayed, 15);
     }
 }

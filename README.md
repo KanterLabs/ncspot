@@ -93,13 +93,29 @@ settings retained by this fork.
 
 ## Local radio and diagnostics
 
+The Now Playing Discovery dial goes from familiar favorites (0) to locally
+unplayed songs and unfamiliar artists (100), with a balanced default of 50.
+Click its arrows or use `:discovery 75`, then press **Shift+R** to start radio.
+After clicking the dial, left/right arrows adjust it; the mouse wheel also works
+over the dial. Changing it leaves playback and the existing queue alone. A brief animated
+transition shows the new level; `visualizer_fps = 0` disables animation.
+
+Ranking uses cached metadata and local listening history, with no Spotify
+recommendation calls. “Unplayed” refers to this device’s history. When history
+is sparse, saved songs provide a familiarity hint and diagnostics explain any
+shortfall in the requested mix.
+
 Click **Radio** in Now Playing or press **Shift+R** to build a station from metadata already cached
 by Resonance, keeping the current song and playback position. It can warm a station in
 the background while the current track plays and records explainable scores and exclusions for
-debugging. The command-line report is local and deterministic:
+debugging. Radio keeps topping up the queue and never automatically repeats a
+song played earlier in this terminal session. Explicitly queued duplicates remain
+playable. Stop playback to end the station. If no unheard candidates remain, the
+station stays active and waits for more cached metadata rather than replaying
+songs. The command-line report is local and deterministic:
 
 ```sh
-resonance radio-debug --seed spotify:track:TRACK_ID --rng-seed 42 --limit 20
+resonance radio-debug --seed spotify:track:TRACK_ID --rng-seed 42 --limit 20 --discovery 75
 resonance radio-debug --replay ~/.cache/resonance/radio-replay.json
 ```
 

@@ -24,7 +24,7 @@ use crate::ui::search_results::SearchResultsView;
 use cursive::Cursive;
 use cursive::event::{Event, Key};
 use cursive::traits::{Resizable, Scrollable, View};
-use cursive::views::{Dialog, TextView};
+use cursive::views::{Dialog, SelectView, TextView};
 use log::{debug, error, info};
 use ncspot::CONFIGURATION_FILE_NAME;
 use std::cell::RefCell;
@@ -34,6 +34,14 @@ pub enum CommandResult {
     View(Box<dyn ViewExt>),
     Modal(Box<dyn View>),
     Ignored,
+}
+
+fn discovery_label(level: u8) -> &'static str {
+    match level {
+        0..=33 => "Familiar",
+        34..=66 => "Balanced",
+        _ => "Explore",
+    }
 }
 
 pub struct CommandManager {
@@ -51,6 +59,52 @@ impl CommandManager {
     fn flash_volume(&self) {
         let percent = (self.spotify.volume() as f64 / 65535.0 * 100.0).round() as u16;
         osd::flash(osd::Flash::Volume(percent), &self.events);
+    }
+
+    fn flash_discovery(&self, level: u8) {
+        osd::flash(
+            osd::Flash::Notice(format!(
+                "Radio discovery: {} ({}%)",
+                discovery_label(level),
+                level
+            )),
+            &self.events,
+        );
+    }
+
+    fn discovery_dialog(&self, s: &mut Cursive) {
+        let levels = [0_u8, 25, 50, 75, 100];
+        let current = self.config.discovery();
+        let selected = levels
+            .iter()
+            .position(|level| *level == current)
+            .unwrap_or(2);
+        let config = self.config.clone();
+        let events = self.events.clone();
+        let mut selector = SelectView::<u8>::new();
+        for level in levels {
+            selector.add_item(format!("{}  ({}%)", discovery_label(level), level), level);
+        }
+        selector.set_selection(selected);
+        selector.set_on_submit(move |s, level| {
+            let level = *level;
+            config.set_discovery(level);
+            events.trigger();
+            osd::flash(
+                osd::Flash::Notice(format!(
+                    "Radio discovery: {} ({}%)",
+                    discovery_label(level),
+                    level
+                )),
+                &events,
+            );
+            s.pop_layer();
+        });
+        s.add_layer(Modal::new(
+            Dialog::around(selector)
+                .title("Radio discovery")
+                .dismiss_button("Cancel"),
+        ));
     }
 
     pub fn new(
@@ -225,6 +279,16 @@ impl CommandManager {
                 self.flash_volume();
                 Ok(None)
             }
+            Command::Discovery(Some(level)) => {
+                self.config.set_discovery(*level);
+                self.events.trigger();
+                self.flash_discovery(*level);
+                Ok(None)
+            }
+            Command::Discovery(None) => {
+                self.discovery_dialog(s);
+                Ok(None)
+            }
             Command::Help => {
                 let view = Box::new(HelpView::new(self.bindings.borrow().clone()));
                 s.call_on_name("main", move |v: &mut Layout| v.push_view(view));
@@ -347,7 +411,7 @@ impl CommandManager {
                 Ok(None)
             }
             Command::RadioDebug => {
-                let report = crate::recommendations::diagnostics();
+                let report = crate::recommendations::diagnostics(&self.queue);
                 let dialog = Dialog::around(TextView::new(report).scrollable())
                     .title("Radio diagnostics")
                     .dismiss_button("Close")

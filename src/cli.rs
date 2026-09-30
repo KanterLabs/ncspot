@@ -41,12 +41,13 @@ pub fn radio_debug(
     seed: Option<String>,
     rng_seed: u64,
     limit: usize,
+    discovery: u8,
     replay: Option<PathBuf>,
 ) -> Result<(), String> {
     let report = if let Some(path) = replay {
         crate::recommendations::replay_report(&path)?
     } else {
-        crate::recommendations::offline_report(seed, rng_seed, limit)?
+        crate::recommendations::offline_report(seed, rng_seed, limit, discovery)?
     };
     log::debug!("radio-debug: {report}");
     println!("{report}");

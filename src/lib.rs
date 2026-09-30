@@ -41,11 +41,20 @@ pub fn program_arguments() -> clap::Command {
                 .help("maximum number of candidates to report (1-100; default: 20)"),
         )
         .arg(
+            clap::Arg::new("discovery")
+                .long("discovery")
+                .value_name("PERCENT")
+                .value_parser(clap::builder::RangedU64ValueParser::<u8>::new().range(0..=100))
+                .default_value("50")
+                .conflicts_with("replay")
+                .help("radio exploration level (0-100; default: 50)"),
+        )
+        .arg(
             clap::Arg::new("replay")
                 .long("replay")
                 .value_name("FILE")
                 .value_parser(PathBufValueParser::new())
-                .conflicts_with_all(["seed", "rng-seed", "limit"])
+                .conflicts_with_all(["seed", "rng-seed", "limit", "discovery"])
                 .help("replay an immutable radio-debug snapshot"),
         );
 
@@ -109,6 +118,7 @@ mod tests {
         );
         assert_eq!(*subcommand.get_one::<u64>("rng-seed").unwrap(), 42);
         assert_eq!(*subcommand.get_one::<usize>("limit").unwrap(), 20);
+        assert_eq!(*subcommand.get_one::<u8>("discovery").unwrap(), 50);
         assert!(subcommand.get_one::<std::path::PathBuf>("replay").is_none());
     }
 
@@ -133,6 +143,23 @@ mod tests {
                     "radio-replay.json",
                     "--seed",
                     "spotify:track:abc",
+                ])
+                .is_err()
+        );
+        assert!(
+            program_arguments()
+                .try_get_matches_from([BIN_NAME, "radio-debug", "--discovery", "101"])
+                .is_err()
+        );
+        assert!(
+            program_arguments()
+                .try_get_matches_from([
+                    BIN_NAME,
+                    "radio-debug",
+                    "--replay",
+                    "radio-replay.json",
+                    "--discovery",
+                    "25",
                 ])
                 .is_err()
         );

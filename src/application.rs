@@ -325,6 +325,12 @@ impl Application {
                     self.event_manager.clone(),
                 );
             }
+            self.queue.resume_radio_if_ready();
+            crate::ui::radio::maintain(
+                self.queue.clone(),
+                self.queue.get_library(),
+                self.event_manager.clone(),
+            );
             self.cursive.step();
 
             if first_frame {
@@ -359,6 +365,10 @@ impl Application {
 
                         if state == PlayerEvent::FinishedTrack {
                             self.queue.next(false);
+                        } else if state == PlayerEvent::Stopped {
+                            // Natural radio exhaustion stays FinishedTrack;
+                            // Stopped is an explicit transport or stream failure.
+                            self.queue.cancel_radio();
                         }
                     }
                     Event::Queue(event) => {

@@ -69,6 +69,7 @@ fn main() -> Result<(), String> {
             args.get_one::<String>("seed").cloned(),
             *args.get_one::<u64>("rng-seed").unwrap(),
             *args.get_one::<usize>("limit").unwrap(),
+            *args.get_one::<u8>("discovery").unwrap(),
             args.get_one::<PathBuf>("replay").cloned(),
         ),
         Some((_, _)) => unreachable!(),

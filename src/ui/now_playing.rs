@@ -2,11 +2,13 @@ use std::cmp::min;
 use std::collections::hash_map::DefaultHasher;
 use std::f64::consts::{PI, TAU};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use cursive::align::HAlign;
-use cursive::event::{Event, EventResult, MouseButton, MouseEvent};
+use cursive::event::{Event, EventResult, Key, MouseButton, MouseEvent};
 use cursive::theme::{Color, ColorStyle, ColorType, Effect, PaletteColor};
 use cursive::{Cursive, Printer, Vec2, View};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -21,7 +23,9 @@ use crate::spotify::{PlayerEvent, Spotify, VOLUME_PERCENT};
 use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
 use crate::ui::accent;
 use crate::ui::album::AlbumView;
-use crate::ui::anim::{Animator, DEFAULT_FPS, blend, blendable, lift, marquee, staggered_fade};
+use crate::ui::anim::{
+    Animator, DEFAULT_FPS, blend, blendable, fade, lift, marquee, staggered_fade,
+};
 use crate::ui::artist::ArtistView;
 use crate::ui::contextmenu::ContextMenu;
 use crate::ui::queue::QueueView;
@@ -51,6 +55,16 @@ const INTRO_STAGGER: Duration = Duration::from_millis(90);
 /// from the background to the accent colour. The bar shades up to full at the
 /// playhead, so the fill reads as a trail behind it.
 const PROGRESS_TAIL: f32 = 0.45;
+
+/// Discovery is intentionally a small, coarse selector: the wheel and the
+/// keyboard move in these increments while clicking the track picks any value.
+const DISCOVERY_STEP: u8 = 25;
+const DISCOVERY_EASE: Duration = Duration::from_millis(250);
+const DISCOVERY_RIPPLE: Duration = Duration::from_millis(420);
+const DISCOVERY_TRACK_WIDTH: usize = 15;
+const DISCOVERY_COMPACT_TRACK_WIDTH: usize = 7;
+const DISCOVERY_MIN_COMPACT_WIDTH: usize = 26;
+const DISCOVERY_MIN_TRACK_WIDTH: usize = 21;
 
 /// Where a fade that has to make do with the dim attribute stops being dim.
 const HALF_FADED: f32 = 0.55;
@@ -89,6 +103,12 @@ enum Control {
     Repeat,
     Shuffle,
     Radio,
+    /// Move the discovery selector toward familiar material.
+    DiscoveryDecrease,
+    /// Move the discovery selector toward exploration.
+    DiscoveryIncrease,
+    /// Pick a discovery value directly from the selector track.
+    DiscoveryDial,
     /// Set the volume to the clicked fraction of the meter.
     Volume,
     /// Play the item at this index in the queue.
@@ -244,6 +264,9 @@ enum BlockKind {
         scroll: bool,
     },
     Segments(Vec<Segment>),
+    /// The discovery selector next to the Radio action. It owns its dynamic
+    /// indicator and hitboxes because the marker eases independently of playback.
+    Discovery,
     Progress,
     Times,
     Rule,
@@ -330,6 +353,52 @@ fn fit_blocks(blocks: &mut Vec<Block>, height: usize) {
     }
 }
 
+/// Wall-clock state for the discovery selector. The dial is a user control, so
+/// its easing must continue while playback is paused or stopped and must never
+/// derive its phase from the track position.
+#[derive(Clone, Copy, Debug)]
+struct DiscoveryMotion {
+    from: f32,
+    target: f32,
+    changed_at: Option<Instant>,
+}
+
+impl Default for DiscoveryMotion {
+    fn default() -> Self {
+        Self {
+            from: 50.0,
+            target: 50.0,
+            changed_at: None,
+        }
+    }
+}
+
+impl DiscoveryMotion {
+    fn value(self, now: Instant, animated: bool) -> f32 {
+        if !animated {
+            return self.target;
+        }
+        let Some(changed_at) = self.changed_at else {
+            return self.target;
+        };
+        self.from + (self.target - self.from) * fade(now.duration_since(changed_at), DISCOVERY_EASE)
+    }
+
+    fn ripple(self, now: Instant, animated: bool) -> f32 {
+        if !animated {
+            return 0.0;
+        }
+        let Some(changed_at) = self.changed_at else {
+            return 0.0;
+        };
+        let elapsed = now.duration_since(changed_at);
+        if elapsed >= DISCOVERY_RIPPLE {
+            return 0.0;
+        }
+        1.0 - elapsed.as_secs_f32() / DISCOVERY_RIPPLE.as_secs_f32()
+    }
+}
+
 /// A responsive dashboard for the item currently playing.
 pub struct NowPlayingView {
     queue: Arc<Queue>,
@@ -339,6 +408,14 @@ pub struct NowPlayingView {
     spectrum: RwLock<SpectrumState>,
     animator: Arc<Animator>,
     events: EventManager,
+    discovery_motion: RwLock<DiscoveryMotion>,
+    discovery_focus: RwLock<bool>,
+    /// Set only while the short selector transition is requesting frames. This
+    /// stays idle after the ripple settles, including on a paused view.
+    discovery_animating: Arc<AtomicBool>,
+    /// Bumped for every selector change so a burst of wheel input extends the
+    /// one transient refresh worker through the newest transition.
+    discovery_generation: Arc<AtomicU64>,
     #[cfg(feature = "album_art")]
     art: crate::ui::album_art::AlbumArt,
     /// The keyboard cursor in the queue beside the card, as a place in the play
@@ -364,6 +441,10 @@ impl NowPlayingView {
             animator,
             #[cfg(feature = "album_art")]
             art: crate::ui::album_art::AlbumArt::new(events_for_art),
+            discovery_motion: RwLock::new(DiscoveryMotion::default()),
+            discovery_focus: RwLock::new(false),
+            discovery_animating: Arc::new(AtomicBool::new(false)),
+            discovery_generation: Arc::new(AtomicU64::new(0)),
             cursor: RwLock::new(None),
         }
     }
@@ -434,6 +515,129 @@ impl NowPlayingView {
             .visualizer_fps
             .unwrap_or(DEFAULT_FPS)
             > 0
+    }
+
+    /// The current persisted discovery preference. Config owns clamping, but
+    /// keeping the UI side bounded makes older or hand-edited state harmless.
+    fn discovery(&self) -> u8 {
+        self.library.cfg.discovery().min(100)
+    }
+
+    fn discovery_focused(&self) -> bool {
+        *self.discovery_focus.read().unwrap()
+    }
+
+    fn set_discovery_focus(&self, focused: bool) {
+        *self.discovery_focus.write().unwrap() = focused;
+    }
+
+    /// Keep the selector's wall-clock transition in sync with a config change.
+    /// This also catches changes made by a command or a config reload outside
+    /// this view, so the rendered selector never jumps behind the persisted value.
+    fn discovery_visual(&self) -> (u8, f32, u8) {
+        let target = self.discovery();
+        let animated = self.animated();
+        let now = Instant::now();
+        let mut motion = self.discovery_motion.write().unwrap();
+        let mut changed = false;
+        if (motion.target - f32::from(target)).abs() > f32::EPSILON {
+            let current = motion.value(now, animated);
+            motion.from = if animated { current } else { f32::from(target) };
+            motion.target = f32::from(target);
+            motion.changed_at = animated.then_some(now);
+            changed = animated;
+        }
+        let value = motion.value(now, animated).round().clamp(0.0, 100.0) as u8;
+        let ripple = motion.ripple(now, animated);
+        drop(motion);
+        if changed {
+            self.discovery_generation.fetch_add(1, Ordering::AcqRel);
+            self.wake_discovery_animation();
+        }
+        (value, ripple, target)
+    }
+
+    /// Request a redraw for the brief selector transition. The regular
+    /// visualizer animator only runs while audio is playing, so this small,
+    /// self-terminating loop is what keeps a paused/stopped selector smooth.
+    fn wake_discovery_animation(&self) {
+        if !self.animated() || self.discovery_animating.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let events = self.events.clone();
+        let active = self.discovery_animating.clone();
+        let generation = self.discovery_generation.clone();
+        let mut seen_generation = generation.load(Ordering::Acquire);
+        let fps = self
+            .library
+            .cfg
+            .values()
+            .visualizer_fps
+            .unwrap_or(DEFAULT_FPS)
+            .clamp(1, 60);
+        let frame = Duration::from_secs_f64(1.0 / f64::from(fps));
+        thread::spawn(move || {
+            let mut started = Instant::now();
+            loop {
+                let current_generation = generation.load(Ordering::Acquire);
+                if current_generation != seen_generation {
+                    seen_generation = current_generation;
+                    started = Instant::now();
+                }
+                if started.elapsed() >= DISCOVERY_RIPPLE {
+                    break;
+                }
+                if !events.try_trigger() {
+                    break;
+                }
+                thread::sleep(frame);
+            }
+            active.store(false, Ordering::Release);
+            // Draw one settled frame after the last sleeping interval. Without
+            // this wake the terminal can retain the final shimmer colour until
+            // an unrelated input event arrives.
+            events.try_trigger();
+        });
+    }
+
+    /// Store a selector value and begin its visual transition. Every path that
+    /// changes discovery comes through here, so mouse, wheel and keyboard input
+    /// have the same persistence and animation behaviour.
+    fn set_discovery_value(&self, value: u8) {
+        let value = value.min(100);
+        let current = self.discovery();
+        if current == value {
+            return;
+        }
+
+        self.library.cfg.set_discovery(value);
+        let now = Instant::now();
+        let animated = self.animated();
+        let mut motion = self.discovery_motion.write().unwrap();
+        let present = motion.value(now, animated);
+        motion.from = if animated { present } else { f32::from(value) };
+        motion.target = f32::from(value);
+        motion.changed_at = animated.then_some(now);
+        drop(motion);
+
+        self.discovery_generation.fetch_add(1, Ordering::AcqRel);
+        self.wake_discovery_animation();
+        // A zero-FPS configuration still needs the immediate value change to
+        // reach the screen, while the animated path gets further frame wakes.
+        self.events.try_trigger();
+    }
+
+    fn adjust_discovery(&self, steps: i32) {
+        if steps == 0 {
+            return;
+        }
+        let delta = steps
+            .unsigned_abs()
+            .saturating_mul(u32::from(DISCOVERY_STEP))
+            .min(100) as i32;
+        let delta = if steps.is_positive() { delta } else { -delta };
+        let next = (i32::from(self.discovery()) + delta).clamp(0, 100) as u8;
+        self.set_discovery_value(next);
     }
 
     /// `ink` drawn `amount` of the way up from the background behind it, so a line
@@ -565,6 +769,9 @@ impl NowPlayingView {
     }
 
     fn status(&self) -> (&'static str, &'static str) {
+        if self.queue.radio_natural_end() {
+            return ("◌", "RADIO WAITING");
+        }
         let use_nerdfont = self.use_nerdfont();
         match self.spotify.get_current_status() {
             PlayerEvent::Playing(_) => {
@@ -580,6 +787,9 @@ impl NowPlayingView {
                 } else {
                     ("Ⅱ", "PAUSED")
                 }
+            }
+            PlayerEvent::Stopped | PlayerEvent::FinishedTrack if self.queue.radio_active() => {
+                ("◌", "RADIO WAITING")
             }
             PlayerEvent::Stopped | PlayerEvent::FinishedTrack => ("■", "STOPPED"),
         }
@@ -1063,6 +1273,123 @@ impl NowPlayingView {
         ]
     }
 
+    /// Lift the dial's accent briefly after a selection change. The glow is
+    /// deliberately colour-only: it does not move the layout or consume rows.
+    fn discovery_style(&self, printer: &Printer<'_, '_>, ripple: f32) -> ColorStyle {
+        let style = self.accent_style(printer);
+        if ripple <= 0.0 {
+            return style;
+        }
+        let ColorType::Color(colour) = style.front else {
+            return style;
+        };
+        ColorStyle::new(
+            ColorType::Color(lift(colour, 0.28 * ripple.clamp(0.0, 1.0))),
+            style.back,
+        )
+    }
+
+    fn discovery_segments(
+        &self,
+        printer: &Printer<'_, '_>,
+        width: usize,
+        value: u8,
+        ripple: f32,
+        target: u8,
+    ) -> Vec<Segment> {
+        let quiet = ColorStyle::secondary();
+        let accent = self.accent_style(printer);
+        let dial = self.discovery_style(printer, ripple);
+        let value_text = format!("{target}%");
+        let label = discovery_label(target);
+
+        // The full scale keeps all three words visible, so the selector explains
+        // itself at a glance. A shorter scale is used before draw_segments ever
+        // has to flatten it, preserving click targets on compact terminals.
+        let full = vec![
+            Segment::new("Discovery  Familiar ", quiet),
+            Segment::button("[-]", accent, Control::DiscoveryDecrease),
+            Segment::new(" ", quiet),
+            Segment::button(
+                discovery_track(value, DISCOVERY_TRACK_WIDTH),
+                dial,
+                Control::DiscoveryDial,
+            ),
+            Segment::new(" ", quiet),
+            Segment::button("[+]", accent, Control::DiscoveryIncrease),
+            Segment::new(format!(" Explore  {value_text}  {label}"), quiet),
+        ];
+        let full_width: usize = full.iter().map(|segment| segment.text.width()).sum();
+        if width >= full_width {
+            return full;
+        }
+
+        let mut compact = vec![
+            Segment::new("D ", quiet),
+            Segment::button("[-]", accent, Control::DiscoveryDecrease),
+            Segment::new(" ", quiet),
+            Segment::button(
+                discovery_track(value, DISCOVERY_COMPACT_TRACK_WIDTH),
+                dial,
+                Control::DiscoveryDial,
+            ),
+            Segment::new(" ", quiet),
+            Segment::button("[+]", accent, Control::DiscoveryIncrease),
+            Segment::new(format!(" {value_text}  {label}"), quiet),
+        ];
+        let compact_width: usize = compact.iter().map(|segment| segment.text.width()).sum();
+        if width >= compact_width.max(DISCOVERY_MIN_COMPACT_WIDTH) {
+            if width >= compact_width + "Discovery ".width() - "D ".width() {
+                // Keep the readable word whenever this terminal has the spare
+                // cells; the one-letter form is only the last compact fallback.
+                compact[0].text = "Discovery ".to_string();
+            }
+            return compact;
+        }
+
+        let compact_without_label = vec![
+            Segment::new("D ", quiet),
+            Segment::button("[-]", accent, Control::DiscoveryDecrease),
+            Segment::new(" ", quiet),
+            Segment::button(
+                discovery_track(value, DISCOVERY_COMPACT_TRACK_WIDTH),
+                dial,
+                Control::DiscoveryDial,
+            ),
+            Segment::new(" ", quiet),
+            Segment::button("[+]", accent, Control::DiscoveryIncrease),
+            Segment::new(format!(" {value_text}"), quiet),
+        ];
+        let compact_without_label_width: usize = compact_without_label
+            .iter()
+            .map(|segment| segment.text.width())
+            .sum();
+        if width >= compact_without_label_width.max(DISCOVERY_MIN_TRACK_WIDTH) {
+            return compact_without_label;
+        }
+
+        // At the very edge of the terminal keep the controls and actual value;
+        // the labels are decorative and can disappear without losing operation.
+        vec![
+            Segment::new("D", quiet),
+            Segment::button("[-]", accent, Control::DiscoveryDecrease),
+            Segment::new(value_text, quiet),
+            Segment::button("[+]", accent, Control::DiscoveryIncrease),
+        ]
+    }
+
+    fn draw_discovery(&self, printer: &Printer<'_, '_>, row: usize, region: Region) {
+        let Some(region) = region.visible(printer) else {
+            return;
+        };
+        if row >= printer.size.y {
+            return;
+        }
+        let (value, ripple, target) = self.discovery_visual();
+        let segments = self.discovery_segments(printer, region.width, value, ripple, target);
+        self.draw_segments(printer, row, region, &segments);
+    }
+
     fn volume_percent(&self) -> u16 {
         (self.spotify.volume() as f64 / u16::MAX as f64 * 100.0).round() as u16
     }
@@ -1168,12 +1495,17 @@ impl NowPlayingView {
         if matches!(playable, Playable::Track(track) if track.id.is_some() && !track.is_local) {
             blocks.push(Block::new(
                 BlockKind::Segments(vec![Segment::button(
-                    "[ Radio  Shift+R ]",
+                    if self.queue.radio_active() {
+                        "[ Radio ON  Shift+R ]"
+                    } else {
+                        "[ Radio  Shift+R ]"
+                    },
                     self.accent_style(printer),
                     Control::Radio,
                 )]),
                 2,
             ));
+            blocks.push(Block::new(BlockKind::Discovery, 2));
         }
 
         blocks
@@ -1227,6 +1559,7 @@ impl NowPlayingView {
                     Self::draw_line(printer, row, region, text, ink, phase);
                 }
                 BlockKind::Segments(segments) => self.draw_segments(printer, row, region, segments),
+                BlockKind::Discovery => self.draw_discovery(printer, row, region),
                 BlockKind::Progress => {
                     if playable.is_some() {
                         self.draw_progress(printer, row, region, elapsed, playable);
@@ -1589,6 +1922,14 @@ impl NowPlayingView {
             }
             Control::Shuffle => self.queue.set_shuffle(!self.queue.get_shuffle()),
             Control::Radio => self.start_radio(),
+            Control::DiscoveryDecrease => self.adjust_discovery(-1),
+            Control::DiscoveryIncrease => self.adjust_discovery(1),
+            Control::DiscoveryDial => {
+                let value = (hitbox.fraction(position) * 100.0)
+                    .round()
+                    .clamp(0.0, 100.0) as u8;
+                self.set_discovery_value(value);
+            }
             Control::Track(index) => {
                 *self.cursor.write().unwrap() = None;
                 self.queue.play(index, true, false);
@@ -1613,6 +1954,9 @@ impl NowPlayingView {
                     self.spotify.volume().saturating_sub(step)
                 };
                 self.spotify.set_volume(volume, true);
+            }
+            Control::DiscoveryDecrease | Control::DiscoveryIncrease | Control::DiscoveryDial => {
+                self.adjust_discovery(steps.signum());
             }
             Control::Track(_) => self.move_cursor(-steps),
             _ => self.spotify.seek_relative(-5000 * steps),
@@ -1674,6 +2018,23 @@ impl View for NowPlayingView {
             });
         }
 
+        // Cursive tests and direct callers can deliver arrows here. During a
+        // normal run the global key binding turns them into Move commands,
+        // which are handled by the same focus check in `on_command` below.
+        if self.discovery_focused() {
+            match event {
+                Event::Key(Key::Left) => {
+                    self.adjust_discovery(-1);
+                    return EventResult::consumed();
+                }
+                Event::Key(Key::Right) => {
+                    self.adjust_discovery(1);
+                    return EventResult::consumed();
+                }
+                _ => {}
+            }
+        }
+
         let Event::Mouse {
             offset,
             position,
@@ -1683,6 +2044,9 @@ impl View for NowPlayingView {
             return EventResult::Ignored;
         };
         let Some(position) = position.checked_sub(offset) else {
+            if event == MouseEvent::Press(MouseButton::Left) {
+                self.set_discovery_focus(false);
+            }
             return EventResult::Ignored;
         };
         let Some(hitbox) = self
@@ -1693,11 +2057,20 @@ impl View for NowPlayingView {
             .find(|hitbox| hitbox.contains(position))
             .copied()
         else {
+            if event == MouseEvent::Press(MouseButton::Left) {
+                self.set_discovery_focus(false);
+            }
             return EventResult::Ignored;
         };
 
         match event {
             MouseEvent::Press(MouseButton::Left) => {
+                self.set_discovery_focus(matches!(
+                    hitbox.control,
+                    Control::DiscoveryDecrease
+                        | Control::DiscoveryIncrease
+                        | Control::DiscoveryDial
+                ));
                 self.activate(hitbox, position);
                 EventResult::consumed()
             }
@@ -1855,6 +2228,8 @@ impl ViewExt for NowPlayingView {
                     MoveMode::Up => self.move_cursor(-steps),
                     MoveMode::Down => self.move_cursor(steps),
                     MoveMode::Playing => *self.cursor.write().unwrap() = None,
+                    MoveMode::Left if self.discovery_focused() => self.adjust_discovery(-steps),
+                    MoveMode::Right if self.discovery_focused() => self.adjust_discovery(steps),
                     MoveMode::Left | MoveMode::Right => {}
                 }
             }
@@ -1941,10 +2316,30 @@ fn volume_meter(percent: u16, cells: usize) -> String {
     meter
 }
 
+fn discovery_label(value: u8) -> &'static str {
+    match value {
+        0..=33 => "Familiar",
+        34..=66 => "Balanced",
+        _ => "Explore",
+    }
+}
+
+/// Draw a stable-width selector track with a single eased marker. Keeping the
+/// marker in a fixed-width string avoids any layout shifts while it travels.
+fn discovery_track(value: u8, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let marker = (usize::from(value.min(100)) * (width.saturating_sub(1)) + 50) / 100;
+    (0..width)
+        .map(|column| if column == marker { '●' } else { '─' })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use cursive::Vec2;
     use cursive::theme::Effect;
@@ -1952,10 +2347,11 @@ mod tests {
 
     use cursive::backends::puppet::Backend as PuppetBackend;
     use cursive::backends::puppet::observed::ObservedScreen;
+    use cursive::event::Key;
 
     use crate::command::Command;
     use crate::commands::CommandResult;
-    use crate::config::Config;
+    use crate::config::{Config, ConfigValues};
     use crate::events::EventManager;
     use crate::library::Library;
     use crate::model::playable::Playable;
@@ -1966,9 +2362,10 @@ mod tests {
     #[cfg(feature = "album_art")]
     use super::ART_MIN_HEIGHT;
     use super::{
-        Block, BlockKind, CARD_MAX_WIDTH, NowPlayingView, QUEUE_MIN_WIDTH, SPECTRUM_MAX_HEIGHT,
-        ViewExt, blocks_height, fit_blocks, percent_complete, progress_eighths, remaining_label,
-        split, truncate, volume_meter,
+        Block, BlockKind, CARD_MAX_WIDTH, DiscoveryMotion, INTRO_FADE, NowPlayingView,
+        QUEUE_MIN_WIDTH, SPECTRUM_MAX_HEIGHT, ViewExt, blocks_height, discovery_label,
+        discovery_track, fit_blocks, percent_complete, progress_eighths, remaining_label, split,
+        staggered_fade, truncate, volume_meter,
     };
     use crate::command::{MoveAmount, MoveMode};
     use cursive::View;
@@ -2168,6 +2565,191 @@ mod tests {
     }
 
     #[test]
+    fn active_radio_waiting_is_visible_and_stop_ends_the_station() {
+        let view = view(queued(), Some(0));
+        let seed = view.queue.get_current().unwrap().uri();
+        view.queue.start_radio(&seed);
+        view.spotify.update_status(PlayerEvent::Stopped);
+        assert_eq!(view.status().1, "RADIO WAITING");
+        assert!(view.queue.radio_active());
+        view.queue.stop();
+        assert_eq!(view.status().1, "STOPPED");
+        assert!(!view.queue.radio_active());
+    }
+
+    #[test]
+    fn discovery_scale_has_clear_zones_and_a_stable_track() {
+        assert_eq!(discovery_label(0), "Familiar");
+        assert_eq!(discovery_label(50), "Balanced");
+        assert_eq!(discovery_label(100), "Explore");
+        assert_eq!(discovery_track(0, 7), "●──────");
+        assert_eq!(discovery_track(50, 7), "───●───");
+        assert_eq!(discovery_track(100, 7), "──────●");
+    }
+
+    #[test]
+    fn discovery_motion_is_eased_and_can_be_disabled_without_waiting() {
+        let started = Instant::now();
+        let motion = DiscoveryMotion {
+            from: 0.0,
+            target: 100.0,
+            changed_at: Some(started),
+        };
+        assert_eq!(motion.value(started, true), 0.0);
+        let middle = motion.value(started + Duration::from_millis(125), true);
+        assert!(middle > 0.0 && middle < 100.0, "middle={middle}");
+        assert_eq!(
+            motion.value(started + Duration::from_millis(250), true),
+            100.0
+        );
+        assert_eq!(motion.value(started, false), 100.0);
+        assert_eq!(motion.ripple(started, false), 0.0);
+    }
+
+    #[test]
+    fn discovery_radio_selector_is_rendered_and_mouse_step_does_not_seek() {
+        let cfg = Config::new_for_test();
+        let ev = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), ev.clone());
+        let library = Library::new_for_test(ev.clone(), spotify.clone(), cfg.clone());
+        spotify.update_status(PlayerEvent::Paused(Duration::from_secs(62)));
+        let queue = Arc::new(Queue::new_for_test(
+            queued(),
+            Some(0),
+            spotify.clone(),
+            cfg.clone(),
+            library.clone(),
+        ));
+
+        let backend = PuppetBackend::init(Some(Vec2::new(90, 30)));
+        let screens = backend.stream();
+        let mut siv = cursive::Cursive::new();
+        siv.set_theme(crate::theme::load(&cfg.values().theme));
+        siv.add_fullscreen_layer(NowPlayingView::new(queue.clone(), library, ev));
+        let mut runner = siv.into_runner(backend);
+        runner.refresh();
+        let screen = screens.try_iter().last().expect("a frame");
+        let dial =
+            find_text(&screen, &discovery_track(50, 7)).expect("discovery dial") + Vec2::new(3, 0);
+        let plus = find_text(&screen, "[+]").expect("discovery increment control");
+        assert!(rows(&screen).join("\n").contains("Balanced"));
+        let before = spotify.get_current_progress();
+        runner.on_event(cursive::event::Event::Mouse {
+            offset: Vec2::zero(),
+            position: dial,
+            event: cursive::event::MouseEvent::WheelUp,
+        });
+        assert_eq!(cfg.discovery(), 75);
+        assert_eq!(spotify.get_current_progress(), before);
+        assert_eq!(queue.get_current_index(), Some(0));
+
+        // Scrolling nudges the dial but does not focus it. Ordinary arrows are
+        // therefore still free for the view's existing global navigation.
+        runner.on_event(cursive::event::Event::Key(Key::Right));
+        assert_eq!(cfg.discovery(), 75);
+
+        // Clicking the selector focuses it and makes one arrow one 25-point tick.
+        runner.on_event(cursive::event::Event::Mouse {
+            offset: Vec2::zero(),
+            position: dial,
+            event: cursive::event::MouseEvent::Press(cursive::event::MouseButton::Left),
+        });
+        assert_eq!(cfg.discovery(), 50);
+        runner.on_event(cursive::event::Event::Key(Key::Right));
+        assert_eq!(cfg.discovery(), 75);
+
+        // A click on ordinary metadata clears focus, so the same arrow no
+        // longer changes discovery.
+        let inert = find_text(&screen, "Juno Reactor").expect("track byline");
+        runner.on_event(cursive::event::Event::Mouse {
+            offset: Vec2::zero(),
+            position: inert,
+            event: cursive::event::MouseEvent::Press(cursive::event::MouseButton::Left),
+        });
+        runner.on_event(cursive::event::Event::Key(Key::Right));
+        assert_eq!(cfg.discovery(), 75);
+
+        runner.on_event(cursive::event::Event::Mouse {
+            offset: Vec2::zero(),
+            position: plus,
+            event: cursive::event::MouseEvent::Press(cursive::event::MouseButton::Left),
+        });
+
+        // The plus button was the last action, so it steps from 75 to 100.
+        assert_eq!(cfg.discovery(), 100);
+        assert_eq!(spotify.get_current_progress(), Duration::from_secs(62));
+        assert_eq!(queue.get_current_index(), Some(0));
+    }
+
+    #[test]
+    fn discovery_visualizer_fps_zero_renders_the_target_without_easing() {
+        let cfg = Config::new_for_test_with_values(ConfigValues {
+            visualizer_fps: Some(0),
+            ..Default::default()
+        });
+        cfg.set_discovery(75);
+        let ev = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), ev.clone());
+        let library = Library::new_for_test(ev.clone(), spotify.clone(), cfg.clone());
+        spotify.update_status(PlayerEvent::Paused(Duration::from_secs(62)));
+        let queue = Arc::new(Queue::new_for_test(
+            queued(),
+            Some(0),
+            spotify.clone(),
+            cfg.clone(),
+            library.clone(),
+        ));
+
+        let backend = PuppetBackend::init(Some(Vec2::new(90, 30)));
+        let screens = backend.stream();
+        let mut siv = cursive::Cursive::new();
+        siv.set_theme(crate::theme::load(&cfg.values().theme));
+        siv.add_fullscreen_layer(NowPlayingView::new(queue, library, ev));
+        let mut runner = siv.into_runner(backend);
+        runner.refresh();
+        let screen = screens.try_iter().last().expect("a frame");
+        let text = rows(&screen).join("\n");
+        assert!(text.contains("75%"), "{text}");
+        assert!(text.contains(&discovery_track(75, 7)), "{text}");
+    }
+
+    #[test]
+    fn compact_discovery_controls_fit_and_remain_actionable() {
+        let cfg = Config::new_for_test();
+        let ev = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), ev.clone());
+        let library = Library::new_for_test(ev.clone(), spotify.clone(), cfg.clone());
+        spotify.update_status(PlayerEvent::Paused(Duration::from_secs(62)));
+        let queue = Arc::new(Queue::new_for_test(
+            queued(),
+            Some(0),
+            spotify.clone(),
+            cfg.clone(),
+            library.clone(),
+        ));
+
+        let backend = PuppetBackend::init(Some(Vec2::new(30, 12)));
+        let screens = backend.stream();
+        let mut siv = cursive::Cursive::new();
+        siv.set_theme(crate::theme::load(&cfg.values().theme));
+        siv.add_fullscreen_layer(NowPlayingView::new(queue, library, ev));
+        let mut runner = siv.into_runner(backend);
+        runner.refresh();
+        let screen = screens.try_iter().last().expect("a compact frame");
+        let text = rows(&screen).join("\n");
+        assert!(text.contains("[-]"), "{text}");
+        assert!(text.contains("[+]"), "{text}");
+        let plus = find_text(&screen, "[+]").expect("compact increment control");
+        runner.on_event(cursive::event::Event::Mouse {
+            offset: Vec2::zero(),
+            position: plus,
+            event: cursive::event::MouseEvent::Press(cursive::event::MouseButton::Left),
+        });
+        assert_eq!(cfg.discovery(), 75);
+        assert_eq!(spotify.get_current_progress(), Duration::from_secs(62));
+    }
+
+    #[test]
     fn clicking_the_toggles_changes_them() {
         let (queue, _) = click(Vec2::new(90, 30), "shuffle off");
         assert!(queue.get_shuffle());
@@ -2248,10 +2830,17 @@ mod tests {
             )
         };
 
-        // The test theme leaves the background to the terminal, so the fade has no
-        // colour to interpolate and shows up as the dim attribute instead.
-        let fresh = playing(Duration::ZERO);
-        assert!(dimmed(&fresh, "Solaris"), "the title did not fade in");
+        // Keep the phase assertions clock-independent. Rendering a fresh
+        // SystemTime value can cross the short dim threshold on a busy CI host;
+        // the pure fade helper is the controlled-time proof of the first frame.
+        assert_eq!(
+            staggered_fade(Duration::ZERO, INTRO_FADE, Duration::ZERO),
+            0.0
+        );
+        assert_eq!(
+            staggered_fade(Duration::from_secs(5), INTRO_FADE, Duration::ZERO),
+            1.0
+        );
 
         let settled = playing(Duration::from_secs(5));
         assert!(

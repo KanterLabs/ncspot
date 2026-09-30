@@ -192,6 +192,14 @@ songs load into the queue immediately after it. The existing queue stays behind
 the radio tracks. Radio is available for Spotify songs; local files and podcast
 episodes cannot seed a station.
 
+Radio automatically refills before its queue runs out. It never automatically
+replays a song already played or attempted in this terminal session, even after
+queue edits or starting another station. A new duplicate explicitly queued by
+you remains playable. Repeat settings do not loop a running station. Stop with
+<kbd>Shift</kbd>+<kbd>S</kbd> or clear the queue to end it. If the cache has no
+unheard candidates, the station remains active with **RADIO WAITING**, retries
+with backoff, and resumes when more metadata is available.
+
 Radio ranks from the local track cache and listening history first. Artist, genre,
 and catalog metadata is enriched in the background when it is available; genre
 metadata is opportunistic. This enrichment does not use Spotify's recommendations
@@ -200,12 +208,21 @@ request. Manual early skips are learned as preference feedback separately from
 playback or stream errors, which are recorded as errors rather than dislikes.
 Mood and audio-feature signals are not part of the current ranking.
 
+Use <kbd>:</kbd><kbd>discovery</kbd> to choose how familiar or exploratory a local
+station should be. The selector offers `0` (Familiar), `25`, `50` (Balanced), `75`,
+and `100` (Explore); `:discovery 75` (or any number from 0 to 100) sets an exact
+level directly. The animated dial next to Radio also supports clicks, the mouse
+wheel, and left/right arrows after clicking to focus it. Clicking elsewhere
+returns arrows to navigation. `visualizer_fps = 0` makes it static. The control
+only changes radio candidate selection, so it leaves the current track and queue
+alone. A small on-screen notice shows the selected label and percentage.
+
 Use <kbd>:</kbd><kbd>radio-debug</kbd> to open the scrollable local diagnostics
-report. For a deterministic offline report that never logs in or makes a network
-request, run:
+report. The report is local and quick: it reads cached metadata and never logs in
+or makes a network request. For a deterministic offline report, run:
 
 ```text
-resonance radio-debug --seed URI_OR_ID --rng-seed 42 --limit 20
+resonance radio-debug --seed URI_OR_ID --rng-seed 42 --limit 20 --discovery 50
 ```
 
 To write a detailed replay log containing seeds, scores, rejection reasons,
@@ -363,6 +380,7 @@ Note: \<FOO\> - mandatory arg; [BAR] - optional arg
 | `move` \<DIRECTION\> \<STEP_SIZE\>                               | Scroll the current view `up`/`down`/`left`/`right` with integer step sizes, or `pageup`/`pagedown`/`pageleft`/`pageright` with float step sizes.                                                                                                                |
 | `repeat` [REPEAT_MODE]<br/>Alias: `loop`                         | Set repeat mode. Omit argument to step through the available modes.<br/>\* Valid values for REPEAT_MODE: `list` (aliases: `playlist`, `queue`), `track` (aliases: `once`, `single`), `none` (alias: `off`)                                                      |
 | `shuffle` [`on`\|`off`]                                          | Enable or disable shuffle. Omit argument to toggle.                                                                                                                                                                                                             |
+| `discovery` [0-100]                                              | Set the local radio exploration level, or open a selector when omitted. `0` is Familiar, `50` is Balanced, and `100` is Explore.                                                                                                                                 |
 | `previous`                                                       | Play the previous track.                                                                                                                                                                                                                                        |
 | `next`                                                           | Play the next track.                                                                                                                                                                                                                                            |
 | `focus` \<SCREEN\>                                               | Switch to a different view.<br/>\* Valid values for SCREEN: `queue`, `search`, `library`, `playing`, `cover` (if built with the `cover` feature)                                                                                                                |
@@ -452,6 +470,7 @@ Possible configuration values are:
 | `gapless`                       | Enable gapless playback                                        | `true`, `false`                                                                       | `true`              |
 | `shuffle`                       | Set default shuffle state                                      | `true`, `false`                                                                       | `false`             |
 | `repeat`                        | Set default repeat mode                                        | `"off"`, `"track"`, `"playlist"`                                                      | `"off"`             |
+| `radio_discovery`               | Set the local radio exploration level at startup               | `0` - `100`                                                                           | `50`                |
 | `playback_state`                | Set default playback state                                     | `"Stopped"`, `"Paused"`, `"Playing"`, `"Default"`                                     | `"Paused"`          |
 | `library_tabs`                  | Tabs to show in library screen                                 | Array of `"tracks"`, `"albums"`, `"artists"`, `"playlists"`, `"podcasts"`, `"browse"` | All tabs            |
 | `cover_max_scale`<sup>[1]</sup> | Set maximum scaling ratio for cover art                        | Number                                                                                | No limit            |

@@ -160,6 +160,8 @@ pub enum Command {
     Radio,
     /// Show the local radio recommendation diagnostics report.
     RadioDebug,
+    /// Set the local radio exploration level, or open its selector.
+    Discovery(Option<u8>),
     Redraw,
     Execute(String),
     Reconnect,
@@ -206,6 +208,9 @@ impl fmt::Display for Command {
             Self::NewPlaylist(name) => vec![name.to_owned()],
             Self::Sort(key, direction) => vec![key.to_string(), direction.to_string()],
             Self::ShowRecommendations(mode) => vec![mode.to_string()],
+            Self::Discovery(level) => level
+                .map(|level| vec![level.to_string()])
+                .unwrap_or_default(),
             Self::Execute(cmd) => vec![cmd.to_owned()],
             Self::Cast(true) => vec!["stop".to_string()],
             Self::Cast(false) => vec![],
@@ -288,6 +293,7 @@ impl Command {
             Self::ShowRecommendations(_) => "similar",
             Self::Radio => "radio",
             Self::RadioDebug => "radio-debug",
+            Self::Discovery(_) => "discovery",
             Self::Redraw => "redraw",
             Self::Execute(_) => "exec",
             Self::Reconnect => "reconnect",
@@ -797,6 +803,25 @@ pub fn parse(input: &str) -> Result<Vec<Command>, CommandParseError> {
                 }
                 "radio" => Command::Radio,
                 "radio-debug" => Command::RadioDebug,
+                "discovery" => {
+                    let level = match args.first() {
+                        None => None,
+                        Some(raw) => {
+                            let level = raw.parse::<u8>().map_err(|error| E::ArgParseError {
+                                arg: (*raw).into(),
+                                err: error.to_string(),
+                            })?;
+                            if level > 100 {
+                                return Err(E::ArgParseError {
+                                    arg: (*raw).into(),
+                                    err: "value must be between 0 and 100".into(),
+                                });
+                            }
+                            Some(level)
+                        }
+                    };
+                    Command::Discovery(level)
+                }
                 "redraw" => Command::Redraw,
                 "exec" => Command::Execute(args.join(" ")),
                 "reconnect" => Command::Reconnect,
@@ -839,5 +864,27 @@ mod tests {
         assert_eq!(Command::RadioDebug.to_string(), "radio-debug");
         assert_eq!(Command::Radio.basename(), "radio");
         assert_eq!(Command::RadioDebug.basename(), "radio-debug");
+    }
+
+    #[test]
+    fn discovery_commands_parse_and_display() {
+        assert!(matches!(
+            parse("discovery").unwrap().as_slice(),
+            [Command::Discovery(None)]
+        ));
+        assert!(matches!(
+            parse("discovery 75").unwrap().as_slice(),
+            [Command::Discovery(Some(75))]
+        ));
+        assert_eq!(Command::Discovery(None).to_string(), "discovery");
+        assert_eq!(Command::Discovery(Some(75)).to_string(), "discovery 75");
+        assert_eq!(Command::Discovery(Some(75)).basename(), "discovery");
+    }
+
+    #[test]
+    fn discovery_command_rejects_bad_values() {
+        assert!(parse("discovery nope").is_err());
+        assert!(parse("discovery 101").is_err());
+        assert!(parse("discovery -1").is_err());
     }
 }

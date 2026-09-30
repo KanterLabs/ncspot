@@ -7,11 +7,17 @@ use crate::events::EventManager;
 use crate::model::playable::Playable;
 use crate::model::track::Track;
 use crate::queue::Queue;
+use crate::traits::ListItem;
 use crate::ui::osd;
 
 /// Station tracks whose art is fetched up front when a radio starts. The rest
 /// of the station is long enough that its art can wait until it is asked for.
 const STATION_PREFETCH: usize = 8;
+/// Keep enough automatic entries queued to cover worker latency and a short
+/// burst of skips. Refills are appended at the tail so manual queue entries
+/// keep their order.
+const RADIO_BATCH: usize = 20;
+const RADIO_LOW_WATER: usize = 5;
 /// Build a local station immediately from prepared metadata. Catalog enrichment
 /// happens separately and cannot hold up a cached station.
 pub(crate) fn start(
@@ -23,36 +29,101 @@ pub(crate) fn start(
     if track.id.is_none() || track.is_local {
         return;
     }
-    let run = generation().fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    queue.start_radio(&track.uri);
     osd::notify("Starting local radio…");
+    spawn_fill(queue, library, events, true);
+}
+
+/// Called from the application loop. Queue state owns the single-flight and
+/// retry deadline, so this is cheap and safe to call every turn.
+pub(crate) fn maintain(
+    queue: Arc<Queue>,
+    library: Arc<crate::library::Library>,
+    events: EventManager,
+) {
+    let Some((run, _)) = queue.radio_begin_fill(false, RADIO_LOW_WATER) else {
+        return;
+    };
+    spawn_claimed_fill(queue, library, events, run, false);
+}
+
+fn spawn_fill(
+    queue: Arc<Queue>,
+    library: Arc<crate::library::Library>,
+    events: EventManager,
+    force: bool,
+) {
+    let Some((run, _)) = queue.radio_begin_fill(force, RADIO_LOW_WATER) else {
+        return;
+    };
+    spawn_claimed_fill(queue, library, events, run, force);
+}
+
+fn spawn_claimed_fill(
+    queue: Arc<Queue>,
+    library: Arc<crate::library::Library>,
+    events: EventManager,
+    run: u64,
+    after_current: bool,
+) {
     thread::spawn(move || {
+        let Some(track) = queue.get_current().and_then(|item| item.track()) else {
+            let _ = queue.radio_finish_fill(run, 0);
+            schedule_retry(&queue, &events, run);
+            events.try_trigger();
+            return;
+        };
         let rng_seed = rand::random::<u64>();
-        let count = fill(&queue, &library, &track, run, rng_seed);
-        if count == Some(0) {
-            osd::notify("Preparing radio metadata in the background…");
-            let catalog = crate::recommendations::catalog(&queue, &library);
-            let related = crate::recommendations::related_artists(&catalog, &track);
-            let retry_queue = queue.clone();
-            let retry_library = library.clone();
-            let retry_events = events.clone();
-            crate::recommendations::enrichment::shared().refresh_with_callback(
-                queue.get_spotify(),
-                track.clone(),
-                related,
-                events.clone(),
-                move || {
-                    if fill(&retry_queue, &retry_library, &track, run, rng_seed) == Some(0) {
-                        osd::notify(
-                            "No radio candidates available yet; see :radio-debug for details",
-                        );
-                    }
-                    retry_events.try_trigger();
-                },
-            );
-        } else {
-            crate::recommendations::prewarm(queue, library, events.clone());
+        let count = fill(&queue, &library, &track, run, rng_seed, after_current);
+        if count.is_none() || count == Some(0) {
+            if count == Some(0) {
+                osd::notify("Radio waiting for more local metadata…");
+                maybe_refresh(&queue, &library, &events, &track, run);
+            }
+            schedule_retry(&queue, &events, run);
+        } else if count.is_some_and(|count| count > 0) {
+            crate::recommendations::prewarm(queue.clone(), library.clone(), events.clone());
         }
         events.try_trigger();
+    });
+}
+
+fn maybe_refresh(
+    queue: &Arc<Queue>,
+    library: &Arc<crate::library::Library>,
+    events: &EventManager,
+    track: &Track,
+    run: u64,
+) {
+    if !queue.radio_take_refresh(run) {
+        return;
+    }
+    let catalog = crate::recommendations::catalog(queue, library);
+    let related = crate::recommendations::related_artists(&catalog, track);
+    let retry_queue = queue.clone();
+    let retry_events = events.clone();
+    let _ = crate::recommendations::enrichment::shared().refresh_with_callback(
+        queue.get_spotify(),
+        track.clone(),
+        related,
+        events.clone(),
+        move || {
+            retry_queue.radio_wake(run);
+            retry_events.try_trigger();
+        },
+    );
+}
+
+fn schedule_retry(queue: &Arc<Queue>, events: &EventManager, run: u64) {
+    let Some(delay) = queue.radio_retry_delay(run) else {
+        return;
+    };
+    let retry_queue = queue.clone();
+    let retry_events = events.clone();
+    thread::spawn(move || {
+        thread::sleep(delay);
+        retry_queue.radio_wake(run);
+        retry_events.try_trigger();
     });
 }
 
@@ -62,22 +133,17 @@ fn fill(
     track: &Track,
     run: u64,
     rng_seed: u64,
+    after_current: bool,
 ) -> Option<usize> {
-    if generation_value() != run {
-        return None;
-    }
     let (mut diagnostic, replay) =
-        crate::recommendations::recommend(queue, library, track.clone(), rng_seed, 20);
+        crate::recommendations::recommend(queue, library, track.clone(), rng_seed, RADIO_BATCH);
     let tracks: Vec<_> = diagnostic
         .report
         .selected
         .iter()
         .map(|selection| selection.track.clone())
         .collect();
-    if generation_value() != run {
-        return None;
-    }
-    let applied = apply_station(queue, &track.uri, &tracks);
+    let applied = apply_radio_station(queue, run, &track.uri, &tracks, after_current);
     diagnostic.applied = applied.is_some_and(|count| count > 0);
     if let Some(count) = applied {
         if count > 0 {
@@ -87,17 +153,9 @@ fn fill(
     } else {
         debug!("radio: discarded because playback changed");
     }
+    let _ = queue.radio_finish_fill(run, applied.unwrap_or(0));
     crate::recommendations::remember(diagnostic, replay);
     applied
-}
-
-fn generation() -> &'static std::sync::atomic::AtomicU64 {
-    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    &GENERATION
-}
-
-fn generation_value() -> u64 {
-    generation().load(std::sync::atomic::Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -107,6 +165,7 @@ fn seed_is_current(queue: &Queue, seed: &str) -> bool {
         .is_some_and(|current| current.uri() == seed)
 }
 
+#[cfg(test)]
 fn apply_station(queue: &Queue, seed: &str, tracks: &[Track]) -> Option<usize> {
     let station: Vec<_> = tracks
         .iter()
@@ -115,6 +174,26 @@ fn apply_station(queue: &Queue, seed: &str, tracks: &[Track]) -> Option<usize> {
         .map(Playable::Track)
         .collect();
     queue.append_next_if_current(seed, &station)
+}
+
+fn apply_radio_station(
+    queue: &Queue,
+    generation: u64,
+    seed: &str,
+    tracks: &[Track],
+    after_current: bool,
+) -> Option<usize> {
+    let station: Vec<_> = tracks
+        .iter()
+        .filter(|track| track.uri != seed)
+        .cloned()
+        .map(Playable::Track)
+        .collect();
+    if after_current {
+        queue.append_radio_next_if_current(generation, seed, &station)
+    } else {
+        queue.append_radio_at_tail_if_current(generation, seed, &station)
+    }
 }
 
 /// Warm the cover cache for the first part of a radio station.

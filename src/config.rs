@@ -8,6 +8,7 @@ use cursive::theme::Theme;
 use log::{debug, error};
 use ncspot::{CONFIGURATION_FILE_NAME, USER_STATE_FILE_NAME};
 use platform_dirs::AppDirs;
+use std::io::Write;
 
 use crate::command::{SortDirection, SortKey};
 use crate::model::playable::Playable;
@@ -16,6 +17,17 @@ use crate::serialization::{CBOR, Serializer, TOML};
 
 pub const CACHE_VERSION: u16 = 1;
 pub const DEFAULT_COMMAND_KEY: char = ':';
+
+const DEFAULT_RADIO_DISCOVERY: u8 = 50;
+const PRE_DISCOVERY_USER_STATE_FILE_NAME: &str = "userstate.pre-discovery.cbor";
+
+fn default_radio_discovery() -> u8 {
+    DEFAULT_RADIO_DISCOVERY
+}
+
+fn clamp_radio_discovery(value: u8) -> u8 {
+    value.min(100)
+}
 
 /// The playback state when ncspot is started.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -117,6 +129,9 @@ pub struct ConfigValues {
     pub cover_accent: Option<bool>,
     pub beat_pulse: Option<bool>,
     pub ap_port: Option<u16>,
+    /// Local radio exploration level, from familiar (0) to exploratory (100).
+    /// When omitted, the value persisted in the user state is used.
+    pub radio_discovery: Option<u8>,
 }
 
 /// The ncspot theme.
@@ -169,6 +184,8 @@ pub struct UserState {
     pub playlist_orders: HashMap<String, SortingOrder>,
     pub cache_version: u16,
     pub playback_state: PlaybackState,
+    #[serde(default = "default_radio_discovery")]
+    pub radio_discovery: u8,
 }
 
 impl Default for UserState {
@@ -181,6 +198,7 @@ impl Default for UserState {
             playlist_orders: HashMap::new(),
             cache_version: 0,
             playback_state: PlaybackState::Default,
+            radio_discovery: default_radio_discovery(),
         }
     }
 }
@@ -202,10 +220,22 @@ impl Config {
     /// Create a default configuration from in-memory defaults, without touching the filesystem.
     #[cfg(test)]
     pub fn new_for_test() -> std::sync::Arc<Self> {
+        Self::new_for_test_with_values(ConfigValues::default())
+    }
+
+    /// Create an in-memory configuration for tests with explicit user values.
+    /// Startup-only overrides are applied to the initial runtime state just as
+    /// they are by [`Self::new`], without touching the filesystem.
+    #[cfg(test)]
+    pub fn new_for_test_with_values(values: ConfigValues) -> std::sync::Arc<Self> {
+        let mut state = UserState::default();
+        if let Some(discovery) = values.radio_discovery {
+            state.radio_discovery = clamp_radio_discovery(discovery);
+        }
         std::sync::Arc::new(Self {
             filename: String::new(),
-            values: RwLock::new(ConfigValues::default()),
-            state: RwLock::new(UserState::default()),
+            values: RwLock::new(values),
+            state: RwLock::new(state),
         })
     }
 
@@ -228,6 +258,10 @@ impl Config {
 
         let mut userstate = {
             let path = config_path(USER_STATE_FILE_NAME);
+            if let Err(error) = backup_legacy_user_state(&path) {
+                error!("could not preserve legacy user state before discovery migration: {error}");
+                panic!("could not preserve legacy user state before discovery migration: {error}");
+            }
             CBOR.load_or_generate_default(path, || Ok(UserState::default()), true)
                 .expect("could not load user state")
         };
@@ -242,6 +276,12 @@ impl Config {
 
         if let Some(playback_state) = values.playback_state.clone() {
             userstate.playback_state = playback_state;
+        }
+
+        // A configured discovery value is the startup default. Runtime commands
+        // update the persisted state and take effect until the next startup.
+        if let Some(discovery) = values.radio_discovery {
+            userstate.radio_discovery = clamp_radio_discovery(discovery);
         }
 
         Self {
@@ -259,6 +299,18 @@ impl Config {
     /// Get the runtime user state values.
     pub fn state(&self) -> RwLockReadGuard<'_, UserState> {
         self.state.read().unwrap()
+    }
+
+    /// Return the effective local radio exploration level. Both the configured
+    /// startup value and the persisted runtime state are clamped so malformed or
+    /// hand-edited state cannot leave the documented range.
+    pub fn discovery(&self) -> u8 {
+        clamp_radio_discovery(self.state().radio_discovery)
+    }
+
+    /// Set the runtime local radio exploration level.
+    pub fn set_discovery(&self, value: u8) {
+        self.with_state_mut(|state| state.radio_discovery = clamp_radio_discovery(value));
     }
 
     /// Modify the internal user state through a shared reference using a closure.
@@ -301,6 +353,139 @@ impl Config {
         *self.values.write().unwrap() = cfg;
         Ok(())
     }
+}
+
+/// Preserve a valid pre-discovery state file before the new field is persisted.
+///
+/// The backup is deliberately immutable: a pre-existing sibling is never
+/// replaced. This leaves the original state untouched if copying or verification
+/// fails, and makes the backup useful for decoding with an older binary.
+fn backup_legacy_user_state(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "unable to read existing user state {}: {error}",
+            path.display()
+        )
+    })?;
+    let value: serde_cbor::Value = match serde_cbor::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    let has_discovery = match &value {
+        serde_cbor::Value::Map(map) => map
+            .keys()
+            .any(|key| matches!(key, serde_cbor::Value::Text(key) if key == "radio_discovery")),
+        _ => return Ok(()),
+    };
+    if has_discovery {
+        return Ok(());
+    }
+
+    // Only preserve a state document that the current schema can actually read.
+    // Invalid CBOR or unrelated documents retain the existing serializer's parse
+    // failure behavior and do not create a misleading migration backup.
+    if serde_cbor::from_slice::<UserState>(&bytes).is_err() {
+        return Ok(());
+    }
+
+    let backup_path = path.with_file_name(PRE_DISCOVERY_USER_STATE_FILE_NAME);
+    if !backup_path.exists() {
+        return create_verified_backup(&backup_path, &bytes);
+    }
+    if verify_existing_backup(&backup_path, &bytes)? {
+        return Ok(());
+    }
+
+    // A rollback binary may have written a different valid legacy state. Keep
+    // the original base backup and give the new content its own immutable name.
+    let hashed_path = path.with_file_name(format!(
+        "userstate.pre-discovery-{:016x}.cbor",
+        discovery_content_hash(&bytes)
+    ));
+    create_verified_backup(&hashed_path, &bytes)
+}
+
+fn verify_existing_backup(path: &std::path::Path, bytes: &[u8]) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let existing = fs::read(path).map_err(|error| {
+        format!(
+            "unable to verify existing pre-discovery backup {}: {error}",
+            path.display()
+        )
+    })?;
+    if existing == bytes {
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn create_verified_backup(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    if verify_existing_backup(path, bytes)? {
+        return Ok(());
+    }
+
+    let mut backup = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(backup) => backup,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if verify_existing_backup(path, bytes)? {
+                return Ok(());
+            }
+            return Err(format!(
+                "existing pre-discovery backup {} differs from the legacy state",
+                path.display()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "unable to create pre-discovery backup {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    backup.write_all(bytes).map_err(|error| {
+        format!(
+            "unable to copy legacy state to pre-discovery backup {}: {error}",
+            path.display()
+        )
+    })?;
+    backup.sync_all().map_err(|error| {
+        format!(
+            "unable to sync pre-discovery backup {}: {error}",
+            path.display()
+        )
+    })?;
+    drop(backup);
+
+    if verify_existing_backup(path, bytes)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "pre-discovery backup {} does not match the legacy state",
+            path.display()
+        ))
+    }
+}
+
+fn discovery_content_hash(bytes: &[u8]) -> u64 {
+    // FNV-1a keeps the sibling name deterministic across process and compiler
+    // versions while remaining small enough for a filename.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3_u64);
+    }
+    hash
 }
 
 /// Parse the configuration file with name `filename` at the configuration base path.
@@ -403,6 +588,39 @@ pub fn set_configuration_base_path(base_path: Option<PathBuf>) {
 mod compatibility_tests {
     use super::*;
 
+    #[derive(Clone, Deserialize, Serialize)]
+    struct LegacyUserState {
+        volume: u16,
+        shuffle: bool,
+        repeat: queue::RepeatSetting,
+        queuestate: QueueState,
+        playlist_orders: HashMap<String, SortingOrder>,
+        cache_version: u16,
+        playback_state: PlaybackState,
+    }
+
+    fn legacy_track() -> Playable {
+        Playable::Track(crate::model::track::Track {
+            id: Some("legacy-track".into()),
+            uri: "spotify:track:legacy-track".into(),
+            title: "Legacy track".into(),
+            track_number: 1,
+            disc_number: 1,
+            duration: 180_000,
+            artists: vec!["Legacy artist".into()],
+            artist_ids: vec!["legacy-artist".into()],
+            album: Some("Legacy album".into()),
+            album_id: Some("legacy-album".into()),
+            album_artists: vec!["Legacy artist".into()],
+            cover_url: None,
+            url: "https://open.spotify.com/track/legacy-track".into(),
+            added_at: None,
+            list_index: 0,
+            is_local: false,
+            is_playable: Some(true),
+        })
+    }
+
     fn dirs(root: &std::path::Path, name: &str) -> AppDirs {
         let root = root.join(name);
         AppDirs {
@@ -446,5 +664,162 @@ mod compatibility_tests {
             "populated library"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn populated_legacy_cbor_gets_default_discovery_and_round_trips() {
+        let mut playlist_orders = HashMap::new();
+        playlist_orders.insert(
+            "playlist-1".into(),
+            SortingOrder {
+                key: SortKey::Title,
+                direction: SortDirection::Ascending,
+            },
+        );
+        let legacy = LegacyUserState {
+            volume: 23_456,
+            shuffle: true,
+            repeat: queue::RepeatSetting::RepeatPlaylist,
+            queuestate: QueueState {
+                current_track: Some(0),
+                random_order: Some(vec![0]),
+                track_progress: std::time::Duration::from_millis(4_321),
+                queue: vec![legacy_track()],
+            },
+            playlist_orders,
+            cache_version: CACHE_VERSION,
+            playback_state: PlaybackState::Paused,
+        };
+        let bytes = serde_cbor::to_vec(&legacy).unwrap();
+        let mut state: UserState = serde_cbor::from_slice(&bytes).unwrap();
+
+        assert_eq!(state.radio_discovery, 50);
+        assert_eq!(state.volume, legacy.volume);
+        assert_eq!(state.queuestate.queue.len(), 1);
+        assert_eq!(state.playlist_orders.len(), 1);
+
+        state.radio_discovery = 75;
+        let bytes = serde_cbor::to_vec(&state).unwrap();
+        let restored: UserState = serde_cbor::from_slice(&bytes).unwrap();
+        assert_eq!(restored.radio_discovery, 75);
+        assert_eq!(restored.volume, legacy.volume);
+        assert_eq!(restored.queuestate.queue.len(), 1);
+        assert_eq!(restored.playlist_orders.len(), 1);
+    }
+
+    #[test]
+    fn configured_discovery_is_startup_default_then_runtime_can_change() {
+        let root =
+            std::env::temp_dir().join(format!("resonance-discovery-{}", rand::random::<u64>()));
+        let config_dir = root.join(".config");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join(CONFIGURATION_FILE_NAME),
+            "radio_discovery = 125",
+        )
+        .unwrap();
+
+        let mut playlist_orders = HashMap::new();
+        playlist_orders.insert(
+            "playlist-1".into(),
+            SortingOrder {
+                key: SortKey::Title,
+                direction: SortDirection::Ascending,
+            },
+        );
+        let legacy = LegacyUserState {
+            volume: 23_456,
+            shuffle: true,
+            repeat: queue::RepeatSetting::RepeatPlaylist,
+            queuestate: QueueState {
+                current_track: Some(0),
+                random_order: Some(vec![0]),
+                track_progress: std::time::Duration::from_millis(4_321),
+                queue: vec![legacy_track()],
+            },
+            playlist_orders,
+            cache_version: CACHE_VERSION,
+            playback_state: PlaybackState::Paused,
+        };
+        fs::write(
+            config_dir.join(USER_STATE_FILE_NAME),
+            serde_cbor::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let legacy_bytes = fs::read(config_dir.join(USER_STATE_FILE_NAME)).unwrap();
+        let backup_path = config_dir.join(PRE_DISCOVERY_USER_STATE_FILE_NAME);
+
+        set_configuration_base_path(Some(root.clone()));
+        let config = Config::new(None);
+        assert_eq!(config.discovery(), 100);
+        assert_eq!(config.state().volume, legacy.volume);
+        assert_eq!(config.state().queuestate.queue.len(), 1);
+        assert_eq!(config.state().playlist_orders.len(), 1);
+        assert_eq!(fs::read(&backup_path).unwrap(), legacy_bytes);
+
+        config.set_discovery(25);
+        assert_eq!(config.discovery(), 25);
+        config.save_state();
+        let saved_state = fs::read(config_dir.join(USER_STATE_FILE_NAME)).unwrap();
+        let restored: UserState = CBOR.load(config_dir.join(USER_STATE_FILE_NAME)).unwrap();
+        assert_eq!(restored.radio_discovery, 25);
+        assert_eq!(restored.volume, legacy.volume);
+        assert_eq!(restored.queuestate.queue.len(), 1);
+        assert_eq!(restored.playlist_orders.len(), 1);
+
+        // An older binary can still decode the new state because the added
+        // field is an unknown map entry to its schema.
+        let rollback: LegacyUserState = serde_cbor::from_slice(&saved_state).unwrap();
+        assert_eq!(rollback.volume, legacy.volume);
+        assert_eq!(rollback.queuestate.queue.len(), 1);
+        assert_eq!(rollback.playlist_orders.len(), 1);
+
+        // Simulate a rollback binary that writes a valid but changed legacy
+        // state. A content-addressed sibling keeps both rollback snapshots.
+        let mut changed_legacy = legacy.clone();
+        changed_legacy.volume = 54_321;
+        let changed_legacy_bytes = serde_cbor::to_vec(&changed_legacy).unwrap();
+        drop(config);
+        fs::write(config_dir.join(USER_STATE_FILE_NAME), &changed_legacy_bytes).unwrap();
+        let second_start = Config::new(None);
+        assert_eq!(second_start.state().volume, changed_legacy.volume);
+        assert_eq!(fs::read(&backup_path).unwrap(), legacy_bytes);
+        let changed_backup_path = config_dir.join(format!(
+            "userstate.pre-discovery-{:016x}.cbor",
+            discovery_content_hash(&changed_legacy_bytes)
+        ));
+        assert_eq!(
+            fs::read(&changed_backup_path).unwrap(),
+            changed_legacy_bytes
+        );
+
+        // Reusing the same changed legacy bytes must not create or overwrite a
+        // second copy.
+        drop(second_start);
+        let _third_start = Config::new(None);
+        assert_eq!(fs::read(&backup_path).unwrap(), legacy_bytes);
+        assert_eq!(
+            fs::read(&changed_backup_path).unwrap(),
+            changed_legacy_bytes
+        );
+
+        *BASE_PATH.write().unwrap() = None;
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovery_clamps_runtime_values_even_when_startup_override_is_present() {
+        let config = Config::new_for_test_with_values(ConfigValues {
+            radio_discovery: Some(250),
+            ..ConfigValues::default()
+        });
+        assert_eq!(config.discovery(), 100);
+        config.set_discovery(150);
+        assert_eq!(config.discovery(), 100);
+        config.set_discovery(0);
+        assert_eq!(config.discovery(), 0);
+        config.set_discovery(75);
+        assert_eq!(config.discovery(), 75);
     }
 }

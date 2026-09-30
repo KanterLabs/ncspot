@@ -31,6 +31,13 @@ pub struct Catalog {
     pub saved: HashSet<String>,
     /// Artist ID to genre names.
     pub artist_genres: HashMap<String, Vec<String>>,
+    /// Artist keys known from saved tracks or positive listening history.
+    ///
+    /// The service normally fills this from a full catalog before handing a cached shortlist to
+    /// the engine.  Keeping it on the catalog lets a shortlist retain artist familiarity even
+    /// when the corresponding tracks are no longer present in that shortlist.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub familiar_artists: HashSet<String>,
 }
 
 /// Playback state and user history used to rank a station.
@@ -38,10 +45,16 @@ pub struct Catalog {
 pub struct Context {
     pub seed: Track,
     pub queued: HashSet<String>,
+    /// Tracks already played during this terminal session.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub session_played: HashSet<String>,
     pub recent: Vec<String>,
     pub feedback: HashMap<String, Feedback>,
     pub rng_seed: u64,
     pub limit: usize,
+    /// Optional discovery dial.  `None` selects the original v1 ranking exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<u8>,
 }
 
 /// Feature values used to produce a candidate's score.
@@ -65,6 +78,9 @@ pub struct ScoreComponents {
     pub saved_boost: f64,
     pub diversity_penalty: f64,
     pub fallback_penalty: f64,
+    /// Bounded discovery-dial contribution; zero for the legacy ranking path.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub discovery: f64,
 }
 
 /// A selected recommendation.
@@ -105,6 +121,23 @@ pub struct Report {
     pub confidence: f64,
     /// Whether the broader-cache sparse fallback was used.
     pub fallback: bool,
+    /// Discovery diagnostics, present only when a discovery level was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryReport>,
+}
+
+/// Diagnostics for a discovery-ranked station.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryReport {
+    pub level: u8,
+    pub target_unplayed: usize,
+    pub selected_unplayed: usize,
+    pub unfamiliar_artists: usize,
+    pub shortfall: usize,
+    pub history_sparse: bool,
+    /// Human-readable details about sparse history, quota shortfalls, or artist evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -134,6 +167,19 @@ struct ScoreInputs<'a> {
     feedback: &'a HashMap<String, Feedback>,
     artist_feedback: &'a HashMap<String, f64>,
     recent: &'a HashMap<String, usize>,
+}
+
+struct DiscoveryInputs<'a> {
+    level: u8,
+    target_unplayed: usize,
+    history_sparse: bool,
+    saved: &'a HashSet<String>,
+    feedback: &'a HashMap<String, Feedback>,
+    familiar_artists: HashSet<String>,
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
 }
 
 /// Rank cached tracks around `context.seed`.
@@ -181,6 +227,9 @@ pub fn rank(catalog: &Catalog, context: &Context) -> Report {
         if context.queued.contains(&track.uri) {
             exclusion_reasons.push("already queued".to_string());
         }
+        if context.session_played.contains(&track.uri) {
+            exclusion_reasons.push("already played in this terminal session".to_string());
+        }
         if track.is_local {
             exclusion_reasons.push("local track".to_string());
         }
@@ -220,8 +269,31 @@ pub fn rank(catalog: &Catalog, context: &Context) -> Report {
         }
     }
 
+    let discovery_inputs = context.discovery.map(|level| {
+        let level = level.min(100);
+        let history_sparse = history_is_sparse(&context.feedback);
+        let familiar_artists = familiar_artists(catalog, &context.feedback);
+        DiscoveryInputs {
+            level,
+            target_unplayed: discovery_target(limit, level),
+            history_sparse,
+            saved: &catalog.saved,
+            feedback: &context.feedback,
+            familiar_artists,
+        }
+    });
+
+    if let Some(discovery) = discovery_inputs.as_ref() {
+        apply_discovery_scores(&mut scored, discovery);
+    }
+
     let mut rng = StdRng::seed_from_u64(context.rng_seed);
-    let selected_indices = select_indices(&mut scored, limit, fallback, &mut rng);
+    let selected_indices = match discovery_inputs.as_ref() {
+        Some(discovery) => {
+            select_indices_discovery(&mut scored, limit, fallback, &mut rng, discovery)
+        }
+        None => select_indices(&mut scored, limit, fallback, &mut rng),
+    };
     let selected_set: HashSet<usize> = selected_indices.iter().copied().collect();
 
     let mut selections = Vec::with_capacity(selected_indices.len());
@@ -261,13 +333,56 @@ pub fn rank(catalog: &Catalog, context: &Context) -> Report {
     candidates.sort_by(|left, right| left.track_uri.cmp(&right.track_uri));
 
     let confidence = station_confidence(&selections, fallback);
-    let reasons = report_reasons(
+    let mut reasons = report_reasons(
         scored.len(),
         strong_count,
         selections.len(),
         fallback,
         &seed_uri,
     );
+    let discovery_report = discovery_inputs.as_ref().map(|discovery| {
+        let selected_unplayed = selections
+            .iter()
+            .filter(|selection| track_is_unplayed(&selection.track, discovery.feedback))
+            .count();
+        let unfamiliar_artists = selections
+            .iter()
+            .filter(|selection| track_has_unfamiliar_artist(&selection.track, discovery))
+            .count();
+        let shortfall = discovery.target_unplayed.saturating_sub(selected_unplayed);
+        let mut discovery_reasons = Vec::new();
+        if discovery.history_sparse {
+            discovery_reasons.push(
+                "sparse playback history; saved tracks are used as a familiarity proxy".to_string(),
+            );
+        }
+        if shortfall > 0 {
+            discovery_reasons.push(format!(
+                "discovery target shortfall: requested {} locally unplayed tracks, selected {}",
+                discovery.target_unplayed, selected_unplayed
+            ));
+        }
+        if unfamiliar_artists > 0 {
+            discovery_reasons.push(format!(
+                "{} selected tracks come from artists outside saved or positive history",
+                unfamiliar_artists
+            ));
+        }
+        reasons.push(format!(
+            "discovery level {} targeted {} locally unplayed tracks",
+            discovery.level, discovery.target_unplayed
+        ));
+        reasons.extend(discovery_reasons.iter().cloned());
+        DiscoveryReport {
+            level: discovery.level,
+            target_unplayed: discovery.target_unplayed,
+            selected_unplayed,
+            unfamiliar_artists,
+            shortfall,
+            history_sparse: discovery.history_sparse,
+            reasons: discovery_reasons,
+        }
+    });
 
     Report {
         seed_uri,
@@ -280,6 +395,7 @@ pub fn rank(catalog: &Catalog, context: &Context) -> Report {
         reasons,
         confidence,
         fallback,
+        discovery: discovery_report,
     }
 }
 
@@ -391,6 +507,7 @@ fn score_track(track: &Track, inputs: &ScoreInputs<'_>) -> ScoredCandidate {
         saved_boost,
         diversity_penalty: 0.0,
         fallback_penalty: 0.0,
+        discovery: 0.0,
     };
     let score = playlist_contribution
         + cross_artist_contribution
@@ -796,6 +913,274 @@ fn feedback_value(feedback: &Feedback, duration_ms: u32) -> f64 {
     (0.55 * completion + 0.45 * listened - 0.8 * skip_rate).clamp(-1.0, 1.0)
 }
 
+/// Return artist keys that are familiar from saved tracks or positive playback history.
+///
+/// The helper intentionally uses the same [`artist_keys`] identity rule as scoring: IDs are
+/// preferred, with names as the fallback when IDs are absent.  Callers that rank a partial
+/// shortlist can compute this over a full catalog and copy the result into
+/// [`Catalog::familiar_artists`] first.
+pub fn familiar_artists(
+    catalog: &Catalog,
+    feedback: &HashMap<String, Feedback>,
+) -> HashSet<String> {
+    let mut familiar = catalog.familiar_artists.clone();
+    for track in &catalog.tracks {
+        let saved = catalog.saved.contains(&track.uri);
+        let positive_history = feedback_entry(track, feedback)
+            .map(|entry| feedback_value(entry, track.duration) > 0.0)
+            .unwrap_or(false);
+        if saved || positive_history {
+            familiar.extend(artist_keys(track));
+        }
+    }
+    familiar
+}
+
+const SPARSE_HISTORY_PLAYS: usize = 3;
+
+fn history_is_sparse(feedback: &HashMap<String, Feedback>) -> bool {
+    feedback.values().filter(|entry| entry.plays > 0).count() < SPARSE_HISTORY_PLAYS
+}
+
+fn discovery_target(limit: usize, level: u8) -> usize {
+    limit.saturating_mul(level.min(100) as usize) / 100
+}
+
+fn track_is_played(track: &Track, feedback: &HashMap<String, Feedback>) -> bool {
+    feedback_entry(track, feedback)
+        .map(|entry| entry.plays > 0)
+        .unwrap_or(false)
+}
+
+fn track_is_unplayed(track: &Track, feedback: &HashMap<String, Feedback>) -> bool {
+    !track_is_played(track, feedback)
+}
+
+fn track_is_familiar(track: &Track, discovery: &DiscoveryInputs<'_>) -> bool {
+    track_is_played(track, discovery.feedback)
+        || (discovery.history_sparse && discovery.saved.contains(&track.uri))
+}
+
+fn track_has_familiar_artist(track: &Track, discovery: &DiscoveryInputs<'_>) -> bool {
+    artist_keys(track)
+        .iter()
+        .any(|artist| discovery.familiar_artists.contains(artist))
+}
+
+fn track_has_unfamiliar_artist(track: &Track, discovery: &DiscoveryInputs<'_>) -> bool {
+    let artists = artist_keys(track);
+    !artists.is_empty() && !track_has_familiar_artist(track, discovery)
+}
+
+fn candidate_has_negative_feedback(candidate: &ScoredCandidate) -> bool {
+    candidate.components.feedback < -0.05
+}
+
+fn apply_discovery_scores(candidates: &mut [ScoredCandidate], discovery: &DiscoveryInputs<'_>) {
+    let level = discovery.level.min(100) as f64 / 100.0;
+    for candidate in candidates {
+        let unplayed = track_is_unplayed(&candidate.track, discovery.feedback);
+        let familiar = track_is_familiar(&candidate.track, discovery);
+        let unfamiliar_artist = track_has_unfamiliar_artist(&candidate.track, discovery);
+        let mut adjustment = 0.0;
+
+        // Quota selection below supplies the main dial.  These small score terms make ordering
+        // inside each quota deterministic and visible in diagnostics without overwhelming a
+        // strong playlist, artist, album, or genre relationship.
+        if level < 0.5 && familiar && !candidate_has_negative_feedback(candidate) {
+            adjustment += 0.035 * (1.0 - level);
+        }
+        if level > 0.5 && unplayed {
+            adjustment += 0.035 * level;
+        }
+        if level > 0.5 && unfamiliar_artist {
+            adjustment += 0.045 * level;
+        }
+
+        if adjustment != 0.0 {
+            candidate.score += adjustment;
+            candidate.components.discovery += adjustment;
+            if unplayed {
+                candidate
+                    .reasons
+                    .push("discovery preference: locally unplayed".to_string());
+            } else if familiar {
+                candidate
+                    .reasons
+                    .push("discovery preference: familiar history".to_string());
+            }
+            if unfamiliar_artist && level > 0.5 {
+                candidate
+                    .reasons
+                    .push("discovery preference: unfamiliar artist".to_string());
+            }
+        }
+    }
+}
+
+fn discovery_preferred_indices(
+    candidates: &[ScoredCandidate],
+    available: &[usize],
+    selected_unplayed: usize,
+    discovery: &DiscoveryInputs<'_>,
+) -> Vec<usize> {
+    let needs_unplayed = selected_unplayed < discovery.target_unplayed;
+    if needs_unplayed {
+        let unplayed = available
+            .iter()
+            .copied()
+            .filter(|index| {
+                track_is_unplayed(&candidates[*index].track, discovery.feedback)
+                    && !candidate_has_negative_feedback(&candidates[*index])
+            })
+            .collect::<Vec<_>>();
+        if !unplayed.is_empty() {
+            return unplayed;
+        }
+    }
+
+    // A skipped candidate remains eligible when the cache offers no alternative, but it should
+    // not displace a neutral or positive candidate merely because it was previously played.
+    let familiar = available
+        .iter()
+        .copied()
+        .filter(|index| {
+            track_is_familiar(&candidates[*index].track, discovery)
+                && !candidate_has_negative_feedback(&candidates[*index])
+        })
+        .collect::<Vec<_>>();
+    if !familiar.is_empty() {
+        return familiar;
+    }
+
+    let neutral = available
+        .iter()
+        .copied()
+        .filter(|index| !candidate_has_negative_feedback(&candidates[*index]))
+        .collect::<Vec<_>>();
+    if !neutral.is_empty() {
+        return neutral;
+    }
+
+    available.to_vec()
+}
+
+/// Discovery-aware variant of [`select_indices`].  The legacy selector remains separate so the
+/// `None` discovery path retains v1's exact score and RNG behavior.
+fn select_indices_discovery(
+    candidates: &mut [ScoredCandidate],
+    limit: usize,
+    fallback: bool,
+    rng: &mut StdRng,
+    discovery: &DiscoveryInputs<'_>,
+) -> Vec<usize> {
+    if limit == 0 || candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut available = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| fallback || candidate.strong)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let target = limit.min(available.len());
+    if target == 0 {
+        return Vec::new();
+    }
+    let strong_target = candidates
+        .iter()
+        .filter(|candidate| candidate.strong)
+        .count()
+        .min(target);
+
+    available.sort_by(|left, right| {
+        candidates[*right]
+            .strong
+            .cmp(&candidates[*left].strong)
+            .then_with(|| candidates[*right].score.total_cmp(&candidates[*left].score))
+            .then_with(|| {
+                candidates[*left]
+                    .track
+                    .uri
+                    .cmp(&candidates[*right].track.uri)
+            })
+    });
+
+    let mut selected = Vec::with_capacity(target);
+    let mut selected_unplayed = 0;
+    let mut artist_counts: HashMap<String, usize> = HashMap::new();
+    let mut album_counts: HashMap<String, usize> = HashMap::new();
+
+    while selected.len() < target && !available.is_empty() {
+        let strong_phase = selected.len() < strong_target;
+        let phase = available
+            .iter()
+            .copied()
+            .filter(|index| !strong_phase || candidates[*index].strong)
+            .collect::<Vec<_>>();
+        if phase.is_empty() {
+            break;
+        }
+        let preferred =
+            discovery_preferred_indices(candidates, &phase, selected_unplayed, discovery);
+
+        let min_score = preferred
+            .iter()
+            .map(|index| {
+                candidates[*index].score
+                    + diversity_penalty(&candidates[*index], &artist_counts, &album_counts)
+            })
+            .fold(f64::INFINITY, f64::min);
+        let mut weights = Vec::with_capacity(preferred.len());
+        let mut total = 0.0;
+        for index in &preferred {
+            let penalty = diversity_penalty(&candidates[*index], &artist_counts, &album_counts);
+            let effective = candidates[*index].score + penalty;
+            let weight = ((effective - min_score).max(0.0) + 0.02).powi(2);
+            total += weight;
+            weights.push(weight);
+        }
+
+        let chosen_preferred_position = if total <= f64::EPSILON {
+            0
+        } else {
+            let mut draw = rng.random_range(0.0..total);
+            let mut position = 0;
+            for weight in &weights {
+                if draw <= *weight {
+                    break;
+                }
+                draw -= *weight;
+                position += 1;
+            }
+            position.min(preferred.len() - 1)
+        };
+        let chosen = preferred[chosen_preferred_position];
+        let available_position = available
+            .iter()
+            .position(|index| *index == chosen)
+            .expect("discovery candidate must remain available");
+        available.swap_remove(available_position);
+
+        let penalty = diversity_penalty(&candidates[chosen], &artist_counts, &album_counts);
+        candidates[chosen].components.diversity_penalty = penalty;
+        candidates[chosen].score += penalty;
+        if penalty < 0.0 {
+            candidates[chosen]
+                .reasons
+                .push("artist/album diversity penalty".to_string());
+        }
+        if track_is_unplayed(&candidates[chosen].track, discovery.feedback) {
+            selected_unplayed += 1;
+        }
+        selected.push(chosen);
+        add_identity_counts(&candidates[chosen], &mut artist_counts, &mut album_counts);
+    }
+
+    selected
+}
+
 fn select_indices(
     candidates: &mut [ScoredCandidate],
     limit: usize,
@@ -1040,10 +1425,12 @@ mod tests {
         Context {
             seed,
             queued: HashSet::new(),
+            session_played: HashSet::new(),
             recent: Vec::new(),
             feedback: HashMap::new(),
             rng_seed: 7,
             limit: 20,
+            discovery: None,
         }
     }
 
@@ -1053,6 +1440,7 @@ mod tests {
             playlists: vec![vec![seed.uri.clone()]],
             saved: HashSet::new(),
             artist_genres: HashMap::new(),
+            familiar_artists: HashSet::new(),
         }
     }
 
@@ -1113,6 +1501,7 @@ mod tests {
             playlists: vec![vec![seed_copy.uri, "spotify:track:bridge".into()]],
             saved: HashSet::new(),
             artist_genres: HashMap::new(),
+            familiar_artists: HashSet::new(),
         };
 
         let report = rank(&data, &context(seed));
@@ -1354,6 +1743,7 @@ mod tests {
                 playlists: Vec::new(),
                 saved: HashSet::new(),
                 artist_genres: HashMap::new(),
+                familiar_artists: HashSet::new(),
             },
             &context(seed),
         );
@@ -1398,6 +1788,311 @@ mod tests {
         assert_eq!(report.selected[0].track.album_id, rich.album_id);
     }
 
+    fn positive_feedback() -> Feedback {
+        Feedback {
+            completed: 1,
+            skips: 0,
+            plays: 1,
+            listened_ms: 180_000,
+            last_played: 1,
+        }
+    }
+
+    fn discovery_context(seed: Track, level: u8, limit: usize) -> Context {
+        let mut context = context(seed);
+        context.discovery = Some(level);
+        context.limit = limit;
+        context
+    }
+
+    #[test]
+    fn discovery_unplayed_share_tracks_the_dial() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let mut played = Vec::new();
+        let mut unplayed = Vec::new();
+        for index in 0..8 {
+            played.push(track(
+                &format!("spotify:track:played-{index}"),
+                "artist-a",
+                &format!("album-played-{index}"),
+            ));
+            unplayed.push(track(
+                &format!("spotify:track:unplayed-{index}"),
+                "artist-a",
+                &format!("album-unplayed-{index}"),
+            ));
+        }
+        let mut data = catalog(
+            &seed,
+            std::iter::once(seed.clone())
+                .chain(played.iter().cloned())
+                .chain(unplayed.iter().cloned())
+                .collect(),
+        );
+        data.playlists = vec![
+            std::iter::once(seed.uri.clone())
+                .chain(played.iter().map(|track| track.uri.clone()))
+                .chain(unplayed.iter().map(|track| track.uri.clone()))
+                .collect(),
+        ];
+        let mut feedback = HashMap::new();
+        for candidate in &played {
+            feedback.insert(candidate.uri.clone(), positive_feedback());
+        }
+
+        let mut shares = Vec::new();
+        for level in [0, 50, 100] {
+            let mut context = discovery_context(seed.clone(), level, 6);
+            context.feedback = feedback.clone();
+            let report = rank(&data, &context);
+            let discovery = report.discovery.unwrap();
+            assert_eq!(discovery.shortfall, 0);
+            shares.push(discovery.selected_unplayed);
+        }
+        assert!(shares[0] < shares[1]);
+        assert!(shares[1] < shares[2]);
+        assert_eq!(shares, vec![0, 3, 6]);
+    }
+
+    #[test]
+    fn discovery_cold_start_reports_saved_familiarity_proxy() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let saved = track("spotify:track:saved", "artist-b", "album-saved");
+        let other = track("spotify:track:other", "artist-c", "album-other");
+        let mut data = catalog(&seed, vec![seed.clone(), saved.clone(), other]);
+        data.saved.insert(saved.uri.clone());
+        data.playlists
+            .push(vec![seed.uri.clone(), saved.uri.clone()]);
+        let report = rank(&data, &discovery_context(seed, 0, 1));
+        let discovery = report.discovery.unwrap();
+        assert!(discovery.history_sparse);
+        assert_eq!(report.selected[0].track.uri, saved.uri);
+        assert!(
+            discovery
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("saved tracks"))
+        );
+    }
+
+    #[test]
+    fn discovery_keeps_strong_pool_before_unrelated_fallback() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let related = track("spotify:track:related", "artist-a", "album-related");
+        let unrelated = track("spotify:track:unrelated", "artist-z", "album-unrelated");
+        let mut data = catalog(&seed, vec![seed.clone(), related.clone(), unrelated]);
+        data.playlists
+            .push(vec![seed.uri.clone(), related.uri.clone()]);
+        let mut context = discovery_context(seed, 100, 1);
+        context
+            .feedback
+            .insert(related.uri.clone(), positive_feedback());
+        let report = rank(&data, &context);
+        assert_eq!(report.selected[0].track.uri, related.uri);
+        assert_eq!(report.discovery.unwrap().selected_unplayed, 0);
+    }
+
+    #[test]
+    fn discovery_reports_unplayed_shortfall_when_strong_pool_is_sparse() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let related = track("spotify:track:related", "artist-a", "album-related");
+        let first = track("spotify:track:first", "artist-z", "album-first");
+        let second = track("spotify:track:second", "artist-y", "album-second");
+        let mut data = catalog(&seed, vec![seed.clone(), related.clone(), first, second]);
+        data.playlists
+            .push(vec![seed.uri.clone(), related.uri.clone()]);
+        let mut context = discovery_context(seed, 100, 3);
+        context
+            .feedback
+            .insert(related.uri.clone(), positive_feedback());
+        let report = rank(&data, &context);
+        let discovery = report.discovery.unwrap();
+        assert!(report.fallback);
+        assert_eq!(discovery.target_unplayed, 3);
+        assert_eq!(discovery.selected_unplayed, 2);
+        assert_eq!(discovery.shortfall, 1);
+        assert_eq!(report.selected[0].track.uri, related.uri);
+    }
+
+    #[test]
+    fn discovery_does_not_rescue_a_skipped_track() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let skipped = track("spotify:track:skipped", "artist-b", "album-skipped");
+        let fresh = track("spotify:track:fresh", "artist-c", "album-fresh");
+        let mut data = catalog(&seed, vec![seed.clone(), skipped.clone(), fresh.clone()]);
+        data.playlists.extend([
+            vec![seed.uri.clone(), skipped.uri.clone()],
+            vec![seed.uri.clone(), fresh.uri.clone()],
+        ]);
+        let mut context = discovery_context(seed, 0, 1);
+        context.feedback.insert(
+            skipped.uri.clone(),
+            Feedback {
+                completed: 0,
+                skips: 3,
+                plays: 3,
+                listened_ms: 2_000,
+                last_played: 1,
+            },
+        );
+        let report = rank(&data, &context);
+        assert_eq!(report.selected[0].track.uri, fresh.uri);
+        let skipped_diagnostic = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.track_uri == skipped.uri)
+            .unwrap();
+        assert!(skipped_diagnostic.components.feedback < 0.0);
+    }
+
+    #[test]
+    fn discovery_skips_negative_artist_candidates_when_neutral_tracks_exist() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let mut known_history = track("spotify:track:known-history", "artist-b", "album-known");
+        known_history.is_local = true;
+        let candidate = track(
+            "spotify:track:known-unplayed",
+            "artist-b",
+            "album-candidate",
+        );
+        let fresh = track("spotify:track:fresh", "artist-c", "album-fresh");
+        let mut data = catalog(
+            &seed,
+            vec![
+                seed.clone(),
+                known_history.clone(),
+                candidate.clone(),
+                fresh.clone(),
+            ],
+        );
+        data.playlists.extend([
+            vec![seed.uri.clone(), candidate.uri.clone()],
+            vec![seed.uri.clone(), fresh.uri.clone()],
+        ]);
+        let mut context = discovery_context(seed, 100, 1);
+        context.feedback.insert(
+            known_history.uri.clone(),
+            Feedback {
+                completed: 0,
+                skips: 3,
+                plays: 3,
+                listened_ms: 1_000,
+                last_played: 1,
+            },
+        );
+        let report = rank(&data, &context);
+        assert_eq!(report.selected[0].track.uri, fresh.uri);
+    }
+
+    #[test]
+    fn discovery_none_preserves_legacy_selected_scores() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let candidate = track("spotify:track:candidate", "artist-b", "album-candidate");
+        let mut data = catalog(&seed, vec![seed.clone(), candidate.clone()]);
+        data.playlists
+            .push(vec![seed.uri.clone(), candidate.uri.clone()]);
+        let context = context(seed);
+        let direct = rank(&data, &context);
+        let mut serialized = serde_json::to_value(&context).unwrap();
+        serialized.as_object_mut().unwrap().remove("discovery");
+        let loaded: Context = serde_json::from_value(serialized).unwrap();
+        let replayed = rank(&data, &loaded);
+        assert!(direct.discovery.is_none());
+        assert!(replayed.discovery.is_none());
+        assert_eq!(
+            direct
+                .selected
+                .iter()
+                .map(|selection| (selection.track.uri.clone(), selection.score))
+                .collect::<Vec<_>>(),
+            replayed
+                .selected
+                .iter()
+                .map(|selection| (selection.track.uri.clone(), selection.score))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn session_played_tracks_are_hard_excluded_at_high_discovery() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let played = track("spotify:track:played", "artist-a", "album-played");
+        let fresh = track("spotify:track:fresh", "artist-b", "album-fresh");
+        let mut data = catalog(&seed, vec![seed.clone(), played.clone(), fresh.clone()]);
+        data.playlists
+            .push(vec![seed.uri.clone(), played.uri.clone()]);
+        data.playlists
+            .push(vec![seed.uri.clone(), fresh.uri.clone()]);
+        let mut context = discovery_context(seed, 100, 1);
+        context.session_played.insert(played.uri.clone());
+        let report = rank(&data, &context);
+        assert_eq!(report.selected[0].track.uri, fresh.uri);
+        let diagnostic = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.track_uri == played.uri)
+            .unwrap();
+        assert!(diagnostic.excluded);
+        assert!(
+            diagnostic
+                .reasons
+                .iter()
+                .any(|reason| reason == "already played in this terminal session")
+        );
+    }
+
+    #[test]
+    fn discovery_is_deterministic_across_input_order() {
+        let seed = track("spotify:track:seed", "artist-a", "album-seed");
+        let first = track("spotify:track:first", "artist-a", "album-first");
+        let second = track("spotify:track:second", "artist-a", "album-second");
+        let third = track("spotify:track:third", "artist-b", "album-third");
+        let mut left = catalog(
+            &seed,
+            vec![seed.clone(), first.clone(), second.clone(), third.clone()],
+        );
+        left.playlists = vec![vec![
+            seed.uri.clone(),
+            first.uri.clone(),
+            second.uri.clone(),
+        ]];
+        let mut right = catalog(
+            &seed,
+            vec![third.clone(), second, first.clone(), seed.clone()],
+        );
+        right.playlists = vec![vec![
+            seed.uri.clone(),
+            "spotify:track:second".into(),
+            "spotify:track:first".into(),
+        ]];
+        let mut left_context = discovery_context(seed.clone(), 50, 2);
+        left_context
+            .feedback
+            .insert(first.uri.clone(), positive_feedback());
+        let right_context = left_context.clone();
+        let left_report = rank(&left, &left_context);
+        let right_report = rank(&right, &right_context);
+        let left_selected = left_report
+            .selected
+            .iter()
+            .map(|selection| selection.track.uri.clone())
+            .collect::<Vec<_>>();
+        let right_selected = right_report
+            .selected
+            .iter()
+            .map(|selection| selection.track.uri.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(left_selected, right_selected);
+        assert_eq!(
+            left_report
+                .discovery
+                .map(|discovery| discovery.selected_unplayed),
+            right_report
+                .discovery
+                .map(|discovery| discovery.selected_unplayed)
+        );
+    }
+
     #[test]
     #[ignore = "manual benchmark; run with --ignored when tuning the cache index"]
     fn ranks_ten_thousand_cached_tracks_quickly() {
@@ -1421,6 +2116,7 @@ mod tests {
                 playlists: vec![playlist],
                 saved: HashSet::new(),
                 artist_genres: HashMap::new(),
+                familiar_artists: HashSet::new(),
             },
             &benchmark_context,
         );
