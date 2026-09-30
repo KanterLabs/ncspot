@@ -23,8 +23,8 @@ use crate::ui::osd;
 use crate::ui::search_results::SearchResultsView;
 use cursive::Cursive;
 use cursive::event::{Event, Key};
-use cursive::traits::View;
-use cursive::views::Dialog;
+use cursive::traits::{Resizable, Scrollable, View};
+use cursive::views::{Dialog, TextView};
 use log::{debug, error, info};
 use ncspot::CONFIGURATION_FILE_NAME;
 use std::cell::RefCell;
@@ -291,9 +291,16 @@ impl CommandManager {
             Command::Logout => {
                 self.spotify.shutdown();
 
-                let mut credentials_path = crate::config::cache_path("librespot");
-                credentials_path.push("credentials.json");
-                std::fs::remove_file(credentials_path).unwrap();
+                for path in [
+                    crate::authentication::playback_cache_path().join("credentials.json"),
+                    crate::authentication::api_token_path(),
+                ] {
+                    if let Err(error) = std::fs::remove_file(path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log::warn!("Unable to remove current app's cached authorization: {error}");
+                    }
+                }
 
                 s.quit();
                 Ok(None)
@@ -316,6 +323,36 @@ impl CommandManager {
             Command::Cast(false) => {
                 let hosts = self.config.values().roku_hosts.clone().unwrap_or_default();
                 crate::ui::cast::open(s, self.spotify.clone(), self.queue.clone(), hosts);
+                Ok(None)
+            }
+            Command::Radio => {
+                let Some(track) = self
+                    .queue
+                    .get_current()
+                    .and_then(|playable| playable.track())
+                else {
+                    crate::ui::osd::notify("Radio needs a playing Spotify song");
+                    return Ok(None);
+                };
+                if track.id.is_none() || track.is_local {
+                    crate::ui::osd::notify("Radio isn't available for this song");
+                    return Ok(None);
+                }
+                crate::ui::radio::start(
+                    self.queue.clone(),
+                    self.library.clone(),
+                    self.events.clone(),
+                    track,
+                );
+                Ok(None)
+            }
+            Command::RadioDebug => {
+                let report = crate::recommendations::diagnostics();
+                let dialog = Dialog::around(TextView::new(report).scrollable())
+                    .title("Radio diagnostics")
+                    .dismiss_button("Close")
+                    .fixed_width(100);
+                s.add_layer(dialog);
                 Ok(None)
             }
             Command::AddCurrent => {
@@ -456,6 +493,7 @@ impl CommandManager {
         kb.insert(">".into(), vec![Command::Next]);
         kb.insert("c".into(), vec![Command::Clear]);
         kb.insert("Shift+c".into(), vec![Command::Cast(false)]);
+        kb.insert("Shift+r".into(), vec![Command::Radio]);
         kb.insert(
             "Space".into(),
             vec![

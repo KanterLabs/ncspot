@@ -17,10 +17,11 @@ jobs:
       matrix:
         include:
           - build_target: linux-x86_64
-            os: ubuntu-latest
+            os: homelab-heavy
             target: x86_64-unknown-linux-gnu
             features: ''
             dependencies: 'libpulse-dev libdbus-1-dev libncursesw5-dev libxcb-shape0-dev libxcb-xfixes0-dev'
+          # The homelab runner pool is x86_64; retain a native hosted ARM runner for this target.
           - build_target: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -53,7 +54,7 @@ jobs:
       - name: Add cross-compilation target
         run: rustup target add ${{ matrix.target }}
       - name: Install macOS dependencies
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         run: brew install portaudio pkg-config
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -79,17 +80,17 @@ jobs:
           cd target/${{ matrix.target }}/release
           case ${{ matrix.target }} in
           *-pc-windows-*)
-            7z -y a ncspot-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.zip ncspot.exe
-            sha256sum ncspot-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.zip > ncspot-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.sha256
+            7z -y a resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.zip resonance.exe ncspot.exe
+            sha256sum resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.zip > resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.sha256
             ;;
           *)
-            tar czvf ncspot-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.tar.gz ncspot
-            shasum -a 256 ncspot-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.tar.gz > ncspot-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.sha256
+            tar czvf resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.tar.gz resonance ncspot
+            shasum -a 256 resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.tar.gz > resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.sha256
             ;;
           esac;
       - name: Releasing assets
         uses: softprops/action-gh-release@v3
         with:
-          files: target/${{ matrix.target }}/release/ncspot-*
+          files: target/${{ matrix.target }}/release/resonance-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

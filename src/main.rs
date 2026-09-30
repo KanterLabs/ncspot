@@ -24,6 +24,7 @@ mod library;
 mod model;
 mod panic;
 mod queue;
+mod recommendations;
 mod search_cache;
 mod serialization;
 mod sharing;
@@ -64,6 +65,12 @@ fn main() -> Result<(), String> {
 
     match matches.subcommand() {
         Some(("info", _subcommand_matches)) => cli::info(),
+        Some(("radio-debug", args)) => cli::radio_debug(
+            args.get_one::<String>("seed").cloned(),
+            *args.get_one::<u64>("rng-seed").unwrap(),
+            *args.get_one::<usize>("limit").unwrap(),
+            args.get_one::<PathBuf>("replay").cloned(),
+        ),
         Some((_, _)) => unreachable!(),
         None => {
             // Create the application.

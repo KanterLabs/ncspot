@@ -1551,7 +1551,12 @@ impl NowPlayingView {
             crate::ui::osd::notify("Radio isn't available for this song");
             return;
         }
-        crate::ui::radio::start(self.queue.clone(), self.events.clone(), track);
+        crate::ui::radio::start(
+            self.queue.clone(),
+            self.library.clone(),
+            self.events.clone(),
+            track,
+        );
     }
 
     /// Run the control that was clicked. These mirror the default command handlers,

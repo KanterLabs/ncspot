@@ -1,7 +1,7 @@
 //! Casting: playing on another Spotify Connect device, such as the Spotify app on a
-//! Roku, while ncspot stays the remote.
+//! Roku, while Resonance stays the remote.
 //!
-//! ncspot's player takes its orders as [`WorkerCommand`]s. While a cast is running,
+//! Resonance's player takes its orders as [`WorkerCommand`]s. While a cast is running,
 //! those orders go to a [`Session`] instead of the local player, and the session
 //! carries them out on the device through the Web API. It watches what the device
 //! is doing and reports it back as the same [`PlayerEvent`]s the local player
@@ -75,8 +75,9 @@ pub fn targets(api: &WebApi, roku_hosts: &[String]) -> Vec<Target> {
 
     let mut targets: Vec<Target> = devices
         .into_iter()
-        // ncspot's own session is not somewhere to cast to.
-        .filter(|device| device.name != "ncspot" && !device.is_restricted)
+        // Resonance's own session is not somewhere to cast to. Keep the old device name
+        // filtered as well so a session started by an earlier install is not offered.
+        .filter(|device| !is_local_device(&device.name) && !device.is_restricted)
         .filter_map(|device| {
             Some(Target::Connect {
                 id: device.id?,
@@ -176,7 +177,7 @@ pub fn connect(
 /// named after any of the Roku's names; a TV that came online since the app was
 /// opened; anything that came online since; or the only TV there is.
 fn pick<'a>(devices: &'a [Device], roku: &roku::Roku, before: &[String]) -> Option<&'a Device> {
-    let usable = |device: &&Device| device.id.is_some() && device.name != "ncspot";
+    let usable = |device: &&Device| device.id.is_some() && !is_local_device(&device.name);
     let is_new = |device: &&Device| device.id.as_ref().is_some_and(|id| !before.contains(id));
     let is_tv = |device: &&Device| matches!(device._type, DeviceType::Tv | DeviceType::Stb);
 
@@ -209,6 +210,10 @@ fn same_name(a: &str, b: &str) -> bool {
     };
     let (a, b) = (normal(a), normal(b));
     !a.is_empty() && !b.is_empty() && (a == b || a.contains(&b) || b.contains(&a))
+}
+
+fn is_local_device(name: &str) -> bool {
+    name == ncspot::BIN_NAME || name == "ncspot"
 }
 
 fn kind(kind: &DeviceType) -> &'static str {

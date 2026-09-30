@@ -65,6 +65,18 @@ pub fn normalize(query: &str) -> String {
 }
 
 impl SearchCache {
+    /// A stable snapshot for local recommendations. Reading it never refreshes
+    /// a query or contacts Spotify, even when entries are old.
+    pub fn snapshot(&self) -> Vec<Track> {
+        let entries = self.entries.read().unwrap();
+        let mut ordered: Vec<_> = entries.values().collect();
+        ordered.sort_by(|a, b| a.query.cmp(&b.query));
+        ordered
+            .into_iter()
+            .flat_map(|entry| entry.tracks.clone())
+            .collect()
+    }
+
     /// Results for exactly this query, if they were fetched recently enough to be
     /// served without asking again.
     pub fn fresh(&self, query: &str) -> Option<Vec<Track>> {

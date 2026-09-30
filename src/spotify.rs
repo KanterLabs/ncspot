@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::application::ASYNC_RUNTIME;
-use crate::authentication::SPOTIFY_CLIENT_ID;
+use crate::authentication;
 use crate::cast;
 use crate::config;
 use crate::events::{Event, EventManager};
@@ -185,7 +185,7 @@ impl Spotify {
     /// Generate the librespot [SessionConfig] used when creating a [Session].
     pub fn session_config(cfg: &config::Config) -> SessionConfig {
         let mut session_config = librespot_core::SessionConfig {
-            client_id: SPOTIFY_CLIENT_ID.to_string(),
+            client_id: authentication::client_id(),
             ..Default::default()
         };
         match env::var("http_proxy") {
@@ -207,7 +207,7 @@ impl Spotify {
         cfg: &config::Config,
         credentials: Credentials,
     ) -> Result<Session, librespot_core::Error> {
-        let librespot_cache_path = config::cache_path("librespot");
+        let librespot_cache_path = authentication::playback_cache_path();
         let audio_cache_path = match cfg.values().audio_cache {
             Some(false) => None,
             _ => Some(librespot_cache_path.join("files")),
@@ -247,7 +247,7 @@ impl Spotify {
         info!("Initializing audio backend {backend_name}");
         if backend_name == "pulseaudio" {
             // TODO: Audit that the environment access only happens in single-threaded code.
-            unsafe { env::set_var("PULSE_PROP_application.name", "ncspot") };
+            unsafe { env::set_var("PULSE_PROP_application.name", ncspot::BIN_NAME) };
             // TODO: Audit that the environment access only happens in single-threaded code.
             unsafe { env::set_var("PULSE_PROP_stream.description", "ncurses Spotify client") };
             // TODO: Audit that the environment access only happens in single-threaded code.

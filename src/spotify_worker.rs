@@ -97,7 +97,7 @@ impl Worker {
             self.events.send(Event::Player(PlayerEvent::Stopped));
             osd::notify(format!(
                 "Stopped: Spotify wouldn't stream the last {MAX_FAILURES} tracks. \
-                 Run ncspot -d <file> to see why"
+                 Run resonance -d <file> to see why"
             ));
         } else {
             warn!("track failed to play, skipping it");

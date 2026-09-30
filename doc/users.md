@@ -192,6 +192,37 @@ songs load into the queue immediately after it. The existing queue stays behind
 the radio tracks. Radio is available for Spotify songs; local files and podcast
 episodes cannot seed a station.
 
+Radio ranks from the local track cache and listening history first. Artist, genre,
+and catalog metadata is enriched in the background when it is available; genre
+metadata is opportunistic. This enrichment does not use Spotify's recommendations
+endpoint, and selecting a track does not trigger an on-demand recommendation
+request. Manual early skips are learned as preference feedback separately from
+playback or stream errors, which are recorded as errors rather than dislikes.
+Mood and audio-feature signals are not part of the current ranking.
+
+Use <kbd>:</kbd><kbd>radio-debug</kbd> to open the scrollable local diagnostics
+report. For a deterministic offline report that never logs in or makes a network
+request, run:
+
+```text
+resonance radio-debug --seed URI_OR_ID --rng-seed 42 --limit 20
+```
+
+To write a detailed replay log containing seeds, scores, rejection reasons,
+timings, and cache statuses, use the same controls with `--debug`:
+
+```text
+resonance --debug /tmp/resonance-radio.log radio-debug --seed URI_OR_ID --rng-seed 42 --limit 20
+```
+
+Interactive radio saves the latest `radio-debug.json` report and `radio-replay.json` input snapshot are
+kept in the cache directory shown by `resonance info`. Reproduce the selected order
+from that immutable snapshot with:
+
+```text
+resonance radio-debug --replay /path/to/radio-replay.json
+```
+
 When the terminal is wide enough for both (about 100 columns), the queue sits in
 an **Up Next** panel beside the card. It lists the tracks in the order they
 will play, shuffle included: the eight tracks before the playing one, the

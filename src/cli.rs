@@ -1,4 +1,5 @@
 use crate::config::{user_cache_directory, user_configuration_directory};
+use std::path::PathBuf;
 
 /// Print platform info like which platform directories will be used.
 pub fn info() -> Result<(), String> {
@@ -31,5 +32,23 @@ pub fn info() -> Result<(), String> {
         );
     }
 
+    Ok(())
+}
+
+/// Print a deterministic local radio recommendation report without logging in or making a
+/// network request. A replay snapshot takes precedence over the seed controls.
+pub fn radio_debug(
+    seed: Option<String>,
+    rng_seed: u64,
+    limit: usize,
+    replay: Option<PathBuf>,
+) -> Result<(), String> {
+    let report = if let Some(path) = replay {
+        crate::recommendations::replay_report(&path)?
+    } else {
+        crate::recommendations::offline_report(seed, rng_seed, limit)?
+    };
+    log::debug!("radio-debug: {report}");
+    println!("{report}");
     Ok(())
 }

@@ -1,8 +1,9 @@
 use clap::builder::PathBufValueParser;
 use librespot_playback::audio_backend;
 
-pub const AUTHOR: &str = "Henrik Friedrichsen <henrik@affekt.org> and contributors";
-pub const BIN_NAME: &str = "ncspot";
+pub const AUTHOR: &str = "KanterLabs Resonance contributors; based on ncspot by Henrik Friedrichsen <henrik@affekt.org> and contributors";
+pub const BIN_NAME: &str = "resonance";
+pub const DISPLAY_NAME: &str = "Resonance";
 pub const CONFIGURATION_FILE_NAME: &str = "config.toml";
 pub const USER_STATE_FILE_NAME: &str = "userstate.cbor";
 
@@ -15,7 +16,40 @@ pub fn program_arguments() -> clap::Command {
         format!("Audio backends: {}", backends.join(", "))
     };
 
-    clap::Command::new("ncspot")
+    let radio_debug = clap::Command::new("radio-debug")
+        .about("Print a deterministic local radio recommendation report")
+        .arg(
+            clap::Arg::new("seed")
+                .long("seed")
+                .value_name("URI_OR_ID")
+                .help("seed the report with a Spotify track URI or ID"),
+        )
+        .arg(
+            clap::Arg::new("rng-seed")
+                .long("rng-seed")
+                .value_name("N")
+                .value_parser(clap::value_parser!(u64))
+                .default_value("42")
+                .help("deterministic random seed (default: 42)"),
+        )
+        .arg(
+            clap::Arg::new("limit")
+                .long("limit")
+                .value_name("N")
+                .value_parser(clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100))
+                .default_value("20")
+                .help("maximum number of candidates to report (1-100; default: 20)"),
+        )
+        .arg(
+            clap::Arg::new("replay")
+                .long("replay")
+                .value_name("FILE")
+                .value_parser(PathBufValueParser::new())
+                .conflicts_with_all(["seed", "rng-seed", "limit"])
+                .help("replay an immutable radio-debug snapshot"),
+        );
+
+    clap::Command::new(BIN_NAME)
         .version(env!("VERSION"))
         .author(AUTHOR)
         .about("cross-platform ncurses Spotify client")
@@ -44,5 +78,63 @@ pub fn program_arguments() -> clap::Command {
                 .help("Filename of config file in basepath")
                 .default_value(CONFIGURATION_FILE_NAME),
         )
-        .subcommands([clap::Command::new("info").about("Print platform information like paths")])
+        .subcommands([
+            clap::Command::new("info").about("Print platform information like paths"),
+            radio_debug,
+        ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BIN_NAME, program_arguments};
+
+    #[test]
+    fn parses_radio_debug_defaults_and_controls() {
+        let matches = program_arguments()
+            .try_get_matches_from([
+                BIN_NAME,
+                "radio-debug",
+                "--seed",
+                "spotify:track:abc",
+                "--rng-seed",
+                "42",
+                "--limit",
+                "20",
+            ])
+            .unwrap();
+        let (_, subcommand) = matches.subcommand().unwrap();
+        assert_eq!(
+            subcommand.get_one::<String>("seed").unwrap(),
+            "spotify:track:abc"
+        );
+        assert_eq!(*subcommand.get_one::<u64>("rng-seed").unwrap(), 42);
+        assert_eq!(*subcommand.get_one::<usize>("limit").unwrap(), 20);
+        assert!(subcommand.get_one::<std::path::PathBuf>("replay").is_none());
+    }
+
+    #[test]
+    fn radio_debug_limit_is_bounded_and_replay_is_exclusive() {
+        assert!(
+            program_arguments()
+                .try_get_matches_from([BIN_NAME, "radio-debug", "--limit", "0"])
+                .is_err()
+        );
+        assert!(
+            program_arguments()
+                .try_get_matches_from([BIN_NAME, "radio-debug", "--limit", "101"])
+                .is_err()
+        );
+        assert!(
+            program_arguments()
+                .try_get_matches_from([
+                    BIN_NAME,
+                    "radio-debug",
+                    "--replay",
+                    "radio-replay.json",
+                    "--seed",
+                    "spotify:track:abc",
+                ])
+                .is_err()
+        );
+    }
 }

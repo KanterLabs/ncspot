@@ -27,7 +27,7 @@ const RESULTS: usize = 4;
 const DEBOUNCE: Duration = Duration::from_millis(250);
 /// Results asked of Spotify. More than are shown, so the cache is worth reusing
 /// for the next keystroke and costs no extra round trip.
-const FETCH: u32 = 20;
+const FETCH: u32 = 10;
 /// How many library hits can take the top of the list before catalogue results.
 const LOCAL_SLOTS: usize = 2;
 const WIDTH: usize = 62;
@@ -243,7 +243,12 @@ impl QuickSearch {
     /// the station arrives behind it when Spotify answers.
     fn start_radio(&self, track: Track) {
         Playable::Track(track.clone()).play(&self.queue);
-        radio::start(self.queue.clone(), self.events.clone(), track);
+        radio::start(
+            self.queue.clone(),
+            self.library.clone(),
+            self.events.clone(),
+            track,
+        );
     }
 
     fn draw_frame(&self, printer: &Printer<'_, '_>) {

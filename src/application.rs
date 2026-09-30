@@ -44,7 +44,7 @@ pub fn setup_logging(filename: &Path) -> Result<(), fern::InitError> {
         // Add blanket level filter -
         .level(log::LevelFilter::Debug)
         // Set runtime log level for modules
-        .level_for("ncspot", log::LevelFilter::Trace)
+        .level_for(ncspot::BIN_NAME, log::LevelFilter::Trace)
         // Output to stdout, files, and other Dispatch configurations
         .chain(fern::log_file(filename)?)
         // Apply globally
@@ -112,6 +112,10 @@ impl Application {
         mark_startup_phase("runtime ready");
 
         let configuration = Arc::new(Config::new(configuration_file_path));
+        authentication::configure(
+            configuration.values().spotify_client_id.as_deref(),
+            configuration.values().spotify_redirect_uri.as_deref(),
+        )?;
         let theme = configuration.build_theme();
         mark_startup_phase("configuration read");
 
@@ -129,6 +133,7 @@ impl Application {
 
         println!("Connecting to Spotify..");
 
+        #[allow(unused_mut)]
         let mut spotify = loop {
             match spotify::Spotify::new(
                 event_manager.clone(),
@@ -215,7 +220,7 @@ impl Application {
             Some(
                 ipc::IpcSocket::new(
                     ASYNC_RUNTIME.get().unwrap().handle(),
-                    runtime_directory.join("ncspot.sock"),
+                    runtime_directory.join(format!("{}.sock", ncspot::BIN_NAME)),
                     event_manager.clone(),
                 )
                 .map_err(|e| e.to_string())?,
@@ -306,9 +311,20 @@ impl Application {
             Signals::new([SIGTERM, SIGHUP]).expect("could not register signal handler");
 
         let mut first_frame = true;
+        let mut prewarmed = None;
 
         // cursive event loop
         while self.cursive.is_running() {
+            self.queue.observe_listening();
+            let current = self.queue.get_current().map(|item| item.uri());
+            if current != prewarmed {
+                prewarmed = current;
+                crate::recommendations::prewarm(
+                    self.queue.clone(),
+                    self.queue.get_library(),
+                    self.event_manager.clone(),
+                );
+            }
             self.cursive.step();
 
             if first_frame {
@@ -334,6 +350,7 @@ impl Application {
                     Event::Player(state) => {
                         trace!("event received: {state:?}");
                         self.spotify.update_status(state.clone());
+                        self.queue.observe_listening();
 
                         #[cfg(unix)]
                         if let Some(ref ipc) = self.ipc {
@@ -371,6 +388,8 @@ impl Application {
                 }
             }
         }
+        self.queue.finish_listening();
+        crate::recommendations::history::shared().flush();
         Ok(())
     }
 }

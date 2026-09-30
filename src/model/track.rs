@@ -272,20 +272,17 @@ impl ListItem for Track {
         queue: Arc<Queue>,
         library: Arc<Library>,
     ) -> Option<Box<dyn ViewExt>> {
-        let spotify = queue.get_spotify();
+        if self.id.is_none() || self.is_local || self.is_playable == Some(false) {
+            return None;
+        }
 
-        let recommendations: Option<Vec<Self>> = if let Some(id) = &self.id {
-            spotify
-                .api
-                .recommendations(None, None, Some(vec![id]))
-                .ok()
-                .map(|r| r.tracks)
-                .map(|tracks| spotify.api.hydrate_tracks(&tracks))
-        } else {
-            None
-        };
+        let tracks =
+            crate::recommendations::preview(queue.as_ref(), library.as_ref(), self.clone());
+        if tracks.is_empty() {
+            return None;
+        }
 
-        recommendations.map(|tracks| {
+        Some(
             ListView::new(
                 Arc::new(RwLock::new(tracks)),
                 queue.clone(),
@@ -296,8 +293,8 @@ impl ListItem for Track {
                 self.artists.join(", "),
                 self.title
             ))
-            .into_boxed_view_ext()
-        })
+            .into_boxed_view_ext(),
+        )
     }
 
     fn share_url(&self) -> Option<String> {

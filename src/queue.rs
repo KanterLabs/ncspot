@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use log::{debug, info};
 #[cfg(feature = "notify")]
@@ -46,6 +46,7 @@ pub struct Queue {
     spotify: Spotify,
     cfg: Arc<Config>,
     library: Arc<Library>,
+    listening: Mutex<crate::recommendations::tracker::Tracker>,
 }
 
 impl Queue {
@@ -65,6 +66,9 @@ impl Queue {
             spotify,
             cfg,
             library,
+            listening: Mutex::new(crate::recommendations::tracker::Tracker::new(
+                crate::recommendations::history::shared(),
+            )),
         }
     }
 
@@ -78,6 +82,9 @@ impl Queue {
             random_order: RwLock::new(queue_state.random_order),
             cfg,
             library,
+            listening: Mutex::new(crate::recommendations::tracker::Tracker::new(
+                crate::recommendations::history::shared(),
+            )),
         }
     }
 
@@ -166,6 +173,21 @@ impl Queue {
         *self.current_track.read().unwrap()
     }
 
+    pub fn get_library(&self) -> Arc<Library> {
+        self.library.clone()
+    }
+
+    pub fn observe_listening(&self) {
+        let track = self.get_current().and_then(|item| item.track());
+        let playing = matches!(self.spotify.get_current_status(), PlayerEvent::Playing(_));
+        self.listening.lock().unwrap().observe(track, playing);
+    }
+
+    pub fn finish_listening(&self) {
+        self.observe_listening();
+        self.listening.lock().unwrap().finish(false, false);
+    }
+
     /// Insert `track` as the item that should logically follow the currently
     /// playing item, taking into account shuffle status.
     pub fn insert_after_current(&self, track: Playable) {
@@ -203,10 +225,44 @@ impl Queue {
     /// Append `tracks` after the currently playing item, taking into account
     /// shuffle status. Returns the first index(in `self.queue`) of added items.
     pub fn append_next(&self, tracks: &[Playable]) -> usize {
+        self.append_next_checked(None, tracks).unwrap().0
+    }
+
+    /// Compare the seed and insert under the same locks. A delayed radio worker
+    /// must never splice its songs behind a track the user switched to.
+    pub fn append_next_if_current(&self, seed: &str, tracks: &[Playable]) -> Option<usize> {
+        self.append_next_checked(Some(seed), tracks)
+            .map(|(_, count)| count)
+    }
+
+    fn append_next_checked(
+        &self,
+        seed: Option<&str>,
+        tracks: &[Playable],
+    ) -> Option<(usize, usize)> {
         let mut random_order = self.random_order.write().unwrap();
         let mut q = self.queue.write().unwrap();
 
         let current = *self.current_track.read().unwrap();
+        if let Some(seed) = seed
+            && !current
+                .and_then(|index| q.get(index))
+                .is_some_and(|track| track.uri() == seed)
+        {
+            return None;
+        }
+        let filtered;
+        let tracks = if seed.is_some() {
+            let mut known: std::collections::HashSet<_> = q.iter().map(Playable::uri).collect();
+            filtered = tracks
+                .iter()
+                .filter(|track| known.insert(track.uri()))
+                .cloned()
+                .collect::<Vec<_>>();
+            filtered.as_slice()
+        } else {
+            tracks
+        };
         let first = match current {
             Some(index) => index + 1,
             None => q.len(),
@@ -237,7 +293,7 @@ impl Queue {
             }
         }
 
-        first
+        Some((first, tracks.len()))
     }
 
     /// Remove the item at `index`. This doesn't take into account shuffle
@@ -346,9 +402,10 @@ impl Queue {
         // reaches into the player and the MPRIS thread and can come back here.
         let track = self.queue.read().unwrap().get(index).cloned();
         if let Some(track) = track.as_ref() {
+            self.finish_listening();
             self.spotify.load(track, true, 0);
-            let mut current = self.current_track.write().unwrap();
-            current.replace(index);
+            self.current_track.write().unwrap().replace(index);
+            self.listening.lock().unwrap().observe(track.track(), false);
             self.spotify.update_track();
 
             #[cfg(feature = "notify")]
@@ -401,6 +458,7 @@ impl Queue {
 
     /// Stop playback.
     pub fn stop(&self) {
+        self.finish_listening();
         let mut current = self.current_track.write().unwrap();
         *current = None;
         self.spotify.stop();
@@ -413,6 +471,9 @@ impl Queue {
     /// used, and the next track will actually be played. This should be used
     /// when going to the next entry in the queue is the wanted behavior.
     pub fn next(&self, manual: bool) {
+        self.observe_listening();
+        let finished = self.spotify.get_current_status() == PlayerEvent::FinishedTrack;
+        self.listening.lock().unwrap().finish(manual, finished);
         let current = *self.current_track.read().unwrap();
         let repeat = self.cfg.state().repeat;
         // Read what this needs out of the queue and drop the guard before going on:
@@ -557,7 +618,9 @@ impl Queue {
 #[cfg(feature = "notify")]
 pub fn send_notification(summary_txt: &str, body_txt: &str, cover_url: Option<String>) {
     let mut n = Notification::new();
-    n.appname("ncspot").summary(summary_txt).body(body_txt);
+    n.appname(ncspot::BIN_NAME)
+        .summary(summary_txt)
+        .body(body_txt);
 
     // album cover image
     if let Some(u) = cover_url {

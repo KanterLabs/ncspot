@@ -128,7 +128,7 @@ impl SearchResultsView {
         if let Ok(SearchResult::Tracks(results)) =
             spotify
                 .api
-                .search(SearchType::Track, query, 50, offset as u32)
+                .search(SearchType::Track, query, 10, offset as u32)
         {
             let mut t = results.items.iter().map(|ft| ft.into()).collect();
             let mut r = tracks.write().unwrap();
@@ -169,7 +169,7 @@ impl SearchResultsView {
         if let Ok(SearchResult::Albums(results)) =
             spotify
                 .api
-                .search(SearchType::Album, query, 50, offset as u32)
+                .search(SearchType::Album, query, 10, offset as u32)
         {
             let mut a = results.items.iter().map(|sa| sa.into()).collect();
             let mut r = albums.write().unwrap();
@@ -210,7 +210,7 @@ impl SearchResultsView {
         if let Ok(SearchResult::Artists(results)) =
             spotify
                 .api
-                .search(SearchType::Artist, query, 50, offset as u32)
+                .search(SearchType::Artist, query, 10, offset as u32)
         {
             let mut a = results.items.iter().map(|fa| fa.into()).collect();
             let mut r = artists.write().unwrap();
@@ -251,7 +251,7 @@ impl SearchResultsView {
         if let Ok(SearchResult::Playlists(results)) =
             spotify
                 .api
-                .search(SearchType::Playlist, query, 50, offset as u32)
+                .search(SearchType::Playlist, query, 10, offset as u32)
         {
             let mut pls = results.items.iter().map(|sp| sp.into()).collect();
             let mut r = playlists.write().unwrap();
@@ -292,7 +292,7 @@ impl SearchResultsView {
         if let Ok(SearchResult::Shows(results)) =
             spotify
                 .api
-                .search(SearchType::Show, query, 50, offset as u32)
+                .search(SearchType::Show, query, 10, offset as u32)
         {
             let mut pls = results.items.iter().map(|sp| sp.into()).collect();
             let mut r = shows.write().unwrap();
@@ -333,7 +333,7 @@ impl SearchResultsView {
         if let Ok(SearchResult::Episodes(results)) =
             spotify
                 .api
-                .search(SearchType::Episode, query, 50, offset as u32)
+                .search(SearchType::Episode, query, 10, offset as u32)
         {
             let mut e = results.items.iter().map(|se| se.into()).collect();
             let mut r = episodes.write().unwrap();

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Resonance
+Comment=KanterLabs terminal Spotify client built on ncspot
+TryExec=resonance
+Exec=resonance
+Icon=resonance
+Terminal=true
+Categories=AudioVideo;Audio;Player;ConsoleOnly
+Keywords=spotify;music;player;resonance

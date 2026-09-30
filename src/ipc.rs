@@ -12,6 +12,7 @@ use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use crate::events::{Event, EventManager};
 use crate::model::playable::Playable;
 use crate::spotify::PlayerEvent;
+use ncspot::BIN_NAME;
 
 pub struct IpcSocket {
     tx: Sender<Status>,
@@ -34,7 +35,7 @@ impl IpcSocket {
     pub fn new(handle: &Handle, path: PathBuf, ev: EventManager) -> io::Result<Self> {
         let path = if path.exists() && Self::is_open_socket(&path) {
             let mut new_path = path;
-            new_path.set_file_name(format!("ncspot.{}.sock", std::process::id()));
+            new_path.set_file_name(format!("{BIN_NAME}.{}.sock", std::process::id()));
             new_path
         } else if path.exists() && !Self::is_open_socket(&path) {
             std::fs::remove_file(&path)?;
@@ -126,7 +127,7 @@ impl IpcSocket {
         }
     }
 
-    /// Try to remove the IPC socket if there is one for this instance of `ncspot`. Don't do
+    /// Try to remove the IPC socket if there is one for this instance of Resonance. Don't do
     /// anything if the socket has already been removed for some reason.
     fn try_remove_socket(&mut self) {
         if std::fs::remove_file(&self.path).is_ok() {

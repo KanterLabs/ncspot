@@ -1,6 +1,6 @@
 name: Fedora
 
-# Builds an ncspot binary against Fedora's own glibc and system libraries, which
+# Builds a Resonance binary against Fedora's own glibc and system libraries, which
 # the generic linux-x86_64 release asset cannot be relied on to match. Runs on the
 # KanterLabs homelab fleet: `homelab-heavy`, because this is a sustained Rust build.
 #
@@ -10,7 +10,7 @@ name: Fedora
 # Every push to main leaves a downloadable binary on the run, so the laptop
 # never has to compile; tags additionally attach it to the release.
 #
-# Speed: dependencies come from the cache, so a build compiles only ncspot itself.
+# Speed: dependencies come from the cache, so a build compiles only Resonance itself.
 # Under the `release` profile's fat LTO and single codegen unit that one crate took
 # about two and a half minutes, cached or not, so branch builds use the
 # `optimized` profile (no LTO, parallel codegen) and only tags pay for `release`.
@@ -92,7 +92,7 @@ jobs:
           echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
 
       # Keyed on the toolchain, the lockfile and the profile, and saved with
-      # ncspot's own artifacts pruned, so what is restored is only dependencies.
+      # Resonance's own artifacts pruned, so what is restored is only dependencies.
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: fedora${{ inputs.fedora_version || '43' }}
@@ -108,7 +108,7 @@ jobs:
           fi
           fedora="${{ inputs.fedora_version || '43' }}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "asset=ncspot-${version}-fedora${fedora}-x86_64" >> "$GITHUB_OUTPUT"
+          echo "asset=resonance-${version}-fedora${fedora}-x86_64" >> "$GITHUB_OUTPUT"
 
       - name: Running cargo build
         run: cargo build --profile "$PROFILE" --locked
@@ -117,8 +117,8 @@ jobs:
         working-directory: target/${{ env.PROFILE }}
         run: |
           asset="${{ steps.name.outputs.asset }}"
-          strip ncspot
-          tar czvf "${asset}.tar.gz" ncspot
+          strip resonance ncspot
+          tar czvf "${asset}.tar.gz" resonance ncspot
           sha256sum "${asset}.tar.gz" > "${asset}.sha256"
 
       - uses: actions/upload-artifact@v7

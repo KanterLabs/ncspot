@@ -29,6 +29,7 @@ use crate::{
     queue::Queue,
     spotify::{PlayerEvent, Spotify, VOLUME_PERCENT},
 };
+use ncspot::{BIN_NAME, DISPLAY_NAME};
 
 struct MprisRoot {}
 
@@ -51,7 +52,7 @@ impl MprisRoot {
 
     #[zbus(property)]
     fn identity(&self) -> &str {
-        "ncspot"
+        DISPLAY_NAME
     }
 
     #[zbus(property)]
@@ -569,7 +570,7 @@ impl MprisManager {
 /// <https://specifications.freedesktop.org/mpris-spec/2.2/#Bus-Name-Policy>
 pub fn instance_bus_name() -> String {
     format!(
-        "org.mpris.MediaPlayer2.ncspot.instance{}",
+        "org.mpris.MediaPlayer2.{BIN_NAME}.instance{}",
         std::process::id()
     )
 }

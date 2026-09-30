@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,10 +9,10 @@ use rspotify::model::{
     AdditionalType, AlbumId, AlbumType, ArtistId, CurrentPlaybackContext, CursorBasedPage, Device,
     EpisodeId, FullAlbum, FullArtist, FullEpisode, FullPlaylist, FullShow, FullTrack,
     ItemPositions, LibraryId, Market, Page, PlayableId, PlaylistId, PlaylistResult, PrivateUser,
-    Recommendations, SavedAlbum, SavedTrack, SearchResult, SearchType, Show, ShowId,
-    SimplifiedTrack, TrackId, UserId,
+    SavedAlbum, SavedTrack, SearchResult, SearchType, Show, ShowId, SimplifiedTrack, TrackId,
+    UserId,
 };
-use rspotify::{AuthCodeSpotify, ClientError, ClientResult, Config, prelude::*};
+use rspotify::{AuthCodePkceSpotify, ClientError, ClientResult, Config, prelude::*};
 use tokio::sync::mpsc;
 
 use crate::model::album::Album;
@@ -36,7 +35,7 @@ const RATE_LIMIT_GRACE: Duration = Duration::from_secs(1);
 #[derive(Clone)]
 pub struct WebApi {
     /// Rspotify web API.
-    api: AuthCodeSpotify,
+    api: AuthCodePkceSpotify,
     /// The username of the logged in user.
     user: Option<String>,
     /// Sender of the mpsc channel to the [Spotify](crate::spotify::Spotify) worker thread.
@@ -57,8 +56,8 @@ impl Default for WebApi {
             token_refreshing: false,
             ..Default::default()
         };
-        let api = AuthCodeSpotify::with_config(
-            rspotify::Credentials::new(crate::authentication::NCSPOT_CLIENT_ID, ""),
+        let api = AuthCodePkceSpotify::with_config(
+            rspotify::Credentials::new_pkce(&crate::authentication::client_id()),
             rspotify::OAuth::default(),
             config,
         );
@@ -169,7 +168,7 @@ impl WebApi {
     /// Execute `api_call` and retry once if a rate limit occurs.
     fn api_with_retry<F, R>(&self, api_call: F) -> Option<R>
     where
-        F: Fn(&AuthCodeSpotify) -> ClientResult<R>,
+        F: Fn(&AuthCodePkceSpotify) -> ClientResult<R>,
     {
         // Inside a rate limit every request is refused, and sending them anyway only
         // keeps the limit going; callers that can come back later ask for the wait.
@@ -393,80 +392,6 @@ impl WebApi {
         let eid = EpisodeId::from_id(episode_id).map_err(|_| ())?;
         self.api_with_retry(|api| api.get_an_episode(eid.clone(), Some(Market::FromToken)))
             .ok_or(())
-    }
-
-    /// Get recommendations based on the seeds provided with `seed_artists`, `seed_genres` and
-    /// `seed_tracks`.
-    pub fn recommendations(
-        &self,
-        seed_artists: Option<Vec<&str>>,
-        seed_genres: Option<Vec<&str>>,
-        seed_tracks: Option<Vec<&str>>,
-    ) -> Result<Recommendations, ()> {
-        self.api_with_retry(|api| {
-            let seed_artistids = seed_artists.as_ref().map(|artistids| {
-                artistids
-                    .iter()
-                    .map(|id| ArtistId::from_id(*id).unwrap())
-                    .collect::<Vec<ArtistId>>()
-            });
-            let seed_trackids = seed_tracks.as_ref().map(|trackids| {
-                trackids
-                    .iter()
-                    .map(|id| TrackId::from_id(*id).unwrap())
-                    .collect::<Vec<TrackId>>()
-            });
-            api.recommendations(
-                std::iter::empty(),
-                seed_artistids,
-                seed_genres.clone(),
-                seed_trackids,
-                Some(Market::FromToken),
-                Some(100),
-            )
-        })
-        .ok_or(())
-    }
-
-    /// Fill in the album a [`SimplifiedTrack`] does not carry, by looking the
-    /// tracks up in full.
-    ///
-    /// Recommendations come back simplified, which means no album and so no
-    /// cover art. Looking them up is what keeps the art coming for every track
-    /// of a station rather than only the seed. Tracks that cannot be looked up
-    /// keep their simplified form, so a failed batch costs artwork, not tracks.
-    pub fn hydrate_tracks(&self, tracks: &[SimplifiedTrack]) -> Vec<Track> {
-        /// Ids the "several tracks" endpoint accepts in one request.
-        const BATCH: usize = 50;
-
-        let mut full: HashMap<String, Track> = HashMap::new();
-        for chunk in tracks.chunks(BATCH) {
-            let ids: Vec<TrackId> = chunk.iter().filter_map(|track| track.id.clone()).collect();
-            if ids.is_empty() {
-                continue;
-            }
-            let found = self.api_with_retry(|api| {
-                #[allow(deprecated)]
-                api.tracks(ids.clone(), Some(Market::FromToken))
-            });
-            for track in found.unwrap_or_default() {
-                let track = Track::from(&track);
-                if let Some(id) = track.id.clone() {
-                    full.insert(id, track);
-                }
-            }
-        }
-
-        tracks
-            .iter()
-            .map(|track| {
-                track
-                    .id
-                    .as_ref()
-                    .and_then(|id| full.remove(id.id()))
-                    .unwrap_or_else(|| Track::from(track))
-            })
-            .collect()
     }
 
     /// Search for items of `searchtype` using the provided `query`. Limit the results to `limit`

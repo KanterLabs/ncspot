@@ -12,92 +12,109 @@ use crate::ui::osd;
 /// Station tracks whose art is fetched up front when a radio starts. The rest
 /// of the station is long enough that its art can wait until it is asked for.
 const STATION_PREFETCH: usize = 8;
-/// How many rate limits a radio waits out before giving up.
-const RADIO_RETRIES: usize = 3;
-
-/// Fetch and queue recommendations for `track` without touching playback.
-///
-/// The caller owns the immediate playback decision. This worker only appends
-/// recommendations once its seed is still the item playing, so a slow response
-/// cannot add a station behind a later track.
-pub(super) fn start(queue: Arc<Queue>, events: EventManager, track: Track) {
+/// Build a local station immediately from prepared metadata. Catalog enrichment
+/// happens separately and cannot hold up a cached station.
+pub(crate) fn start(
+    queue: Arc<Queue>,
+    library: Arc<crate::library::Library>,
+    events: EventManager,
+    track: Track,
+) {
     if track.id.is_none() || track.is_local {
         return;
     }
-
-    osd::notify("Starting radio…");
-
-    let seed = track.uri;
-    let id = track.id.expect("radio start checked that the id exists");
-    let spotify = queue.get_spotify();
+    let run = generation().fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    osd::notify("Starting local radio…");
     thread::spawn(move || {
-        // A rate limit is waited out rather than ending the station before it
-        // starts; the seed is already playing, so there is time.
-        let mut found = spotify.api.recommendations(None, None, Some(vec![&id]));
-        for _ in 0..RADIO_RETRIES {
-            let Some(wait) = spotify.api.rate_limit_wait().filter(|_| found.is_err()) else {
-                break;
-            };
-            osd::notify(format!(
-                "Radio: Spotify is busy, retrying in {}s",
-                wait.as_secs()
-            ));
-            thread::sleep(wait);
-            found = spotify.api.recommendations(None, None, Some(vec![&id]));
-        }
-        let Ok(found) = found else {
-            debug!("no recommendations for {id}");
-            osd::notify("Couldn't start the radio: Spotify didn't send any tracks");
-            return;
-        };
-
-        // Recommendations arrive without an album, and so without cover art;
-        // looking them up in full is what gives the whole station artwork
-        // rather than just the seed.
-        let tracks = spotify.api.hydrate_tracks(&found.tracks);
-        let Some(queued) = apply_station(&queue, &seed, &tracks) else {
-            return;
-        };
-
-        // Only the front of the station is worth warming; the rest will have
-        // been fetched long before it is reached.
-        prefetch_covers(&tracks[..tracks.len().min(STATION_PREFETCH)]);
-        if queued == 0 {
-            osd::notify("Radio: Spotify didn't send any similar tracks");
+        let rng_seed = rand::random::<u64>();
+        let count = fill(&queue, &library, &track, run, rng_seed);
+        if count == Some(0) {
+            osd::notify("Preparing radio metadata in the background…");
+            let catalog = crate::recommendations::catalog(&queue, &library);
+            let related = crate::recommendations::related_artists(&catalog, &track);
+            let retry_queue = queue.clone();
+            let retry_library = library.clone();
+            let retry_events = events.clone();
+            crate::recommendations::enrichment::shared().refresh_with_callback(
+                queue.get_spotify(),
+                track.clone(),
+                related,
+                events.clone(),
+                move || {
+                    if fill(&retry_queue, &retry_library, &track, run, rng_seed) == Some(0) {
+                        osd::notify(
+                            "No radio candidates available yet; see :radio-debug for details",
+                        );
+                    }
+                    retry_events.try_trigger();
+                },
+            );
         } else {
-            osd::notify(format!("Radio: {queued} similar songs queued"));
+            crate::recommendations::prewarm(queue, library, events.clone());
         }
-        events.trigger();
+        events.try_trigger();
     });
 }
 
-/// Return whether the seed is still the item playing.
+fn fill(
+    queue: &Queue,
+    library: &crate::library::Library,
+    track: &Track,
+    run: u64,
+    rng_seed: u64,
+) -> Option<usize> {
+    if generation_value() != run {
+        return None;
+    }
+    let (mut diagnostic, replay) =
+        crate::recommendations::recommend(queue, library, track.clone(), rng_seed, 20);
+    let tracks: Vec<_> = diagnostic
+        .report
+        .selected
+        .iter()
+        .map(|selection| selection.track.clone())
+        .collect();
+    if generation_value() != run {
+        return None;
+    }
+    let applied = apply_station(queue, &track.uri, &tracks);
+    diagnostic.applied = applied.is_some_and(|count| count > 0);
+    if let Some(count) = applied {
+        if count > 0 {
+            osd::notify(format!("Local radio: {count} songs queued"));
+            prefetch_covers(&tracks[..tracks.len().min(STATION_PREFETCH)]);
+        }
+    } else {
+        debug!("radio: discarded because playback changed");
+    }
+    crate::recommendations::remember(diagnostic, replay);
+    applied
+}
+
+fn generation() -> &'static std::sync::atomic::AtomicU64 {
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &GENERATION
+}
+
+fn generation_value() -> u64 {
+    generation().load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
 fn seed_is_current(queue: &Queue, seed: &str) -> bool {
     queue
         .get_current()
         .is_some_and(|current| current.uri() == seed)
 }
 
-/// Filter and append a fetched station when playback has not moved on.
-///
-/// `None` means the worker lost its race with playback. `Some(count)` means the
-/// seed still matches; `count` is the number of recommendations inserted.
 fn apply_station(queue: &Queue, seed: &str, tracks: &[Track]) -> Option<usize> {
-    if !seed_is_current(queue, seed) {
-        return None;
-    }
-
-    let station: Vec<Playable> = tracks
+    let station: Vec<_> = tracks
         .iter()
         .filter(|track| track.uri != seed)
         .cloned()
         .map(Playable::Track)
         .collect();
-    let count = station.len();
-    if !station.is_empty() {
-        queue.append_next(&station);
-    }
-    Some(count)
+    queue.append_next_if_current(seed, &station)
 }
 
 /// Warm the cover cache for the first part of a radio station.
@@ -198,5 +215,25 @@ mod tests {
         assert_eq!(queue.get_current().map(|item| item.uri()), Some(seed.uri));
         assert_eq!(spotify.get_current_status(), PlayerEvent::Paused(paused));
         assert_eq!(spotify.get_current_progress(), paused);
+    }
+    #[test]
+    fn station_deduplicates_queue_and_result_atomically() {
+        let seed = track("seed");
+        let (queue, _) = queue(vec![seed.clone(), track("existing")], 0);
+        assert_eq!(
+            apply_station(
+                &queue,
+                &seed.uri,
+                &[track("existing"), track("new"), track("new")]
+            ),
+            Some(1)
+        );
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.queue.read().unwrap()[1].id(), Some("new".into()));
+        assert_eq!(
+            apply_station(&queue, "spotify:track:stale", &[track("later")]),
+            None
+        );
+        assert_eq!(queue.len(), 3);
     }
 }

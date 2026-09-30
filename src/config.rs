@@ -75,6 +75,9 @@ impl NotificationFormat {
 /// The configuration of ncspot.
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct ConfigValues {
+    /// Independent Spotify application identity. No shared upstream fallback.
+    pub spotify_client_id: Option<String>,
+    pub spotify_redirect_uri: Option<String>,
     pub command_key: Option<char>,
     pub initial_screen: Option<String>,
     /// Addresses of Rokus to offer for casting, for networks where they cannot be
@@ -319,9 +322,25 @@ pub fn try_proj_dirs() -> Result<AppDirs, String> {
             data_dir: basepath.join(".local/share"),
             state_dir: basepath.join(".local/state"),
         }),
-        None => AppDirs::new(Some("ncspot"), true)
-            .ok_or_else(|| String::from("Couldn't determine platform standard directories")),
+        None => {
+            let primary = AppDirs::new(Some(ncspot::BIN_NAME), true)
+                .ok_or_else(|| String::from("Couldn't determine platform standard directories"))?;
+            // Keep an installed fork's populated library and playback state in
+            // place. New installs use Resonance directories; existing ncspot
+            // users keep their paths until they explicitly choose a new base.
+            Ok(compatible_dirs(primary, AppDirs::new(Some("ncspot"), true)))
+        }
     }
+}
+
+fn compatible_dirs(primary: AppDirs, legacy: Option<AppDirs>) -> AppDirs {
+    if !primary.config_dir.join(CONFIGURATION_FILE_NAME).exists()
+        && let Some(legacy) = legacy
+        && legacy.config_dir.join(CONFIGURATION_FILE_NAME).is_file()
+    {
+        return legacy;
+    }
+    primary
 }
 
 /// Return the path to the current user's configuration directory, or None if it couldn't be found.
@@ -377,5 +396,55 @@ pub fn set_configuration_base_path(base_path: Option<PathBuf>) {
             fs::create_dir_all(&basepath).expect("could not create basepath directory");
         }
         *BASE_PATH.write().unwrap() = Some(basepath);
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    fn dirs(root: &std::path::Path, name: &str) -> AppDirs {
+        let root = root.join(name);
+        AppDirs {
+            config_dir: root.join("config"),
+            cache_dir: root.join("cache"),
+            data_dir: root.join("data"),
+            state_dir: root.join("state"),
+        }
+    }
+
+    #[test]
+    fn populated_legacy_install_keeps_paths_and_data() {
+        let root = std::env::temp_dir().join(format!("resonance-compat-{}", rand::random::<u64>()));
+        let primary = dirs(&root, "resonance");
+        let legacy = dirs(&root, "ncspot");
+        fs::create_dir_all(&legacy.config_dir).unwrap();
+        fs::create_dir_all(&legacy.cache_dir).unwrap();
+        fs::write(
+            legacy.config_dir.join(CONFIGURATION_FILE_NAME),
+            "shuffle = true",
+        )
+        .unwrap();
+        fs::write(legacy.cache_dir.join("tracks.db"), "populated library").unwrap();
+        let selected = compatible_dirs(primary, Some(legacy));
+        assert_eq!(selected.cache_dir, root.join("ncspot/cache"));
+        assert_eq!(
+            fs::read_to_string(selected.cache_dir.join("tracks.db")).unwrap(),
+            "populated library"
+        );
+        let primary = dirs(&root, "resonance");
+        fs::create_dir_all(&primary.config_dir).unwrap();
+        fs::write(
+            primary.config_dir.join(CONFIGURATION_FILE_NAME),
+            "shuffle = false",
+        )
+        .unwrap();
+        let selected = compatible_dirs(primary, Some(dirs(&root, "ncspot")));
+        assert_eq!(selected.config_dir, root.join("resonance/config"));
+        assert_eq!(
+            fs::read_to_string(root.join("ncspot/cache/tracks.db")).unwrap(),
+            "populated library"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

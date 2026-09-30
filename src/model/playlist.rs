@@ -1,8 +1,5 @@
-use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::{cmp::Ordering, iter::Iterator};
-
-use rand::{rng, seq::IteratorRandom};
 
 use log::{debug, warn};
 use rspotify::model::Id;
@@ -283,44 +280,73 @@ impl ListItem for Playlist {
         queue: Arc<Queue>,
         library: Arc<Library>,
     ) -> Option<Box<dyn ViewExt>> {
-        self.load_tracks(&queue.get_spotify());
-        const MAX_SEEDS: usize = 5;
-        let track_ids: Vec<String> = self
+        let catalog = crate::recommendations::catalog(queue.as_ref(), library.as_ref());
+        let usable = |track: &Track| {
+            track.id.is_some() && !track.is_local && track.is_playable != Some(false)
+        };
+        let cached_tracks: Vec<Track> = self
             .tracks
-            .as_ref()?
+            .as_deref()
+            .unwrap_or_default()
             .iter()
-            .filter_map(|t| t.id())
-            // only select unique tracks
-            .collect::<HashSet<_>>()
-            .into_iter()
-            // spotify allows at max 5 seed items, so choose them at random
-            .sample(&mut rng(), MAX_SEEDS);
-
-        if track_ids.is_empty() {
+            .filter_map(|playable| playable.track())
+            .collect();
+        let seed = cached_tracks
+            .iter()
+            .find(|track| usable(track))
+            .cloned()
+            .or_else(|| {
+                let artist_ids: Vec<&str> = cached_tracks
+                    .iter()
+                    .flat_map(|track| track.artist_ids.iter().map(String::as_str))
+                    .collect();
+                let artists: Vec<&str> = cached_tracks
+                    .iter()
+                    .flat_map(|track| track.artists.iter().map(String::as_str))
+                    .collect();
+                catalog
+                    .tracks
+                    .iter()
+                    .find(|track| {
+                        usable(track)
+                            && (track
+                                .artist_ids
+                                .iter()
+                                .any(|artist_id| artist_ids.contains(&artist_id.as_str()))
+                                || track
+                                    .artists
+                                    .iter()
+                                    .any(|artist| artists.contains(&artist.as_str())))
+                    })
+                    .cloned()
+            })
+            .or_else(|| {
+                library
+                    .playlists
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .find(|playlist| playlist.id == self.id)
+                    .and_then(|playlist| playlist.tracks.as_ref())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|playable| playable.track())
+                    .find(|track| usable(track))
+            })?;
+        let tracks = crate::recommendations::preview(queue.as_ref(), library.as_ref(), seed);
+        if tracks.is_empty() {
             return None;
         }
 
-        let spotify = queue.get_spotify();
-        let recommendations: Option<Vec<Track>> = spotify
-            .api
-            .recommendations(
-                None,
-                None,
-                Some(track_ids.iter().map(|t| t.as_ref()).collect()),
-            )
-            .ok()
-            .map(|r| r.tracks)
-            .map(|tracks| spotify.api.hydrate_tracks(&tracks));
-
-        recommendations.map(|tracks| {
+        Some(
             ListView::new(
                 Arc::new(RwLock::new(tracks)),
                 queue.clone(),
                 library.clone(),
             )
             .with_title(&format!("Similar to Tracks in \"{}\"", self.name))
-            .into_boxed_view_ext()
-        })
+            .into_boxed_view_ext(),
+        )
     }
 
     fn share_url(&self) -> Option<String> {

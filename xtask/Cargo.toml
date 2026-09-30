@@ -16,6 +16,7 @@ clap = "4.6.1"
 [dependencies.ncspot]
 default-features = false
 path = ".."
+package = "resonance"
 
 [lints]
 workspace = true

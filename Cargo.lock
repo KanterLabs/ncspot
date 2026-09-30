@@ -2566,49 +2566,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ncspot"
-version = "1.4.0"
-dependencies = [
- "arboard",
- "chrono",
- "clap",
- "crossbeam-channel",
- "cursive",
- "fern",
- "futures",
- "image",
- "ioctl-rs",
- "libc",
- "librespot-core",
- "librespot-oauth",
- "librespot-playback",
- "librespot-protocol",
- "log",
- "notify-rust",
- "pancurses",
- "parse_duration",
- "platform-dirs",
- "rand 0.10.2",
- "regex",
- "reqwest 0.13.5",
- "rspotify",
- "serde",
- "serde_cbor",
- "serde_json",
- "signal-hook 0.4.4",
- "strum 0.28.0",
- "strum_macros 0.28.0",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "toml",
- "unicode-width 0.2.2",
- "url",
- "viuer",
- "zbus",
-]
-
-[[package]]
 name = "ncurses"
 version = "5.101.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3774,6 +3731,49 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "resonance"
+version = "1.4.0"
+dependencies = [
+ "arboard",
+ "chrono",
+ "clap",
+ "crossbeam-channel",
+ "cursive",
+ "fern",
+ "futures",
+ "image",
+ "ioctl-rs",
+ "libc",
+ "librespot-core",
+ "librespot-oauth",
+ "librespot-playback",
+ "librespot-protocol",
+ "log",
+ "notify-rust",
+ "pancurses",
+ "parse_duration",
+ "platform-dirs",
+ "rand 0.10.2",
+ "regex",
+ "reqwest 0.13.5",
+ "rspotify",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "signal-hook 0.4.4",
+ "strum 0.28.0",
+ "strum_macros 0.28.0",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "unicode-width 0.2.2",
+ "url",
+ "viuer",
+ "zbus",
 ]
 
 [[package]]
@@ -5901,7 +5901,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
- "ncspot",
+ "resonance",
 ]
 
 [[package]]

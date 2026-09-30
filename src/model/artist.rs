@@ -176,25 +176,43 @@ impl ListItem for Artist {
         queue: Arc<Queue>,
         library: Arc<Library>,
     ) -> Option<Box<dyn ViewExt>> {
-        let id = self.id.as_ref()?.to_string();
+        let catalog = crate::recommendations::catalog(queue.as_ref(), library.as_ref());
+        let usable = |track: &Track| {
+            track.id.is_some() && !track.is_local && track.is_playable != Some(false)
+        };
+        let seed = self
+            .tracks
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|track| usable(track))
+            .cloned()
+            .or_else(|| {
+                catalog
+                    .tracks
+                    .iter()
+                    .find(|track| {
+                        usable(track)
+                            && (self.id.as_deref().is_some_and(|id| {
+                                track.artist_ids.iter().any(|artist| artist == id)
+                            }) || track.artists.iter().any(|artist| artist == &self.name))
+                    })
+                    .cloned()
+            })?;
+        let tracks = crate::recommendations::preview(queue.as_ref(), library.as_ref(), seed);
+        if tracks.is_empty() {
+            return None;
+        }
 
-        let spotify = queue.get_spotify();
-        let recommendations: Option<Vec<Track>> = spotify
-            .api
-            .recommendations(Some(vec![&id]), None, None)
-            .ok()
-            .map(|r| r.tracks)
-            .map(|tracks| spotify.api.hydrate_tracks(&tracks));
-
-        recommendations.map(|tracks| {
+        Some(
             ListView::new(
                 Arc::new(RwLock::new(tracks)),
                 queue.clone(),
                 library.clone(),
             )
             .with_title(&format!("Similar to Artist \"{}\"", self.name))
-            .into_boxed_view_ext()
-        })
+            .into_boxed_view_ext(),
+        )
     }
 
     fn share_url(&self) -> Option<String> {

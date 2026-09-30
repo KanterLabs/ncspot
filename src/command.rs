@@ -156,6 +156,10 @@ pub enum Command {
     Sort(SortKey, SortDirection),
     Logout,
     ShowRecommendations(TargetMode),
+    /// Start a local radio station from the currently playing song.
+    Radio,
+    /// Show the local radio recommendation diagnostics report.
+    RadioDebug,
     Redraw,
     Execute(String),
     Reconnect,
@@ -226,6 +230,8 @@ impl fmt::Display for Command {
             | Self::ReloadConfig
             | Self::Noop
             | Self::Logout
+            | Self::Radio
+            | Self::RadioDebug
             | Self::QuickSearch
             | Self::Reconnect
             | Self::Redraw => vec![],
@@ -280,6 +286,8 @@ impl Command {
             Self::Sort(_, _) => "sort",
             Self::Logout => "logout",
             Self::ShowRecommendations(_) => "similar",
+            Self::Radio => "radio",
+            Self::RadioDebug => "radio-debug",
             Self::Redraw => "redraw",
             Self::Execute(_) => "exec",
             Self::Reconnect => "reconnect",
@@ -787,6 +795,8 @@ pub fn parse(input: &str) -> Result<Vec<Command>, CommandParseError> {
                     }?;
                     Command::ShowRecommendations(target_mode)
                 }
+                "radio" => Command::Radio,
+                "radio-debug" => Command::RadioDebug,
                 "redraw" => Command::Redraw,
                 "exec" => Command::Execute(args.join(" ")),
                 "reconnect" => Command::Reconnect,
@@ -809,4 +819,25 @@ pub fn parse(input: &str) -> Result<Vec<Command>, CommandParseError> {
         };
     }
     Ok(commands)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, parse};
+
+    #[test]
+    fn radio_commands_parse_and_display() {
+        assert!(matches!(
+            parse("radio").unwrap().as_slice(),
+            [Command::Radio]
+        ));
+        assert!(matches!(
+            parse("radio-debug").unwrap().as_slice(),
+            [Command::RadioDebug]
+        ));
+        assert_eq!(Command::Radio.to_string(), "radio");
+        assert_eq!(Command::RadioDebug.to_string(), "radio-debug");
+        assert_eq!(Command::Radio.basename(), "radio");
+        assert_eq!(Command::RadioDebug.basename(), "radio-debug");
+    }
 }
