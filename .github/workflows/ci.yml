@@ -10,17 +10,66 @@ env:
   TERM: xterm
 
 jobs:
-  # Build the Rust code.
-  build:
+  # Build and test the x86_64 Linux target in a rootful container. The homelab
+  # runner intentionally disallows sudo on the host.
+  build-linux:
+    name: Checking linux-x86_64
+    runs-on: homelab-heavy
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Install Linux dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            libdbus-1-dev \
+            libncursesw5-dev \
+            libpulse-dev \
+            libssl-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            pkg-config \
+            python3 \
+            zstd
+      - uses: actions/checkout@v7
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: actions/cache@v6
+        name: Cache build data
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install rustup
+        shell: bash
+        run: |
+          if ! command -v rustup &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --target x86_64-unknown-linux-gnu -y
+            echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install clippy + rustfmt
+        run: rustup component add clippy rustfmt
+      - name: Running cargo build
+        run: cargo build --locked
+      - name: Running cargo test
+        run: cargo test --locked
+
+  # Native ARM, macOS, and Windows jobs stay in this matrix because their
+  # runner architecture or operating system is part of what they validate.
+  build-native:
     name: Checking ${{ matrix.build_target }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - build_target: linux-x86_64
-            os: homelab-heavy
-            target: x86_64-unknown-linux-gnu
-            features: ''
           # The homelab runner pool is x86_64; retain a native hosted ARM runner for this target.
           - build_target: linux-arm64
             os: ubuntu-24.04-arm
@@ -76,7 +125,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install rustup
-        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
       - name: Install clippy + rustfmt
         run: rustup component add rustfmt
       - name: cargo fmt
@@ -86,9 +138,32 @@ jobs:
   # features enabled, and return an error if there are any clippy suggestions.
   clippy:
     name: Running `cargo clippy`
+    container:
+      image: ubuntu:24.04
     runs-on: homelab-heavy
     steps:
+      - name: Install Linux dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            libasound2-dev \
+            libdbus-1-dev \
+            libncursesw5-dev \
+            libpulse-dev \
+            libssl-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            pkg-config \
+            portaudio19-dev \
+            python3 \
+            zstd
       - uses: actions/checkout@v7
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/cache@v6
         name: Cache build data
         with:
@@ -100,12 +175,11 @@ jobs:
             target/
           key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
       - name: Install rustup
-        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
       - name: Install clippy + rustfmt
         run: rustup component add clippy
-      - name: Install Linux dependencies
-        run: |
-          sudo apt update
-          sudo apt install portaudio19-dev libasound2-dev libpulse-dev libdbus-1-dev libncursesw5-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - name: cargo clippy
         run: cargo clippy --locked --no-deps --workspace --all-targets --all-features --verbose -- -D warnings
