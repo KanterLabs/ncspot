@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { BoxRenderable, ScrollBoxRenderable, type KeyEvent } from "@opentui/core";
+import { BoxRenderable, RGBA, ScrollBoxRenderable, type KeyEvent } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import { createSurface } from "../src/workspace/surface.js";
 import type { Row, ScreenContext } from "../src/workspace/contracts.js";
+import { paletteForTheme } from "../src/theme.js";
 
 async function fixture() {
   const setup = await createTestRenderer({ width: 80, height: 24, useMouse: true, kittyKeyboard: true });
@@ -14,6 +15,24 @@ async function fixture() {
   return { ...setup, surface, cleanup() { setup.renderer.keyInput.off("keypress", listener); surface.dispose(); setup.renderer.destroy(); } };
 }
 const row = (id: string): Row => ({ id, kind: "track", title: `Song ${id}`, subtitle: "Artist" });
+
+test("text cells inherit panel and selection backgrounds in both themes", async () => {
+  const f = await fixture();
+  try {
+    f.surface.setRows([row("a"), row("b")]);
+    for (const theme of ["light", "dark"] as const) {
+      f.surface.setTheme(theme); await f.renderOnce();
+      const palette = paletteForTheme(theme);
+      const scroll = f.surface.body.getChildren()[0] as ScrollBoxRenderable;
+      const nodes = [f.surface.heading, ...scroll.getChildren()];
+      for (const [index, node] of nodes.entries()) {
+        const offset = ((node.y * f.renderer.currentRenderBuffer.width) + node.x + 3) * 4;
+        const native = f.renderer.currentRenderBuffer.buffers.bg;
+        expect([native[offset]! & 255, native[offset + 1]! & 255, native[offset + 2]! & 255]).toEqual(RGBA.fromHex(index === 1 ? palette.queueCurrent : palette.panel).toInts().slice(0, 3));
+      }
+    }
+  } finally { f.cleanup(); }
+});
 
 test("surface renders compact Unicode rows and preserves identity on refresh", async () => {
   const f = await fixture();

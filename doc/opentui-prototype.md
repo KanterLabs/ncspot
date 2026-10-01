@@ -72,10 +72,12 @@ appearance. Live sessions save the theme in `opentui-theme.json` and reduced mot
 Use the Now Playing Motion control or Settings to change reduced motion.
 
 Now Playing renders **Audio spectrum** from sampled bands supplied by Rust when available,
-including a silence label when appropriate. If sampled audio is unavailable, it labels the graphic
-**Ambient · playback progress**: that animation follows track progress rather than sound.
-Reduced motion disables animation interpolation while keeping live status updates. Covers
-currently display initials; the workspace does not claim to fetch or render album images.
+including a silence label when appropriate. Without audio samples, it shows playback progress.
+Reduced motion disables animation interpolation while keeping live status updates. A centered
+player card displays real album artwork, with a separate Up Next card on wide terminals.
+Artwork loads from the existing Rust cover cache and appears as two RGB pixels per terminal
+cell; cache misses download the cover from Spotify's image CDN without a Web API call.
+Unavailable covers fall back to initials, and compact terminals retain the playback controls.
 
 ```sh
 resonance-opentui --demo --theme dark --route queue --reduced-motion

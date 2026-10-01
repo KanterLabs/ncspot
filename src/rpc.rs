@@ -1,5 +1,6 @@
 //! Versioned, presentation-independent local API. Network calls use WebApi's retry policy.
 use crate::{
+    artwork::{self, ArtworkCache},
     config::Config,
     events::{Event, EventManager},
     library::Library,
@@ -21,6 +22,7 @@ const METHODS: &[&str] = &[
     "session.info",
     "player.status",
     "player.action",
+    "player.artwork",
     "queue.list",
     "queue.action",
     "library.list",
@@ -83,6 +85,13 @@ fn bounds(p: &Value) -> Result<(usize, usize)> {
         return Err(invalid("limit must be positive"));
     }
     Ok((o, l))
+}
+fn dimension(p: &Value, key: &str, default: usize, max: usize) -> Result<usize> {
+    let value = number(p, key, default, max)?;
+    if value == 0 {
+        return Err(invalid(format!("{key} must be an integer from 1 to {max}")));
+    }
+    Ok(value)
 }
 fn id(p: &Value) -> Result<String> {
     let raw = p
@@ -180,6 +189,15 @@ fn episode(e: &Episode) -> Value {
     r["detail"] = json!(e.description);
     r
 }
+fn unavailable_artwork(uri: Option<&str>, width: usize, height: usize, reason: &str) -> Value {
+    json!({
+        "available": false,
+        "uri": uri,
+        "width": width,
+        "height": height,
+        "reason": reason,
+    })
+}
 fn page(mut rows: Vec<Value>, p: &Value, source: &str) -> Result<Value> {
     let (offset, limit) = bounds(p)?;
     let total = rows.len();
@@ -212,6 +230,7 @@ pub struct RpcService {
     events: EventManager,
     instance_id: String,
     pages: Mutex<HashMap<String, CachedPage>>,
+    artwork: ArtworkCache,
     casts: Mutex<Vec<crate::cast::Target>>,
     playlist_mutations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
@@ -229,6 +248,7 @@ impl RpcService {
             events,
             instance_id: format!("{}-{:016x}", std::process::id(), rand::random::<u64>()),
             pages: Mutex::new(HashMap::new()),
+            artwork: ArtworkCache::new(),
             casts: Mutex::new(Vec::new()),
             playlist_mutations: Mutex::new(HashMap::new()),
         }
@@ -735,6 +755,7 @@ impl RpcService {
                 )
             }
             "player.action" => self.player_action(p),
+            "player.artwork" => self.player_artwork(p),
             "library.action" => self.library_action(p),
             "playlist.action" => self.playlist_action(p),
             "radio.status" => Ok(
@@ -1286,6 +1307,78 @@ impl RpcService {
         }
         Ok(json!({"accepted":true}))
     }
+    fn player_artwork(&self, p: &Value) -> Result<Value> {
+        let width = dimension(p, "width", artwork::DEFAULT_WIDTH, artwork::MAX_WIDTH)?;
+        let height = dimension(p, "height", artwork::DEFAULT_HEIGHT, artwork::MAX_HEIGHT)?;
+        let requested_uri = match p.get("uri") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(uri)) if !uri.trim().is_empty() => Some(uri.clone()),
+            Some(_) => return Err(invalid("uri must be a nonempty string when provided")),
+        };
+
+        let current = self.queue.get_current();
+        let current_uri = current.as_ref().map(Playable::uri);
+        let uri = match requested_uri.as_deref() {
+            Some(requested) if current_uri.as_deref() != Some(requested) => {
+                return Ok(unavailable_artwork(
+                    Some(requested),
+                    width,
+                    height,
+                    "current_mismatch",
+                ));
+            }
+            Some(requested) => requested.to_owned(),
+            None => match current_uri {
+                Some(uri) => uri,
+                None => return Ok(unavailable_artwork(None, width, height, "no_current_track")),
+            },
+        };
+        let Some(current) = current else {
+            return Ok(unavailable_artwork(
+                Some(&uri),
+                width,
+                height,
+                "no_current_track",
+            ));
+        };
+        let Some(cover_url) = current.cover_url().filter(|url| !url.trim().is_empty()) else {
+            return Ok(unavailable_artwork(Some(&uri), width, height, "no_cover"));
+        };
+
+        let pixels = match self.artwork.get_or_fetch(&cover_url, width, height) {
+            Ok(pixels) => pixels,
+            Err(error) => {
+                return Ok(unavailable_artwork(
+                    Some(&uri),
+                    width,
+                    height,
+                    error.reason(),
+                ));
+            }
+        };
+
+        // Network/decode work can outlive a queue transition.  Do not return
+        // art for the track that was current when the request began.
+        let still_current = self
+            .queue
+            .get_current()
+            .is_some_and(|current| current.uri() == uri);
+        if !still_current {
+            return Ok(unavailable_artwork(
+                Some(&uri),
+                width,
+                height,
+                "stale_current",
+            ));
+        }
+        Ok(json!({
+            "available": true,
+            "uri": uri,
+            "width": width,
+            "height": height,
+            "pixels": pixels,
+        }))
+    }
     fn queue_action(&self, p: &Value) -> Result<Value> {
         let action = string(p, "action")?;
         match action {
@@ -1836,5 +1929,81 @@ mod tests {
         assert!(bounds(&json!({"offset":-1})).is_err());
         assert!(bounds(&json!({"limit":0})).is_err());
         assert!(bounds(&json!({"limit":201})).is_err());
+    }
+
+    #[test]
+    fn artwork_without_current_track_returns_a_clean_unavailable_result() {
+        let service = service();
+        let result = service
+            .dispatch("player.artwork", &json!({"width":2,"height":1}))
+            .unwrap();
+        assert_eq!(result["available"], false);
+        assert_eq!(result["uri"], Value::Null);
+        assert_eq!(result["width"], 2);
+        assert_eq!(result["height"], 1);
+        assert_eq!(result["reason"], "no_current_track");
+    }
+
+    #[test]
+    fn artwork_rejects_zero_and_oversized_dimensions() {
+        let service = service();
+        for params in [
+            json!({"width":0,"height":1}),
+            json!({"width":41,"height":1}),
+            json!({"width":1,"height":0}),
+            json!({"width":1,"height":21}),
+        ] {
+            let error = service.dispatch("player.artwork", &params).unwrap_err();
+            assert_eq!(error.code, "invalid_params");
+        }
+    }
+
+    #[test]
+    fn artwork_cache_hit_returns_exact_requested_grid() {
+        let service = service();
+        let mut current = fixture_track("ArtworkTrack", "Artwork", 0);
+        current.cover_url = Some("https://i.scdn.co/image/artwork-fixture".to_owned());
+        let uri = current.uri.clone();
+        service
+            .queue
+            .rpc_append_play_many(&[Playable::Track(current)]);
+        service.artwork.remember_for_test(
+            "https://i.scdn.co/image/artwork-fixture",
+            2,
+            1,
+            vec!["#FF0000", "#00FF00", "#0000FF", "#FFFFFF"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        );
+
+        let result = service
+            .dispatch("player.artwork", &json!({"uri":uri,"width":2,"height":1}))
+            .unwrap();
+        assert_eq!(result["available"], true);
+        assert_eq!(result["uri"], uri);
+        assert_eq!(result["width"], 2);
+        assert_eq!(result["height"], 1);
+        assert_eq!(result["pixels"].as_array().unwrap().len(), 4);
+        assert_eq!(result["pixels"][0], "#FF0000");
+        assert_eq!(result["pixels"][3], "#FFFFFF");
+    }
+
+    #[test]
+    fn artwork_uri_mismatch_never_reads_another_current_cover() {
+        let service = service();
+        let current = fixture_track("CurrentArtworkTrack", "Current", 0);
+        service
+            .queue
+            .rpc_append_play_many(&[Playable::Track(current)]);
+        let result = service
+            .dispatch(
+                "player.artwork",
+                &json!({"uri":"spotify:track:stale","width":2,"height":1}),
+            )
+            .unwrap();
+        assert_eq!(result["available"], false);
+        assert_eq!(result["reason"], "current_mismatch");
+        assert_eq!(result["uri"], "spotify:track:stale");
     }
 }

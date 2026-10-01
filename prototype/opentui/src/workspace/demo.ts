@@ -101,6 +101,7 @@ export class DemoApi implements RpcApi {
       }
       case "player.action": return this.player(p);
       case "player.status": return { source, current: this.status.playable, repeat: this.repeat, shuffle: this.shuffled, saved: this.tracks.find(row => row.uri === this.status.playable?.uri)?.saved ?? false };
+      case "player.artwork": return { source, available: false, uri: p.uri ?? this.status.playable?.uri ?? null, width: p.width ?? 20, height: p.height ?? 10, reason: "offline_preview" };
       case "queue.action": return this.queueAction(p);
       case "library.action": {
         const action = string(p, "action"); if (action === "refresh") return { source, refreshed: true };

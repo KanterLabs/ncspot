@@ -49,9 +49,14 @@ inputs capture text; individual screens show their action keys. Lists support ke
 mouse selection and double-click activation.
 
 Live sessions save light/dark and reduced-motion preferences separately from Rust settings. Demo
-previews do not save them. Now Playing shows sampled audio bands when supplied by Rust and labels
-its fallback **Ambient · playback progress**. Reduced motion disables animation interpolation;
-status still updates. Cover images currently use initials.
+previews do not save them. Now Playing groups artwork, metadata and controls in a centered player
+card, with an Up Next card on wide terminals. Real cover images use Rust's existing disk cache;
+only a missing cover needs a CDN download, without a Spotify Web API call. Initials remain the
+fallback when an image is unavailable. Sampled audio drives the spectrum; without samples the
+view shows playback progress. Reduced motion disables interpolation while status still updates.
+
+For visual review, `bun run test/visual-capture.ts --theme both` captures the actual native
+renderer cells at 189×34 and 80×24 as JSON, SVG and text under `/tmp/resonance-visual`.
 
 ## API and debug behavior
 

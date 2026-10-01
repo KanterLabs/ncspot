@@ -41,6 +41,8 @@ mod utils;
 mod waveform;
 
 #[cfg(unix)]
+mod artwork;
+#[cfg(unix)]
 mod ipc;
 #[cfg(unix)]
 mod rpc;

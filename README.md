@@ -116,8 +116,9 @@ to quit. Focused text inputs capture normal typing. **Esc** cancels a prompt or 
 Playing. Each screen shows its own action keys.
 
 Light/dark preferences and reduced motion are saved separately from Rust configuration. Now
-Playing displays sampled audio bands when Rust supplies them; otherwise its graphic is labeled
-**Ambient · playback progress**. Cover art currently uses initials. See the
+Playing centers the player beside an Up Next card on wide terminals and adapts to 80×24.
+It displays real artwork from the existing cover cache and sampled audio bands when Rust supplies
+them; otherwise it shows playback progress. Missing artwork falls back to initials. See the
 [workspace guide](doc/opentui-prototype.md) for routes, controls, attachment, and debug logging.
 
 ## Local radio and diagnostics

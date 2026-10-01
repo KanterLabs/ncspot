@@ -67,6 +67,7 @@ export type ScreenFactory = (context: ScreenContext, params?: Params) => Screen;
  * Methods:
  * session.info -> {instance_id,version,capabilities:string[]}
  * player.action {action:"play_pause"|"previous"|"next"|"stop"|"seek"|"volume"|"repeat"|"shuffle"|"play",value?,uri?}
+ * player.artwork {uri?,width?:1..40,height?:1..20} -> {available,uri,width,height,pixels?:string[],reason?}; two RGB pixel rows per terminal row
  * queue.list {offset?,limit?} -> Page (row.id is an entry identity, meta.index/current; revision)
  * queue.action {action:"play"|"remove"|"move"|"clear"|"append"|"play_next"|"save",entry_id?,revision?,to?,uri?,name?}
  * library.list {kind:"tracks"|"albums"|"artists"|"playlists"|"shows"|"browse",offset?,limit?,filter?,sort?} -> Page
