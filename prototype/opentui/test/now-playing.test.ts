@@ -399,6 +399,45 @@ test("189x34 centers bounded player and side queue cards", async () => {
   } finally { f.close(); }
 });
 
+test("fifteen compact upcoming songs retain durations and never overlap radio status", async () => {
+  for (const width of [112, 189]) {
+    const live = trackStatus();
+    live.prototype!.radio_active = true;
+    live.prototype!.up_next = Array.from({ length: 16 }, (_, index) => ({
+      ...live.prototype!.up_next[0]!,
+      title: index === 14 ? "Fifteenth track" : index === 15 ? "Hidden sixteenth song" : `Song ${index + 1} 雨の音 with a long title`,
+      artists: ["An artist with a long name"],
+      duration: 181_000 + index * 1000,
+    }));
+    const f = await fixtureCtx({ width, height: 34, status: live });
+    try {
+      for (const theme of ["light", "dark"] as const) {
+        f.screen.setTheme(theme); await f.renderOnce();
+        const frame = f.captureCharFrame();
+        expect(frame).toContain("Fifteenth track");
+        expect(frame).toContain("15+ upcoming");
+        expect(frame).toContain("Continuous radio");
+        expect(frame).not.toContain("Hidden sixteenth song");
+        const footer = f.screen.root.findDescendantById("np-queue-foot")!;
+        const card = f.screen.root.findDescendantById("np-up-next-card")!;
+        for (let index = 0; index < 15; index++) {
+          const entry = f.screen.root.findDescendantById(`np-up-next-${index}`)!;
+          const duration = f.screen.root.findDescendantById(`np-queue-duration-${index}`)!;
+          expect(entry.height).toBe(1);
+          expect(entry.y + entry.height).toBeLessThanOrEqual(footer.y);
+          expect(duration.x + duration.width).toBeLessThan(card.x + card.width);
+          expect(frame.split("\n")[duration.y]).toContain(`3:${String(index + 1).padStart(2, "0")}`);
+          if (index > 0) expect(entry.y).toBe(f.screen.root.findDescendantById(`np-up-next-${index - 1}`)!.y + 1);
+        }
+      }
+      f.update({ ...live, prototype: { ...live.prototype!, up_next: live.prototype!.up_next.slice(0, 2) } });
+      await f.renderOnce();
+      expect(f.captureCharFrame()).not.toContain("Fifteenth track");
+      expect(f.captureCharFrame()).toContain("2 upcoming");
+    } finally { f.close(); }
+  }
+});
+
 test("full workspace at 80x24 keeps Now Playing controls within the terminal bounds", async () => {
   const setup = await createTestRenderer({ width: 80, height: 24 });
   const app = mountWorkspace(setup.renderer, {

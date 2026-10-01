@@ -114,11 +114,12 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   const queueHeading = row(queueCard, "np-queue-heading", 2, { justifyContent: "space-between" });
   text(queueHeading, "queue-label", "UP NEXT", { width: 12 }, "dim");
   button(queueHeading, "open-queue", "Queue →", 9, () => ctx.navigate("queue"));
-  const queueBody = new BoxRenderable(ctx.renderer, { id: "np-queue-body", flexGrow: 1, minHeight: 0, flexDirection: "column", gap: 1 }); queueCard.add(queueBody);
-  const queueItems = Array.from({ length: 6 }, (_, index) => {
-    const item = new BoxRenderable(ctx.renderer, { id: `np-up-next-${index}`, height: 2, width: "100%", flexShrink: 0, flexDirection: "column", onMouseDown: event => { if (event.button === MouseButton.LEFT) ctx.navigate("queue"); } });
+  const queueBody = new BoxRenderable(ctx.renderer, { id: "np-queue-body", flexGrow: 1, minHeight: 0, flexDirection: "column", gap: 0 }); queueCard.add(queueBody);
+  const queueItems = Array.from({ length: 15 }, (_, index) => {
+    const item = new BoxRenderable(ctx.renderer, { id: `np-up-next-${index}`, height: 1, width: "100%", flexShrink: 0, flexDirection: "row", gap: 1, onMouseDown: event => { if (event.button === MouseButton.LEFT) ctx.navigate("queue"); } });
     queueBody.add(item);
-    return { root: item, title: text(item, `queue-title-${index}`, "", { width: "100%" }), artist: text(item, `queue-artist-${index}`, "", { width: "100%" }, "muted") };
+    text(item, `queue-number-${index}`, String(index + 1).padStart(2, "0"), { width: 2 }, "dim");
+    return { root: item, title: text(item, `queue-title-${index}`, "", { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }), duration: text(item, `queue-duration-${index}`, "", { width: 5, textAlign: "right" }, "muted") };
   });
   const queueEmpty = text(queueBody, "queue-empty", "Nothing queued yet", { width: "100%", height: 4 }, "muted");
   const emptyRadio = new BoxRenderable(ctx.renderer, { id: "np-empty-radio", width: "100%", height: 3, border: true, borderStyle: "rounded", alignItems: "center", justifyContent: "center", onMouseDown: event => { if (event.button === MouseButton.LEFT) { void startRadio(); event.preventDefault(); } } });
@@ -190,7 +191,9 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     const compact = ctx.renderer.height < 30;
     const sideBySide = ctx.renderer.width >= 112 && !compact;
     const available = Math.min(132, ctx.renderer.width - 4);
-    card.width = sideBySide ? Math.max(68, available - 47) : Math.min(82, available);
+    const playerWidth = sideBySide ? Math.max(68, available - 47) : Math.min(82, available);
+    card.width = playerWidth;
+    if (sideBySide) queueCard.width = available - playerWidth - 3;
     card.height = compact ? Math.max(15, ctx.renderer.height - 7) : 24;
     card.paddingY = compact ? 0 : 1;
     queueCard.visible = sideBySide; queueCard.height = card.height; columns.height = card.height;
@@ -201,13 +204,13 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     if (artWidth !== wantedWidth || artHeight !== wantedHeight) { artWidth = wantedWidth; artHeight = wantedHeight; coverBox.width = artWidth; coverBox.height = artHeight; }
     coverFallback.content = initials(p); title.content = playableTitle(p); artist.content = playableArtists(p); album.content = playableAlbum(p);
     mode.content = `${status?.mode.kind === "playing" ? "●" : "○"} ${status?.mode.kind.toUpperCase() ?? "READY"}${status?.prototype?.radio_active ? "  ·  RADIO" : ""}`;
-    const spectrumWidth = Math.max(12, Number(card.width) - artWidth - 9); const audio = status?.prototype?.audio;
+    const spectrumWidth = Math.max(12, playerWidth - artWidth - 9); const audio = status?.prototype?.audio;
     if (audio) {
       const active = status?.mode.kind === "playing" && audio.level > 0; const target = active ? audio.bands : audio.bands.map(() => 0);
       if (ctx.reducedMotion() || !active || displayedBands.length !== target.length) displayedBands = [...target];
       ambient.content = compact ? audioSpectrum(displayedBands, spectrumWidth) : `${active ? "Audio spectrum" : "Audio spectrum · silence"}\n${audioSpectrum(displayedBands, spectrumWidth)}`;
     } else ambient.content = compact ? "" : `${ctx.reducedMotion() ? "Reduced motion" : "Playback progress"}\n${ambientProgress(position, duration, spectrumWidth)}`;
-    const trackWidth = Math.max(12, Number(card.width) - 6);
+    const trackWidth = Math.max(12, playerWidth - 6);
     const filled = duration > 0 ? Math.min(trackWidth, Math.floor(trackWidth * position / duration)) : 0;
     timeline.content = new StyledText([
       { __isChunk: true, text: "━".repeat(filled), fg: RGBA.fromHex(colors.accent), bg: RGBA.fromHex(colors.panel) },
@@ -219,11 +222,21 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     savedButton.content = saved.has(uri() ?? "") ? "♥ Saved" : "♡ Save";
     detail.content = `Volume ${status?.prototype ? `${status.prototype.volume_percent}%` : "—"}`;
     const upNext = status?.prototype?.up_next ?? [];
-    queueItems.forEach((item, index) => { const track = upNext[index]; item.root.visible = !!track; if (track) { item.title.content = `${String(index + 1).padStart(2, "0")}  ${track.title}`; item.artist.content = `    ${track.artists.join(" · ")} · ${formatTime(track.duration)}`; } });
+    queueItems.forEach((item, index) => {
+      const track = upNext[index]; item.root.visible = !!track;
+      if (track) {
+        item.title.content = new StyledText([
+          { __isChunk: true, text: track.title, fg: RGBA.fromHex(colors.text), bg: RGBA.fromHex(colors.panel) },
+          { __isChunk: true, text: track.artists.length ? ` · ${track.artists.join(" · ")}` : "", fg: RGBA.fromHex(colors.muted), bg: RGBA.fromHex(colors.panel) },
+        ]);
+        item.duration.content = formatTime(track.duration);
+      }
+    });
     queueEmpty.visible = !upNext.length;
     queueEmpty.content = status?.prototype?.radio_active ? "Finding fresh tracks…\n\nYour radio station is active." : "Nothing queued yet\n\nStart radio from this song\nto keep the music going.";
     emptyRadio.visible = !upNext.length && !!p && p.type !== "Episode" && !status?.prototype?.radio_active;
-    queueFoot.content = status?.prototype?.radio_active ? "✧ Continuous radio\nFresh picks from your cache" : upNext.length ? `${upNext.length}${upNext.length >= 8 ? "+" : ""} tracks ahead · 2 open queue` : "✧ Shift+R starts radio";
+    const upcoming = `${Math.min(15, upNext.length)}${upNext.length > 15 ? "+" : ""} upcoming · 2 open queue`;
+    queueFoot.content = status?.prototype?.radio_active ? `✧ Continuous radio\n${upNext.length ? upcoming : "Finding fresh tracks…"}` : upNext.length ? upcoming : "✧ Shift+R starts radio";
     void loadArtwork();
   }
   function syncTimer() {

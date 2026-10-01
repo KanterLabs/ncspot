@@ -79,7 +79,7 @@ impl Status {
                 radio_active: queue.radio_active(),
                 radio_waiting: queue.radio_waiting() || queue.radio_natural_end(),
                 up_next: queue
-                    .in_play_order(start, 8)
+                    .in_play_order(start, 16)
                     .into_iter()
                     .filter_map(|(_, item)| item.track())
                     .collect(),
@@ -277,6 +277,58 @@ impl IpcSocket {
 mod tests {
     use super::*;
     use crate::{config::Config, library::Library, spotify::Spotify};
+
+    fn fixture_track(index: usize) -> Track {
+        Track {
+            id: Some(format!("FixtureTrack{index:02}")),
+            uri: format!("spotify:track:FixtureTrack{index:02}"),
+            title: format!("Fixture Track {index}"),
+            track_number: index as u32 + 1,
+            disc_number: 1,
+            duration: 180_000,
+            artists: vec!["Fixture Artist".to_owned()],
+            artist_ids: vec![],
+            album: Some("Fixture Album".to_owned()),
+            album_id: Some("FixtureAlbum".to_owned()),
+            album_artists: vec!["Fixture Artist".to_owned()],
+            cover_url: None,
+            url: String::new(),
+            added_at: None,
+            list_index: index,
+            is_local: false,
+            is_playable: Some(true),
+        }
+    }
+
+    #[test]
+    fn status_up_next_includes_sixteen_tracks_after_current() {
+        let config = Config::new_for_test();
+        let events = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(config.clone(), events.clone());
+        let library = Library::new_for_test(events, spotify.clone(), config.clone());
+        let items = (0..20)
+            .map(|index| Playable::Track(fixture_track(index)))
+            .collect();
+        let queue = Queue::new_for_test(items, Some(3), spotify, config, library);
+
+        let status = Status::from_queue(&queue);
+        let up_next = status
+            .prototype
+            .up_next
+            .iter()
+            .map(|track| track.id.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        let expected = (4..20)
+            .map(|index| format!("FixtureTrack{index:02}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(up_next.len(), 16);
+        assert_eq!(
+            up_next,
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(!up_next.contains(&"FixtureTrack03"));
+    }
 
     /// Hosts the actual IPC/RPC stack for an externally driven OpenTUI integration test.
     /// This test never starts authentication, a Spotify worker, or library refresh.
