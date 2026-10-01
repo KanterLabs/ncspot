@@ -21,3 +21,8 @@ live ncspot session, `--demo` for an offline preview, and `--smoke` for a
 non-interactive parser/command check. The socket client never reconnects after
 disconnecting, so a new ncspot process cannot be controlled accidentally.
 
+
+The default appearance is a macOS Liquid Glass inspired light theme. Press **L** or
+click the header appearance control to toggle dark mode. Live sessions remember
+the choice; `--demo` is an unsaved preview. `--theme light|dark` overrides the
+initial appearance. Glass is approximated with terminal colors and layered borders.

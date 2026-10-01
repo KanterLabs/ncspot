@@ -36,6 +36,18 @@ engine, so the main Resonance view and the prototype remain one session.
 Press `q`, <kbd>Esc</kbd>, or <kbd>F5</kbd> in the prototype to close the prototype window. These
 keys close only the OpenTUI process; the main Resonance process and playback continue.
 
+## Light and dark appearance
+
+The default light appearance takes inspiration from macOS Liquid Glass: cool pearl surfaces,
+soft blue highlights, delicate borders, and clear layers around the controls. Terminal cells
+approximate the glass effect with opaque tints; they cannot provide native macOS blur or refraction.
+
+Press **L** or click the appearance control in the header to switch between light and dark.
+The choice is remembered for future prototype windows in
+`$XDG_CONFIG_HOME/resonance/opentui-theme.json` (normally `~/.config/resonance/opentui-theme.json`).
+Use `--theme light` or `--theme dark` to choose the initial appearance explicitly. Offline `--demo`
+previews do not save a preference.
+
 ## Run it manually
 
 The packaged executable is standalone. Running it does not require Bun, Node, npm, or a second

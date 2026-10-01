@@ -68,5 +68,6 @@ test("keyboard transport maps to existing ncspot command strings", () => {
   expect(commandForKey({ name: "r" })).toBe("radio");
   expect(commandForKey({ name: "d" }, 75)).toBe("discovery 100");
   expect(commandForKey({ name: "f5" })).toBe("quit");
+  expect(commandForKey({ name: "l" })).toBeNull();
   expect(commandForKey({ name: "c", ctrl: true })).toBeNull();
 });

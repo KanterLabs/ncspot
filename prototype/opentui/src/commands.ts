@@ -36,6 +36,10 @@ export function commandForKey(key: KeyLike, discovery = 50): string | "quit" | n
     case "-":
     case "down":
       return "voldown";
+    case "l":
+      // Theme is frontend-local; the key handler consumes it before command
+      // dispatch so it can never become an ncspot IPC command.
+      return null;
     default:
       return null;
   }
@@ -46,4 +50,3 @@ export function nextDiscovery(level: number): number {
   const current = levels.findIndex((candidate) => candidate >= Math.max(0, Math.min(100, level)));
   return levels[(current < 0 ? 0 : current + 1) % levels.length];
 }
-

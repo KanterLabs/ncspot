@@ -96,7 +96,8 @@ settings retained by this fork.
 Press **F5** (or `:prototype`) to open the [OpenTUI Now Playing prototype](doc/opentui-prototype.md)
 in a separate desktop terminal. It follows the same playback session and offers transport,
 radio, Discovery, and Up Next controls. **F5**, **Esc**, or **q** in that window closes only the
-prototype. Fedora packages include its standalone `resonance-opentui` executable.
+prototype. **L** toggles the Liquid Glass inspired light theme and dark theme; the choice is
+remembered. Fedora packages include its standalone `resonance-opentui` executable.
 
 ## Local radio and diagnostics
 

@@ -3,27 +3,32 @@ import { mountResonance } from "./app.js";
 import { DemoTransport, IpcClient, type CommandTransport } from "./ipc.js";
 import { commandForKey } from "./commands.js";
 import { demoStatus, parseStatus } from "./status.js";
+import { DEFAULT_THEME, isThemeName, paletteForTheme, type ThemeName } from "./theme.js";
+import { readThemePreference, saveThemePreference } from "./theme-store.js";
 
 const usage = `Resonance OpenTUI prototype
 
 Usage:
   resonance-opentui --socket PATH
   resonance-opentui --demo
+  resonance-opentui --theme light|dark   choose the initial palette
   resonance-opentui --smoke
 
 Keys:
   space / enter  play or pause       ←/→ or p/n  previous / next
   r              local radio          d           cycle discovery
+  l              toggle light / dark (saved for the next launch)
   +/- or ↑/↓     volume               q / Esc / F5 close this prototype
 `;
 
-interface CliOptions {
+export interface CliOptions {
   socket?: string;
   demo: boolean;
   smoke: boolean;
+  theme?: ThemeName;
 }
 
-function parseArgs(args: string[]): CliOptions | "help" | string {
+export function parseArgs(args: string[]): CliOptions | "help" | string {
   const options: CliOptions = { demo: false, smoke: false };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -34,6 +39,14 @@ function parseArgs(args: string[]): CliOptions | "help" | string {
     }
     if (arg === "--smoke") {
       options.smoke = true;
+      continue;
+    }
+    if (arg === "--theme") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) return "--theme requires light or dark";
+      if (!isThemeName(value)) return "--theme must be light or dark";
+      options.theme = value;
+      index += 1;
       continue;
     }
     if (arg === "--socket" || arg === "-s") {
@@ -100,11 +113,25 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Reading the frontend preference never creates or mutates a file. Demo
+  // mode intentionally starts from light unless explicitly overridden and
+  // does not install a persistence callback.
+  const initialTheme = parsedArgs.theme ?? (parsedArgs.demo ? DEFAULT_THEME : readThemePreference().theme);
+  const persistTheme = parsedArgs.demo
+    ? undefined
+    : (theme: ThemeName): void => {
+        const result = saveThemePreference(theme);
+        if (!result.ok) {
+          const message = result.error ?? "unable to save theme preference";
+          throw new Error(message);
+        }
+      };
+
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
     targetFps: 30,
     useMouse: true,
-    backgroundColor: "#080a10",
+    backgroundColor: paletteForTheme(initialTheme).background,
     onDestroy: () => undefined,
   });
 
@@ -118,6 +145,8 @@ async function main(): Promise<void> {
       transport,
       connected: false,
       connectionMessage: "offline preview",
+      theme: initialTheme,
+      onThemeChange: persistTheme,
     });
     app.setStatus(demoStatus());
     demoTimer = setInterval(() => app.tick(), 250);
@@ -134,6 +163,8 @@ async function main(): Promise<void> {
       transport,
       connected: false,
       connectionMessage: "connecting",
+      theme: initialTheme,
+      onThemeChange: persistTheme,
     });
     try {
       await client.connect();

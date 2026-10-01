@@ -3,9 +3,7 @@ import {
   MouseButton,
   TextAttributes,
   TextRenderable,
-  bold,
   createTextAttributes,
-  dim,
   fg,
   t,
   type CliRenderer,
@@ -13,6 +11,13 @@ import {
 } from "@opentui/core";
 import { commandForKey, nextDiscovery as nextDiscoveryLevel } from "./commands.js";
 import { DemoTransport, type CommandTransport } from "./ipc.js";
+import {
+  DEFAULT_THEME,
+  otherTheme,
+  paletteForTheme,
+  type ThemeName,
+  type ThemePalette,
+} from "./theme.js";
 import {
   DEMO_TRACKS,
   formatTime,
@@ -28,23 +33,6 @@ import {
   createUiState,
 } from "./status.js";
 
-export const COLORS = {
-  background: "#080a10",
-  panel: "#0f131d",
-  panelRaised: "#151b28",
-  border: "#293247",
-  borderSoft: "#1c2432",
-  text: "#e8edf8",
-  muted: "#8a96ad",
-  dim: "#58647b",
-  accent: "#9c7bff",
-  accentBright: "#c8b8ff",
-  accentDim: "#4b3e79",
-  teal: "#57d5c8",
-  amber: "#f6bd72",
-  red: "#f07887",
-};
-
 const WAVE_HEIGHTS = [
   1, 2, 3, 5, 7, 9, 7, 5, 3, 4, 6, 8, 10, 8, 6, 4, 2, 3, 5, 8, 10, 8, 6, 4,
   2, 3, 5, 7, 8, 6, 4, 2, 1, 3, 6, 9, 7, 5, 3, 4, 7, 9, 6, 4, 2, 1,
@@ -58,31 +46,6 @@ function waveform(width: number, phase: number): string {
     const pulse = Math.sin((index + phase) * 0.42) * 1.25;
     return WAVE_CHARS[Math.max(0, Math.min(WAVE_CHARS.length - 1, Math.round(source + pulse) - 1))];
   }).join("");
-}
-
-function text(
-  renderer: CliRenderer,
-  content: string,
-  options: ConstructorParameters<typeof TextRenderable>[1] = {},
-): TextRenderable {
-  return new TextRenderable(renderer, {
-    content,
-    fg: COLORS.text,
-    wrapMode: "none",
-    truncate: true,
-    ...options,
-  });
-}
-
-function panel(renderer: CliRenderer, options: ConstructorParameters<typeof BoxRenderable>[1] = {}): BoxRenderable {
-  return new BoxRenderable(renderer, {
-    backgroundColor: COLORS.panel,
-    border: true,
-    borderStyle: "single",
-    borderColor: COLORS.border,
-    padding: 1,
-    ...options,
-  });
 }
 
 function eventIsPrimaryClick(event: MouseEvent): boolean {
@@ -108,13 +71,17 @@ export interface ResonanceAppOptions {
   transport: CommandTransport;
   connected?: boolean;
   connectionMessage?: string;
+  theme?: ThemeName;
+  onThemeChange?: (theme: ThemeName) => void;
   onQuit?: () => void;
 }
 
 export interface ResonanceApp {
   readonly state: UiState;
+  readonly theme: ThemeName;
   setStatus(status: ParsedStatus): void;
   setConnection(connected: boolean, message: string): void;
+  setTheme(theme: ThemeName): void;
   tick(nowMs?: number): void;
   quit(): void;
   dispose(): void;
@@ -130,18 +97,77 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     connected: options.connected ?? false,
     connectionMessage: options.connectionMessage ?? "disconnected",
   });
+  let theme: ThemeName = options.theme ?? DEFAULT_THEME;
+  let palette: Readonly<ThemePalette> = paletteForTheme(theme);
   let disposed = false;
   let wavePhase = 0;
+
+  type TextTone =
+    | "text"
+    | "muted"
+    | "dim"
+    | "accent"
+    | "accentBright"
+    | "teal"
+    | "amber"
+    | "red";
+  type BoxTone = keyof ThemePalette;
+  const textBindings: Array<{ node: TextRenderable; tone: TextTone }> = [];
+  const boxBindings: Array<{
+    node: BoxRenderable;
+    background?: BoxTone;
+    border?: BoxTone;
+    focusedBorder?: BoxTone;
+  }> = [];
+
+  const text = (
+    content: string,
+    tone: TextTone = "text",
+    options: ConstructorParameters<typeof TextRenderable>[1] = {},
+    register = true,
+  ): TextRenderable => {
+    const node = new TextRenderable(renderer, {
+      content,
+      fg: palette[tone],
+      wrapMode: "none",
+      truncate: true,
+      ...options,
+    });
+    if (register) textBindings.push({ node, tone });
+    return node;
+  };
+
+  const bindBox = (
+    node: BoxRenderable,
+    tones: { background?: BoxTone; border?: BoxTone; focusedBorder?: BoxTone } = {},
+  ): BoxRenderable => {
+    boxBindings.push({ node, ...tones });
+    return node;
+  };
+
+  const panel = (options: ConstructorParameters<typeof BoxRenderable>[1] = {}): BoxRenderable =>
+    bindBox(
+      new BoxRenderable(renderer, {
+        backgroundColor: palette.panel,
+        border: true,
+        borderStyle: "rounded",
+        borderColor: palette.border,
+        padding: 1,
+        ...options,
+      }),
+      { background: "panel", border: "border", focusedBorder: "accent" },
+    );
 
   const shell = new BoxRenderable(renderer, {
     id: "resonance-shell",
     width: "100%",
     height: "100%",
     flexDirection: "column",
-    backgroundColor: COLORS.background,
+    backgroundColor: palette.background,
     padding: 1,
     gap: 1,
   });
+  bindBox(shell, { background: "background" });
   renderer.root.add(shell);
 
   const header = new BoxRenderable(renderer, {
@@ -152,10 +178,12 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     alignItems: "center",
     justifyContent: "space-between",
     paddingX: 1,
-    backgroundColor: COLORS.panel,
+    backgroundColor: palette.panel,
     border: true,
-    borderColor: COLORS.borderSoft,
+    borderStyle: "rounded",
+    borderColor: palette.bevelHighlight,
   });
+  bindBox(header, { background: "panel", border: "bevelHighlight" });
   shell.add(header);
 
   const headerLeft = new BoxRenderable(renderer, {
@@ -163,12 +191,10 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     alignItems: "center",
     gap: 1,
   });
-  const brand = text(renderer, "KANTERLABS", {
-    fg: COLORS.accentBright,
+  const brand = text("KANTERLABS", "accentBright", {
     attributes: TextAttributes.BOLD,
   });
-  const product = text(renderer, "RESONANCE", {
-    fg: COLORS.text,
+  const product = text("RESONANCE", "text", {
     attributes: createTextAttributes({ bold: true, italic: true }),
   });
   headerLeft.add(brand);
@@ -180,15 +206,36 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     alignItems: "center",
     gap: 2,
   });
-  const connection = text(renderer, "", { fg: COLORS.teal });
-  const connectionDot = text(renderer, "●", { fg: COLORS.teal });
-  const shortcutHint = text(renderer, "SPACE play  ·  ←/→ skip  ·  D discovery  ·  Q close", {
-    fg: COLORS.dim,
-  });
+  const connection = text("", "teal");
+  const connectionDot = text("●", "teal");
+  const shortcutHint = text("SPACE play  ·  ←/→ skip  ·  D discovery  ·  Q close", "dim");
   headerRight.add(connectionDot);
   headerRight.add(connection);
   headerRight.add(shortcutHint);
   header.add(headerRight);
+
+  const themeToggle = bindBox(
+    new BoxRenderable(renderer, {
+      id: "theme-toggle",
+      width: 15,
+      height: 1,
+      border: false,
+      backgroundColor: palette.panelRaised,
+      paddingX: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      focusable: true,
+      onMouseDown: (event) => {
+        if (eventIsPrimaryClick(event)) setTheme(otherTheme(theme));
+      },
+    }),
+    { background: "panelRaised" },
+  );
+  const themeToggleLabel = text(theme === "light" ? "☼ LIGHT · L" : "☾ DARK · L", "accentBright", {
+    textAlign: "center",
+  });
+  themeToggle.add(themeToggleLabel);
+  headerRight.add(themeToggle);
 
   const body = new BoxRenderable(renderer, {
     id: "resonance-body",
@@ -200,7 +247,7 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
   });
   shell.add(body);
 
-  const hero = panel(renderer, {
+  const hero = panel({
     id: "now-playing-panel",
     flexGrow: 6,
     flexDirection: "column",
@@ -223,28 +270,25 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     width: 30,
     height: 15,
     flexShrink: 0,
-    backgroundColor: "#252044",
+    backgroundColor: palette.cover,
     border: true,
-    borderColor: COLORS.accentDim,
+    borderStyle: "rounded",
+    borderColor: palette.coverBorder,
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
     gap: 1,
   });
-  const coverGlyph = text(renderer, "╱╲  ╱╲\n╲╱  ╲╱", {
-    fg: COLORS.accentBright,
+  bindBox(cover, { background: "cover", border: "coverBorder" });
+  const coverGlyph = text("╱╲  ╱╲\n╲╱  ╲╱", "accentBright", {
     textAlign: "center",
     attributes: TextAttributes.BOLD,
   });
-  const coverInitials = text(renderer, "RL", {
-    fg: COLORS.text,
+  const coverInitials = text("RL", "text", {
     textAlign: "center",
     attributes: createTextAttributes({ bold: true, italic: true }),
   });
-  const coverCaption = text(renderer, "NO COVER FETCH", {
-    fg: COLORS.dim,
-    textAlign: "center",
-  });
+  const coverCaption = text("NO COVER FETCH", "dim", { textAlign: "center" });
   cover.add(coverGlyph);
   cover.add(coverInitials);
   cover.add(coverCaption);
@@ -257,19 +301,17 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     gap: 1,
     minWidth: 28,
   });
-  const eyebrow = text(renderer, "NOW PLAYING  /  RESONANCE SESSION", {
-    fg: COLORS.accent,
+  const eyebrow = text("NOW PLAYING  /  RESONANCE SESSION", "accent", {
     attributes: TextAttributes.BOLD,
   });
-  const title = text(renderer, "", {
-    fg: COLORS.text,
+  const title = text("", "text", {
     attributes: TextAttributes.BOLD,
     wrapMode: "word",
     truncate: false,
   });
-  const artists = text(renderer, "", { fg: COLORS.accentBright });
-  const album = text(renderer, "", { fg: COLORS.muted });
-  const statusText = text(renderer, "", { fg: COLORS.teal });
+  const artists = text("", "accentBright");
+  const album = text("", "muted");
+  const statusText = text("", "teal");
   nowMeta.add(eyebrow);
   nowMeta.add(title);
   nowMeta.add(artists);
@@ -277,16 +319,14 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
   nowMeta.add(statusText);
   heroTop.add(nowMeta);
 
-  const waveformText = text(renderer, waveform(54, 0), {
+  const waveformText = text(waveform(54, 0), "accent", {
     id: "decorative-waveform",
-    fg: COLORS.accent,
     attributes: TextAttributes.BOLD,
     textAlign: "center",
     height: 1,
     flexShrink: 0,
   });
-  const waveformCaption = text(renderer, "SIGNAL SHAPE  ·  DECORATIVE VISUALIZER", {
-    fg: COLORS.dim,
+  const waveformCaption = text("SIGNAL SHAPE  ·  DECORATIVE VISUALIZER", "dim", {
     textAlign: "center",
     height: 1,
     flexShrink: 0,
@@ -294,10 +334,10 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
   hero.add(waveformText);
   hero.add(waveformCaption);
 
-  const progressLabel = text(renderer, "", { fg: COLORS.muted });
+  const progressLabel = text("", "muted");
   progressLabel.height = 1;
   progressLabel.flexShrink = 0;
-  const progressBar = text(renderer, "", { fg: COLORS.accent, height: 1, flexShrink: 0 });
+  const progressBar = text("", "accent", { height: 1, flexShrink: 0 });
   const progressBox = new BoxRenderable(renderer, {
     flexDirection: "column",
     gap: 1,
@@ -320,20 +360,22 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
   hero.add(controls);
 
   const makeButton = (label: string, command: string, width = 11): BoxRenderable => {
-    const button = new BoxRenderable(renderer, {
+    const button = bindBox(new BoxRenderable(renderer, {
       width,
       height: 3,
       border: true,
-      borderColor: COLORS.border,
-      focusedBorderColor: COLORS.accent,
+      borderStyle: "rounded",
+      borderColor: palette.border,
+      focusedBorderColor: palette.accent,
+      backgroundColor: palette.panelRaised,
       alignItems: "center",
       justifyContent: "center",
       focusable: true,
       onMouseDown: (event) => {
         if (eventIsPrimaryClick(event)) dispatch(command);
       },
-    });
-    button.add(text(renderer, label, { textAlign: "center", fg: COLORS.muted }));
+    }), { background: "panelRaised", border: "border", focusedBorder: "accent" });
+    button.add(text(label, "muted", { textAlign: "center" }));
     controls.add(button);
     return button;
   };
@@ -353,32 +395,35 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     justifyContent: "space-between",
     alignItems: "center",
     height: 3,
-    backgroundColor: COLORS.panel,
+    backgroundColor: palette.panel,
     border: false,
     paddingX: 1,
     flexShrink: 0,
   });
-  const discovery = text(renderer, "", { fg: COLORS.amber });
-  const discoveryControl = new BoxRenderable(renderer, {
+  bindBox(footer, { background: "panel" });
+  const discovery = text("", "amber");
+  const discoveryControl = bindBox(new BoxRenderable(renderer, {
     width: 30,
     height: 3,
     border: true,
-    borderColor: COLORS.border,
-    focusedBorderColor: COLORS.amber,
+    borderStyle: "rounded",
+    borderColor: palette.border,
+    focusedBorderColor: palette.amber,
+    backgroundColor: palette.panelRaised,
     alignItems: "center",
     justifyContent: "center",
     focusable: true,
     onMouseDown: (event) => {
       if (eventIsPrimaryClick(event)) dispatch(`discovery ${nextDiscoveryLevel(state.prototype?.discovery ?? 50)}`);
     },
-  });
+  }), { background: "panelRaised", border: "border", focusedBorder: "amber" });
   discoveryControl.add(discovery);
-  const notice = text(renderer, "", { fg: COLORS.dim });
+  const notice = text("", "dim");
   footer.add(discoveryControl);
   footer.add(notice);
   hero.add(footer);
 
-  const queue = panel(renderer, {
+  const queue = panel({
     id: "up-next-panel",
     flexGrow: 4,
     flexDirection: "column",
@@ -392,18 +437,15 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     alignItems: "center",
     height: 2,
   });
-  const queueTitle = text(renderer, "UP NEXT", {
-    fg: COLORS.text,
+  const queueTitle = text("UP NEXT", "text", {
     attributes: TextAttributes.BOLD,
   });
-  const queueCount = text(renderer, "", { fg: COLORS.dim });
+  const queueCount = text("", "dim");
   queueHeader.add(queueTitle);
   queueHeader.add(queueCount);
   queue.add(queueHeader);
 
-  const queueLead = text(renderer, "CURATED FROM YOUR LOCAL RADIO SIGNAL", {
-    fg: COLORS.dim,
-  });
+  const queueLead = text("CURATED FROM YOUR LOCAL RADIO SIGNAL", "dim");
   queue.add(queueLead);
   const queueList = new BoxRenderable(renderer, {
     id: "queue-list",
@@ -414,8 +456,7 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
   });
   queue.add(queueList);
 
-  const queueEmpty = text(renderer, "Queue is waiting for the next signal.", {
-    fg: COLORS.dim,
+  const queueEmpty = text("Queue is waiting for the next signal.", "dim", {
     wrapMode: "word",
     truncate: false,
   });
@@ -441,18 +482,17 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     send(command);
   };
 
-  const keyHandler = (key: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean }): void => {
-    const command = commandForKey(key, state.prototype?.discovery ?? 50);
-    if (command) dispatch(command);
-  };
-  renderer.keyInput.on("keypress", keyHandler);
-
   const refreshQueue = (): void => {
     const tracks = state.prototype?.up_next ?? [];
-    const fingerprint = `${compactLayout}:${JSON.stringify(tracks.map((track) => [track.id, track.title, track.duration]))}`;
+    const fingerprint = `${theme}:${compactLayout}:${JSON.stringify(tracks.map((track) => [track.id, track.title, track.duration]))}`;
     if (renderedQueueFingerprint === fingerprint) return;
     renderedQueueFingerprint = fingerprint;
-    for (const child of queueList.getChildren()) queueList.remove(child);
+    for (const child of queueList.getChildren()) {
+      queueList.remove(child);
+      // Queue rows are rebuilt for metadata, layout, and theme changes. Drop
+      // detached native nodes so repeated status updates cannot accumulate.
+      if (child !== queueEmpty) child.destroyRecursively();
+    }
     queueCount.content = `${tracks.length} TRACK${tracks.length === 1 ? "" : "S"}`;
     if (!tracks.length) {
       queueList.add(queueEmpty);
@@ -465,29 +505,22 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
         alignItems: "center",
         gap: 1,
         border: true,
-        borderColor: index === 0 ? COLORS.accentDim : COLORS.borderSoft,
+        borderStyle: "rounded",
+        backgroundColor: index === 0 ? palette.panelHighlight : palette.queueItem,
+        borderColor: index === 0 ? palette.queueCurrent : palette.softShadow,
         paddingX: 1,
         flexShrink: 0,
       });
-      row.add(text(renderer, String(index + 1).padStart(2, "0"), {
-        width: 3,
-        fg: index === 0 ? COLORS.accent : COLORS.dim,
-      }));
+      row.add(text(String(index + 1).padStart(2, "0"), index === 0 ? "accent" : "dim", { width: 3 }, false));
       const detail = new BoxRenderable(renderer, {
         flexDirection: "column",
         flexGrow: 1,
         minWidth: 10,
       });
-      detail.add(text(renderer, track.title, {
-        fg: COLORS.text,
-        attributes: index === 0 ? TextAttributes.BOLD : TextAttributes.NONE,
-      }));
-      detail.add(text(renderer, `${track.artists.join(" • ")}  /  ${track.album}`, {
-        fg: COLORS.muted,
-        visible: !compactLayout,
-      }));
+      detail.add(text(track.title, "text", { attributes: index === 0 ? TextAttributes.BOLD : TextAttributes.NONE }, false));
+      detail.add(text(`${track.artists.join(" • ")}  /  ${track.album}`, "muted", { visible: !compactLayout }, false));
       row.add(detail);
-      row.add(text(renderer, formatTime(track.duration), { fg: COLORS.dim }));
+      row.add(text(formatTime(track.duration), "dim", {}, false));
       queueList.add(row);
     });
   };
@@ -520,15 +553,49 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
         : `${modeIcon(state)}  ${isPlaying(state) ? "PAUSE" : "PLAY"}`;
     }
     coverInitials.content = initials(playable);
-    progressBar.content = t`${fg(COLORS.accent)(filled)}${fg(COLORS.border)(empty)}`;
+    progressBar.content = t`${fg(palette.accent)(filled)}${fg(palette.progressTrack)(empty)}`;
     progressLabel.content = `${formatTime(position)}  /  ${formatTime(duration)}${state.prototype?.volume_percent !== undefined ? `   VOL ${state.prototype.volume_percent}%` : ""}`;
     connection.content = state.connected ? "LIVE SOCKET" : state.connectionMessage.toUpperCase();
-    connectionDot.fg = state.connected ? COLORS.teal : COLORS.red;
+    connectionDot.fg = state.connected ? palette.teal : palette.red;
     discovery.content = `DISCOVERY  ${state.prototype?.discovery ?? 50}%  ·  D`;
     notice.content = state.notice;
     refreshQueue();
     renderer.requestRender();
   };
+
+  const setTheme = (nextTheme: ThemeName): void => {
+    if (disposed || theme === nextTheme) return;
+    theme = nextTheme;
+    palette = paletteForTheme(theme);
+    renderer.setBackgroundColor(palette.background);
+    for (const binding of textBindings) binding.node.fg = palette[binding.tone];
+    for (const binding of boxBindings) {
+      if (binding.background) binding.node.backgroundColor = palette[binding.background];
+      if (binding.border) binding.node.borderColor = palette[binding.border];
+      if (binding.focusedBorder) binding.node.focusedBorderColor = palette[binding.focusedBorder];
+    }
+    themeToggleLabel.content = theme === "light" ? "☼ LIGHT · L" : "☾ DARK · L";
+    // Queue rows hold their own palette colors, so force their semantic
+    // bindings to be rebuilt even when the status metadata is unchanged.
+    renderedQueueFingerprint = undefined;
+    try {
+      options.onThemeChange?.(theme);
+    } catch {
+      state = { ...state, notice: "Theme changed locally  /  preference not saved" };
+    }
+    refresh();
+  };
+
+  const keyHandler = (key: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean }): void => {
+    const name = (key.name ?? key.sequence ?? "").toLowerCase();
+    if (!key.ctrl && !key.meta && name === "l") {
+      setTheme(otherTheme(theme));
+      return;
+    }
+    const command = commandForKey(key, state.prototype?.discovery ?? 50);
+    if (command) dispatch(command);
+  };
+  renderer.keyInput.on("keypress", keyHandler);
 
   const onResize = (width: number, height = renderer.height): void => {
     const stacked = width < 64;
@@ -619,8 +686,12 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
     get state() {
       return state;
     },
+    get theme() {
+      return theme;
+    },
     setStatus,
     setConnection,
+    setTheme,
     tick(nowMs = Date.now()) {
       if (disposed) return;
       // The actual position is derived from the status timestamp on refresh;
