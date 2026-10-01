@@ -10,10 +10,11 @@ name: Fedora
 # Every push to main leaves a downloadable binary on the run, so the laptop
 # never has to compile; tags additionally attach it to the release.
 #
-# Speed: dependencies come from the cache, so a build compiles only Resonance itself.
-# Under the `release` profile's fat LTO and single codegen unit that one crate took
-# about two and a half minutes, cached or not, so branch builds use the
-# `optimized` profile (no LTO, parallel codegen) and only tags pay for `release`.
+# Speed: Rust dependencies come from the cache, so the native build compiles only
+# Resonance itself. Under the `release` profile's fat LTO and single codegen unit
+# that one crate took about two and a half minutes, cached or not, so branch builds
+# use the `optimized` profile (no LTO, parallel codegen) and only tags pay for
+# `release`.
 
 on:
   push:
@@ -55,6 +56,8 @@ jobs:
         run: |
           dnf --assumeyes --setopt=install_weak_deps=False install \
             binutils \
+            ca-certificates \
+            curl \
             dbus-devel \
             gcc \
             gcc-c++ \
@@ -68,6 +71,7 @@ jobs:
             pulseaudio-libs-devel \
             python3 \
             tar \
+            unzip \
             xz \
             zstd
 
@@ -78,6 +82,32 @@ jobs:
       # root, and git will not read a repository it thinks it does not own.
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Install the pinned official baseline archive and verify its published
+      # hash before building the standalone terminal frontend.
+      - name: Install pinned Bun
+        env:
+          BUN_VERSION: 1.4.2
+        run: |
+          set -euo pipefail
+          bun_dir="$HOME/.bun/bin"
+          bun_archive="$(mktemp --suffix=.zip)"
+          bun_checksums="$(mktemp)"
+          bun_extract="$(mktemp -d)"
+          mkdir -p "$bun_dir"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64-baseline.zip" \
+            --output "$bun_archive"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/SHASUMS256.txt" \
+            --output "$bun_checksums"
+          awk -v archive="$bun_archive" \
+            '$2 == "bun-linux-x64-baseline.zip" { print $1 "  " archive; found = 1 } END { exit !found }' \
+            "$bun_checksums" | sha256sum --check --status
+          unzip -q "$bun_archive" -d "$bun_extract"
+          install -m 0755 "$bun_extract/bun-linux-x64-baseline/bun" "$bun_dir/bun"
+          echo "$bun_dir" >> "$GITHUB_PATH"
+          test "$("$bun_dir/bun" --version)" = "$BUN_VERSION"
 
       # Only rustc, cargo and the standard library. Left to itself, the first cargo
       # call would install every component rust-toolchain.toml lists for editors
@@ -113,12 +143,46 @@ jobs:
       - name: Running cargo build
         run: cargo build --profile "$PROFILE" --locked
 
+      - name: Build OpenTUI prototype
+        working-directory: prototype/opentui
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun test
+          bun run build
+          ./dist/resonance-opentui --smoke
+          test -x dist/resonance-opentui
+
+      - name: Stage OpenTUI executable
+        run: |
+          install -D -m 0755 \
+            prototype/opentui/dist/resonance-opentui \
+            "target/${PROFILE}/resonance-opentui"
+
       - name: Packaging assets
         working-directory: target/${{ env.PROFILE }}
         run: |
           asset="${{ steps.name.outputs.asset }}"
           strip resonance ncspot
-          tar czvf "${asset}.tar.gz" resonance ncspot
+          mkdir -p licenses/resonance licenses/opentui
+          install -m 0644 "$GITHUB_WORKSPACE/LICENSE" licenses/resonance/LICENSE
+          node_modules_dir="$GITHUB_WORKSPACE/prototype/opentui/node_modules"
+          if [ -d "$node_modules_dir" ]; then
+            while IFS= read -r notice; do
+              relative="${notice#${node_modules_dir}/}"
+              install -D -m 0644 "$notice" "licenses/opentui/$relative"
+            done < <(
+              find "$node_modules_dir" -type f \
+                \( -iname 'license*' -o -iname 'copying*' -o -iname 'notice*' -o -iname 'patents*' \) \
+                -print | sort
+            )
+          fi
+          for notice in LICENSES.md THIRD_PARTY_LICENSES.md THIRD_PARTY_NOTICES.md; do
+            if [ -f "$GITHUB_WORKSPACE/prototype/opentui/$notice" ]; then
+              install -m 0644 "$GITHUB_WORKSPACE/prototype/opentui/$notice" "licenses/opentui/$notice"
+            fi
+          done
+          tar czvf "${asset}.tar.gz" resonance ncspot resonance-opentui licenses
           sha256sum "${asset}.tar.gz" > "${asset}.sha256"
 
       - uses: actions/upload-artifact@v7

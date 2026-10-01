@@ -1,0 +1,21 @@
+{
+  "name": "resonance-opentui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "KanterLabs Resonance now playing prototype for ncspot",
+  "scripts": {
+    "dev": "bun run src/main.ts",
+    "start": "bun run src/main.ts",
+    "build": "bun build --compile --minify --define process.env.OPENTUI_LIBC=\\\"glibc\\\" --outfile dist/resonance-opentui src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.14"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.0",
+    "typescript": "5.9.3"
+  }
+}

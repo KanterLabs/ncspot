@@ -12,6 +12,7 @@ pub enum Event {
     Queue(QueueEvent),
     SessionDied,
     IpcInput(String),
+    OpenPrototype,
 }
 
 /// Manager that can be used to send and receive messages across threads.

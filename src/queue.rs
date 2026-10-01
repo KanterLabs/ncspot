@@ -254,7 +254,7 @@ impl Queue {
     /// The currently playing item from `self.queue`.
     pub fn get_current(&self) -> Option<Playable> {
         self.get_current_index()
-            .map(|index| self.queue.read().unwrap()[index].clone())
+            .and_then(|index| self.queue.read().unwrap().get(index).cloned())
     }
 
     /// The index of the currently playing item from `self.queue`.

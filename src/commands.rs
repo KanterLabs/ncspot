@@ -170,6 +170,10 @@ impl CommandManager {
     ) -> Result<Option<String>, String> {
         match cmd {
             Command::Noop => Ok(None),
+            Command::Prototype => {
+                self.events.send(crate::events::Event::OpenPrototype);
+                Ok(None)
+            }
             Command::Quit => {
                 let queue = self.queue.queue.read().unwrap();
                 self.config.with_state_mut(move |s| {
@@ -558,6 +562,7 @@ impl CommandManager {
         kb.insert("c".into(), vec![Command::Clear]);
         kb.insert("Shift+c".into(), vec![Command::Cast(false)]);
         kb.insert("Shift+r".into(), vec![Command::Radio]);
+        kb.insert("F5".into(), vec![Command::Prototype]);
         kb.insert(
             "Space".into(),
             vec![

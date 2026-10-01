@@ -23,6 +23,7 @@ mod ext_traits;
 mod library;
 mod model;
 mod panic;
+mod prototype;
 mod queue;
 mod recommendations;
 mod search_cache;

@@ -91,6 +91,13 @@ The file accepts the playback, appearance, keybinding, casting, and Spotify app 
 the client. See the [configuration reference](/doc/users.md#configuration) for the shared ncspot
 settings retained by this fork.
 
+## Experimental OpenTUI view
+
+Press **F5** (or `:prototype`) to open the [OpenTUI Now Playing prototype](doc/opentui-prototype.md)
+in a separate desktop terminal. It follows the same playback session and offers transport,
+radio, Discovery, and Up Next controls. **F5**, **Esc**, or **q** in that window closes only the
+prototype. Fedora packages include its standalone `resonance-opentui` executable.
+
 ## Local radio and diagnostics
 
 The Now Playing Discovery dial goes from familiar favorites (0) to locally

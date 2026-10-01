@@ -160,6 +160,8 @@ pub enum Command {
     Radio,
     /// Show the local radio recommendation diagnostics report.
     RadioDebug,
+    /// Open the experimental OpenTUI Now Playing frontend.
+    Prototype,
     /// Set the local radio exploration level, or open its selector.
     Discovery(Option<u8>),
     Redraw,
@@ -237,6 +239,7 @@ impl fmt::Display for Command {
             | Self::Logout
             | Self::Radio
             | Self::RadioDebug
+            | Self::Prototype
             | Self::QuickSearch
             | Self::Reconnect
             | Self::Redraw => vec![],
@@ -293,6 +296,7 @@ impl Command {
             Self::ShowRecommendations(_) => "similar",
             Self::Radio => "radio",
             Self::RadioDebug => "radio-debug",
+            Self::Prototype => "prototype",
             Self::Discovery(_) => "discovery",
             Self::Redraw => "redraw",
             Self::Execute(_) => "exec",
@@ -803,6 +807,7 @@ pub fn parse(input: &str) -> Result<Vec<Command>, CommandParseError> {
                 }
                 "radio" => Command::Radio,
                 "radio-debug" => Command::RadioDebug,
+                "prototype" => Command::Prototype,
                 "discovery" => {
                     let level = match args.first() {
                         None => None,
@@ -886,5 +891,18 @@ mod tests {
         assert!(parse("discovery nope").is_err());
         assert!(parse("discovery 101").is_err());
         assert!(parse("discovery -1").is_err());
+    }
+}
+
+#[cfg(test)]
+mod prototype_tests {
+    use super::*;
+    #[test]
+    fn prototype_command_round_trips() {
+        assert!(matches!(
+            parse("prototype").unwrap().as_slice(),
+            [Command::Prototype]
+        ));
+        assert_eq!(Command::Prototype.to_string(), "prototype");
     }
 }

@@ -222,6 +222,7 @@ impl Application {
                     ASYNC_RUNTIME.get().unwrap().handle(),
                     runtime_directory.join(format!("{}.sock", ncspot::BIN_NAME)),
                     event_manager.clone(),
+                    queue.clone(),
                 )
                 .map_err(|e| e.to_string())?,
             )
@@ -360,7 +361,7 @@ impl Application {
 
                         #[cfg(unix)]
                         if let Some(ref ipc) = self.ipc {
-                            ipc.publish(&state, self.queue.get_current());
+                            ipc.publish(&self.queue);
                         }
 
                         if state == PlayerEvent::FinishedTrack {
@@ -383,6 +384,28 @@ impl Application {
                                 .expect("user data should be set");
                             data.cmd.handle(&mut self.cursive, Command::Quit);
                         };
+                    }
+                    Event::OpenPrototype => {
+                        #[cfg(unix)]
+                        let result = self
+                            .ipc
+                            .as_ref()
+                            .ok_or_else(|| "Local IPC is unavailable for the prototype".to_string())
+                            .and_then(|ipc| {
+                                crate::prototype::open(ipc.path(), self.event_manager.clone())
+                            });
+                        #[cfg(not(unix))]
+                        let result: Result<(), String> =
+                            Err("OpenTUI prototype currently requires a Linux desktop".into());
+                        match result {
+                            Ok(()) => crate::ui::osd::notify(
+                                "OpenTUI Now Playing opened in a separate terminal",
+                            ),
+                            Err(error) => {
+                                log::error!("OpenTUI prototype: {error}");
+                                crate::ui::osd::notify(error);
+                            }
+                        }
                     }
                     Event::IpcInput(input) => match command::parse(&input) {
                         Ok(commands) => {
