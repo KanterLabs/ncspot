@@ -61,7 +61,7 @@ pub fn program_arguments() -> clap::Command {
     clap::Command::new(BIN_NAME)
         .version(env!("VERSION"))
         .author(AUTHOR)
-        .about("cross-platform ncurses Spotify client")
+        .about("KanterLabs Resonance terminal Spotify client")
         .after_help(backends)
         .arg(
             clap::Arg::new("debug")
@@ -78,6 +78,19 @@ pub fn program_arguments() -> clap::Command {
                 .value_name("PATH")
                 .value_parser(PathBufValueParser::new())
                 .help("custom basepath to config/cache files"),
+        )
+        .arg(
+            clap::Arg::new("legacy-ui")
+                .long("legacy-ui")
+                .action(clap::ArgAction::SetTrue)
+                .conflicts_with("headless")
+                .help("Use the retained Cursive interface"),
+        )
+        .arg(
+            clap::Arg::new("headless")
+                .long("headless")
+                .action(clap::ArgAction::SetTrue)
+                .help("Run the playback engine without a terminal interface"),
         )
         .arg(
             clap::Arg::new("config")

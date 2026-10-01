@@ -139,7 +139,7 @@ impl Spotify {
             credentials: Credentials::with_password("test_user", "test_pass"),
             cfg,
             status: Arc::new(RwLock::new(PlayerEvent::Stopped)),
-            api: WebApi::new(),
+            api: WebApi::new_offline_for_test(),
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),

@@ -1,28 +1,71 @@
-# Resonance OpenTUI prototype
+# Resonance OpenTUI workspace
 
-This is the KanterLabs Resonance now-playing surface for ncspot. It uses
-`@opentui/core` directly and talks to one existing ncspot Unix IPC socket. It
-does not read Spotify credentials or call a network API. Album art stays local
-to the prototype as a generated signal tile; the Rust status may still provide
-`cover_url` for a later cached-art pass.
+This is KanterLabs Resonance's full terminal workspace, the default frontend on Unix. Resonance
+is built on ncspot by Henrik Friedrichsen and contributors, with the original license and
+attribution retained. The historical `prototype/opentui` directory now contains the complete
+workspace: Now Playing, Queue, Library, Search, Browse, Playlists, Podcasts, Radio, Settings,
+Help, and Cast.
 
-From this directory, install Bun 1.4.2 (the worker used
-`.tools/bun-linux-x64/bun`) and run:
+Rust owns authentication, librespot playback, queue/radio state, library caches, and persisted
+config/data. This frontend uses `@opentui/core` and the versioned local Unix socket API; it does
+not access Spotify credentials or call Spotify directly. Windows currently uses the legacy Rust
+Cursive interface.
+
+## Build and run
+
+Use the repository's pinned Bun 1.4.2:
 
 ```sh
-PATH="$PWD/.tools/bun-linux-x64:$PATH" bun install --frozen-lockfile
-PATH="$PWD/.tools/bun-linux-x64:$PATH" bun run typecheck
-PATH="$PWD/.tools/bun-linux-x64:$PATH" bun test
-PATH="$PWD/.tools/bun-linux-x64:$PATH" bun run build
+bun install --frozen-lockfile
+bun run typecheck
+bun test
+bun run build
+./dist/resonance-opentui --demo
 ```
 
-The standalone binary is `dist/resonance-opentui`. Use `--socket PATH` for a
-live ncspot session, `--demo` for an offline preview, and `--smoke` for a
-non-interactive parser/command check. The socket client never reconnects after
-disconnecting, so a new ncspot process cannot be controlled accidentally.
+`dist/resonance-opentui` is standalone. Install it beside the Rust `resonance` executable for the
+default launcher; Bun is needed for development/building only. Fedora archives include both
+executables, the legacy `ncspot` alias, and dependency notices. Restart Resonance after updates.
 
+```sh
+resonance                          # engine plus workspace
+resonance --headless               # Rust backend only
+resonance --legacy-ui              # retained ncspot interface
+resonance-opentui --socket PATH    # attach to an existing backend
+resonance-opentui --demo --route radio --theme dark --reduced-motion
+resonance-opentui --smoke          # parser/API fixture check
+```
 
-The default appearance is a macOS Liquid Glass inspired light theme. Press **L** or
-click the header appearance control to toggle dark mode. Live sessions remember
-the choice; `--demo` is an unsaved preview. `--theme light|dark` overrides the
-initial appearance. Glass is approximated with terminal colors and layered borders.
+A launched workspace closes its managed engine when it exits. A manually attached frontend
+closes independently; it never automatically reconnects after losing the original instance.
+`RESONANCE_OPENTUI_BIN` selects an absolute frontend executable path for the Rust launcher.
+
+## Controls and rendering
+
+Use 1–9 for Now Playing, Queue, Library, Search, Playlists, Podcasts, Radio, Settings, and Cast;
+B for Browse and ? for Help. Space toggles playback, Shift+R starts radio, L changes appearance,
+: opens commands, and q/F5/Ctrl+C quits. Esc cancels prompts or returns to Now Playing. Focused
+inputs capture text; individual screens show their action keys. Lists support keyboard navigation,
+mouse selection and double-click activation.
+
+Live sessions save light/dark and reduced-motion preferences separately from Rust settings. Demo
+previews do not save them. Now Playing shows sampled audio bands when supplied by Rust and labels
+its fallback **Ambient · playback progress**. Reduced motion disables animation interpolation;
+status still updates. Cover images currently use initials.
+
+## API and debug behavior
+
+[workspace/contracts.ts](src/workspace/contracts.ts) defines route names and the RPC vocabulary.
+Requests are newline JSON tagged `resonance`, version 1, with IDs for response correlation.
+Responses identify the engine instance. Queue edits use exact revisions and per-occurrence entry
+IDs; stale mutations fail instead of acting on a changed selection. Playlist removal validates
+position/identity. Refresh after a stale selection or timed-out mutation before retrying.
+
+`--debug FILE` logs method, outcome/error code, and elapsed timing without parameters. The Rust
+launcher passes a `.ui.log` companion when backend `--debug` is enabled. Local radio selection
+uses cached metadata/history and never calls Spotify recommendation endpoints. Rust's existing
+configuration, caches, credentials and data directories remain authoritative.
+
+See the [workspace guide](../../doc/opentui-prototype.md) for installation, all routes, lifecycle,
+preferences, and packaging. Retain ncspot's BSD-2-Clause attribution and OpenTUI/bundled dependency
+license notices when distributing builds.

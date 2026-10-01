@@ -75,6 +75,68 @@ pub fn begin_startup_clock() {
     STARTUP.get_or_init(Instant::now);
 }
 
+/// Initialize the runtime once for either terminal or headless execution.
+pub fn ensure_runtime() -> Result<(), Box<dyn Error>> {
+    if ASYNC_RUNTIME.get().is_none() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        // Another initializer may have won the race; its runtime is equally usable.
+        let _ = ASYNC_RUNTIME.set(runtime);
+    }
+    Ok(())
+}
+
+/// Shared authentication and session startup, before any frontend owns stdout.
+pub(crate) fn initialize_session(
+    configuration_file_path: Option<String>,
+) -> Result<(Arc<Config>, EventManager, Spotify), Box<dyn Error>> {
+    ensure_runtime()?;
+
+    mark_startup_phase("runtime ready");
+
+    let configuration = Arc::new(Config::new(configuration_file_path));
+    authentication::configure(
+        configuration.values().spotify_client_id.as_deref(),
+        configuration.values().spotify_redirect_uri.as_deref(),
+    )?;
+    mark_startup_phase("configuration read");
+
+    // Connect to Spotify before the terminal is taken over, because a rejected login has to
+    // be answered on stdout. The Web API token is not fetched here: it is renewed on demand
+    // by the first call that needs one, all of which happen off this thread.
+    let event_manager = EventManager::new();
+    let mut credentials = authentication::get_credentials()?;
+
+    // Only prompts when there is no Web API token to renew at all, which is the first run.
+    if let Err(e) = authentication::ensure_rspotify_token() {
+        error!("Failed to get rspotify token: {e}");
+    }
+    mark_startup_phase("credentials ready");
+
+    println!("Connecting to Spotify..");
+
+    let spotify = loop {
+        match spotify::Spotify::new(
+            event_manager.clone(),
+            credentials.clone(),
+            configuration.clone(),
+        ) {
+            Ok(spotify) => break spotify,
+            Err(error) => {
+                // A refused session, as opposed to one that couldn't be opened at all, is
+                // answered by offering a fresh login.
+                let session_error = error.downcast::<SessionError>()?;
+                credentials = authentication::credentials_prompt(Some(session_error.0))?;
+            }
+        }
+    };
+
+    mark_startup_phase("spotify session open");
+
+    Ok((configuration, event_manager, spotify))
+}
+
 /// The representation of an ncspot application.
 pub struct Application {
     /// The music queue which controls playback order.
@@ -100,57 +162,10 @@ impl Application {
         // Things here may cause the process to abort; we must do them before creating curses
         // windows otherwise the error message will not be seen by a user
 
-        ASYNC_RUNTIME
-            .set(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-
-        mark_startup_phase("runtime ready");
-
-        let configuration = Arc::new(Config::new(configuration_file_path));
-        authentication::configure(
-            configuration.values().spotify_client_id.as_deref(),
-            configuration.values().spotify_redirect_uri.as_deref(),
-        )?;
-        let theme = configuration.build_theme();
-        mark_startup_phase("configuration read");
-
-        // Connect to Spotify before the terminal is taken over, because a rejected login has to
-        // be answered on stdout. The Web API token is not fetched here: it is renewed on demand
-        // by the first call that needs one, all of which happen off this thread.
-        let event_manager = EventManager::new();
-        let mut credentials = authentication::get_credentials()?;
-
-        // Only prompts when there is no Web API token to renew at all, which is the first run.
-        if let Err(e) = authentication::ensure_rspotify_token() {
-            error!("Failed to get rspotify token: {e}");
-        }
-        mark_startup_phase("credentials ready");
-
-        println!("Connecting to Spotify..");
-
         #[allow(unused_mut)]
-        let mut spotify = loop {
-            match spotify::Spotify::new(
-                event_manager.clone(),
-                credentials.clone(),
-                configuration.clone(),
-            ) {
-                Ok(spotify) => break spotify,
-                Err(error) => {
-                    // A refused session, as opposed to one that couldn't be opened at all, is
-                    // answered by offering a fresh login.
-                    let session_error = error.downcast::<SessionError>()?;
-                    credentials = authentication::credentials_prompt(Some(session_error.0))?;
-                }
-            }
-        };
-
-        mark_startup_phase("spotify session open");
+        let (configuration, event_manager, mut spotify) =
+            initialize_session(configuration_file_path)?;
+        let theme = configuration.build_theme();
 
         // DON'T USE STDOUT AFTER THIS CALL!
         let mut cursive = create_cursive().map_err(|error| error.to_string())?;
@@ -384,6 +399,11 @@ impl Application {
                                 .expect("user data should be set");
                             data.cmd.handle(&mut self.cursive, Command::Quit);
                         };
+                    }
+                    Event::Shutdown => {
+                        if let Some(data) = self.cursive.user_data::<UserData>().cloned() {
+                            data.cmd.handle(&mut self.cursive, Command::Quit);
+                        }
                     }
                     Event::OpenPrototype => {
                         #[cfg(unix)]

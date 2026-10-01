@@ -101,7 +101,11 @@ pub fn attach(events: &EventManager) {
 pub fn notify(message: impl Into<String>) {
     let events = notifier().read().unwrap().clone();
     if let Some(events) = events {
-        flash(Flash::Notice(message.into()), &events);
+        let message = message.into();
+        events.notify(message.clone());
+        if events.has_cursive() {
+            flash(Flash::Notice(message), &events);
+        }
     }
 }
 

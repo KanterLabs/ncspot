@@ -30,6 +30,12 @@ pub struct Album {
 }
 
 impl Album {
+    /// Only expose cached children when the known album total confirms completeness.
+    pub(crate) fn complete_tracks(&self) -> Option<&[Track]> {
+        let tracks = self.tracks.as_deref()?;
+        (self.total_tracks == Some(tracks.len())).then_some(tracks)
+    }
+
     pub fn load_all_tracks(&mut self, spotify: Spotify) {
         if self.tracks.is_some() && self.tracks.as_ref().map(|t| t.len()) == self.total_tracks {
             return;
@@ -37,7 +43,9 @@ impl Album {
 
         if let Some(ref album_id) = self.id {
             let mut collected_tracks = Vec::new();
+            let total;
             if let Ok(full_album) = spotify.api.album(album_id) {
+                total = full_album.tracks.total as usize;
                 let mut tracks_result = Some(full_album.tracks.clone());
                 while let Some(ref tracks) = tracks_result {
                     for t in &tracks.items {
@@ -50,21 +58,27 @@ impl Album {
                     tracks_result = match tracks.next {
                         Some(_) => {
                             debug!("requesting tracks again..");
-                            spotify
-                                .api
-                                .album_tracks(
-                                    album_id,
-                                    50,
-                                    tracks.offset + tracks.items.len() as u32,
-                                )
-                                .ok()
+                            match spotify.api.album_tracks(
+                                album_id,
+                                50,
+                                tracks.offset + tracks.items.len() as u32,
+                            ) {
+                                Ok(page) => Some(page),
+                                Err(_) => return, // Keep the previous cache and known total.
+                            }
                         }
                         None => None,
                     }
                 }
+            } else {
+                return;
             }
 
-            self.total_tracks = Some(collected_tracks.len());
+            if collected_tracks.len() != total {
+                return;
+            }
+
+            self.total_tracks = Some(total);
             self.tracks = Some(collected_tracks);
         }
     }

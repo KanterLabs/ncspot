@@ -34,6 +34,8 @@ const RATE_LIMIT_GRACE: Duration = Duration::from_secs(1);
 /// Convenient wrapper around the rspotify web API functionality.
 #[derive(Clone)]
 pub struct WebApi {
+    #[cfg(test)]
+    offline_for_test: bool,
     /// Rspotify web API.
     api: AuthCodePkceSpotify,
     /// The username of the logged in user.
@@ -62,6 +64,8 @@ impl Default for WebApi {
             config,
         );
         Self {
+            #[cfg(test)]
+            offline_for_test: false,
             api,
             user: None,
             worker_channel: Arc::new(RwLock::new(None)),
@@ -75,6 +79,14 @@ impl Default for WebApi {
 impl WebApi {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Explicit disconnected test worker mode; ordinary WebApi instances keep real behavior.
+    #[cfg(test)]
+    pub fn new_offline_for_test() -> Self {
+        let mut api = Self::new();
+        api.offline_for_test = true;
+        api
     }
 
     /// Set the username for use with the API.
@@ -170,6 +182,10 @@ impl WebApi {
     where
         F: Fn(&AuthCodePkceSpotify) -> ClientResult<R>,
     {
+        #[cfg(test)]
+        if self.offline_for_test {
+            return None;
+        }
         // Inside a rate limit every request is refused, and sending them anyway only
         // keeps the limit going; callers that can come back later ask for the wait.
         if let Some(wait) = self.rate_limit_wait() {
@@ -352,6 +368,16 @@ impl WebApi {
         result.map(|r| r.id.id().to_string()).ok_or(())
     }
 
+    /// Rename a playlist through the same retry and rate limit policy as other mutations.
+    pub fn rename_playlist(&self, id: &str, name: &str) -> Result<(), ()> {
+        let id = PlaylistId::from_id(id).map_err(|_| ())?;
+        self.api_with_retry(|api| {
+            api.playlist_change_detail(id.as_ref(), Some(name), None, None, None)
+        })
+        .map(|_| ())
+        .ok_or(())
+    }
+
     /// Fetch the album with the given `album_id`.
     pub fn album(&self, album_id: &str) -> Result<FullAlbum, ()> {
         debug!("fetching album {album_id}");
@@ -436,6 +462,42 @@ impl WebApi {
         ApiResult::new(MAX_LIMIT, Arc::new(fetch_page))
     }
 
+    /// A raw-position playlist page; unavailable entries keep their original positions.
+    pub fn playlist_tracks_page(
+        &self,
+        playlist_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<ApiPage<Playable>, ()> {
+        let id = PlaylistId::from_id(playlist_id).map_err(|_| ())?;
+        self.api_with_retry(|api| {
+            api.playlist_items_manual(
+                id.as_ref(),
+                None,
+                Some(Market::FromToken),
+                Some(limit),
+                Some(offset),
+            )
+        })
+        .map(|page| ApiPage {
+            offset: page.offset,
+            total: page.total,
+            items: page
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    let playable = item.item.as_ref().filter(|item| !item.is_unknown())?;
+                    let mut playable: Playable = playable.into();
+                    playable.set_added_at(item.added_at);
+                    playable.set_list_index(page.offset as usize + index);
+                    Some(playable)
+                })
+                .collect(),
+        })
+        .ok_or(())
+    }
+
     /// Get the tracks in the playlist given by `playlist_id`.
     pub fn user_playlist_tracks(&self, playlist_id: &str) -> ApiResult<Playable> {
         const MAX_LIMIT: u32 = 100;
@@ -457,7 +519,8 @@ impl WebApi {
                         items: page
                             .items
                             .iter()
-                            .filter(|pt| {
+                            .enumerate()
+                            .filter(|(_, pt)| {
                                 if let Some(t) = pt.item.as_ref()
                                     && !t.is_unknown()
                                 {
@@ -467,7 +530,6 @@ impl WebApi {
                                     false
                                 }
                             })
-                            .enumerate()
                             .flat_map(|(index, pt)| {
                                 pt.item.as_ref().map(|t| {
                                     let mut playable: Playable = t.into();

@@ -1,187 +1,119 @@
 import { createCliRenderer } from "@opentui/core";
-import { mountResonance } from "./app.js";
-import { DemoTransport, IpcClient, type CommandTransport } from "./ipc.js";
+import { appendFileSync, closeSync, openSync } from "node:fs";
+import { mountWorkspace } from "./workspace/app.js";
+import { WorkspaceClient, RpcError } from "./workspace/client.js";
+import { DemoApi } from "./workspace/demo.js";
+import { ROUTES, type Params, type Route, type RpcApi } from "./workspace/contracts.js";
+import { readReducedMotion, saveReducedMotion } from "./workspace/preferences.js";
 import { commandForKey } from "./commands.js";
-import { demoStatus, parseStatus } from "./status.js";
+import { parseStatus } from "./status.js";
 import { DEFAULT_THEME, isThemeName, paletteForTheme, type ThemeName } from "./theme.js";
 import { readThemePreference, saveThemePreference } from "./theme-store.js";
 
-const usage = `Resonance OpenTUI prototype
+const usage = `Resonance OpenTUI
 
 Usage:
-  resonance-opentui --socket PATH
-  resonance-opentui --demo
-  resonance-opentui --theme light|dark   choose the initial palette
-  resonance-opentui --smoke
+  resonance                          launch engine and interface
+  resonance --legacy-ui              retained Cursive interface
+  resonance --headless               engine only
+  resonance-opentui --socket PATH     attach to an existing engine
+  resonance-opentui --demo            offline interactive preview
+  --theme light|dark                  initial appearance
+  --route ROUTE                      initial screen
+  --reduced-motion                   disable ambient animation
+  --debug FILE                       write redacted request timings
+  --smoke                            validate parser and API fixtures
 
-Keys:
-  space / enter  play or pause       ←/→ or p/n  previous / next
-  r              local radio          d           cycle discovery
-  l              toggle light / dark (saved for the next launch)
-  +/- or ↑/↓     volume               q / Esc / F5 close this prototype
+1 Play · 2 Queue · 3 Library · 4 Search · 5 Playlists · 6 Podcasts
+7 Radio · 8 Settings · 9 Cast · B Browse · ? Help
+Space play/pause · Shift+R radio · L appearance · : commands · q quit
+Focused inputs capture these keys; Escape cancels or returns.
 `;
-
-export interface CliOptions {
-  socket?: string;
-  demo: boolean;
-  smoke: boolean;
-  theme?: ThemeName;
-}
-
+export interface CliOptions { socket?: string; demo: boolean; smoke: boolean; theme?: ThemeName; route?: Route; reducedMotion?: boolean; debug?: string }
 export function parseArgs(args: string[]): CliOptions | "help" | string {
   const options: CliOptions = { demo: false, smoke: false };
-  for (let index = 0; index < args.length; index += 1) {
+  for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === "--help" || arg === "-h") return "help";
-    if (arg === "--demo") {
-      options.demo = true;
-      continue;
-    }
-    if (arg === "--smoke") {
-      options.smoke = true;
-      continue;
-    }
-    if (arg === "--theme") {
-      const value = args[index + 1];
-      if (!value || value.startsWith("-")) return "--theme requires light or dark";
-      if (!isThemeName(value)) return "--theme must be light or dark";
-      options.theme = value;
-      index += 1;
-      continue;
-    }
-    if (arg === "--socket" || arg === "-s") {
-      const path = args[index + 1];
-      if (!path || path.startsWith("-")) return "--socket requires a Unix socket path";
-      options.socket = path;
-      index += 1;
+    if (arg === "--demo") { options.demo = true; continue; }
+    if (arg === "--smoke") { options.smoke = true; continue; }
+    if (arg === "--reduced-motion") { options.reducedMotion = true; continue; }
+    if (["--theme", "--socket", "-s", "--route", "--debug"].includes(arg)) {
+      const value = args[++index];
+      if (!value || value.startsWith("-")) return `${arg} requires a value`;
+      if (arg === "--theme") { if (!isThemeName(value)) return "--theme must be light or dark"; options.theme = value; }
+      else if (arg === "--route") { if (!(ROUTES as readonly string[]).includes(value)) return `--route must be one of ${ROUTES.join(", ")}`; options.route = value as Route; }
+      else if (arg === "--debug") options.debug = value;
+      else options.socket = value;
       continue;
     }
     return `Unknown argument: ${arg}`;
   }
-  if (!options.demo && !options.smoke && !options.socket) {
-    return "Provide --socket PATH, or use --demo for an offline preview";
-  }
+  if (!options.demo && !options.smoke && !options.socket) return "Provide --socket PATH or use --demo";
   if (options.demo && options.socket) return "Choose either --demo or --socket PATH";
   return options;
 }
-
 async function smoke(): Promise<void> {
-  const fixture = JSON.stringify({
-    mode: { Paused: { secs: 91, nanos: 500_000_000 } },
-    playable: {
-      type: "Track",
-      title: "Smoke Signal",
-      artists: ["KanterLabs"],
-      album: "Resonance",
-      duration: 180_000,
-    },
-    prototype: {
-      position_ms: 91_500,
-      discovery: 75,
-      volume_percent: 64,
-      radio_active: true,
-      radio_waiting: false,
-      up_next: [],
-    },
-  });
-  const parsed = parseStatus(fixture);
-  if (!parsed || parsed.playable?.type !== "Track") throw new Error("status parser smoke check failed");
-  const commands = [
-    commandForKey({ name: "space" }),
-    commandForKey({ name: "right" }),
-    commandForKey({ name: "d" }, 75),
-  ];
-  if (commands.join(",") !== "playpause,next,discovery 100") {
-    throw new Error(`command smoke check failed: ${commands.join(",")}`);
-  }
-  process.stdout.write("resonance-opentui smoke: status parser and command mapping OK\n");
+  const parsed = parseStatus({ mode: { Paused: 0 }, playable: null, prototype: { position_ms: 0, discovery: 50, volume_percent: 50, radio_active: false, radio_waiting: false, up_next: [] } });
+  if (!parsed || commandForKey({ name: "space" }) !== "playpause") throw new Error("Status/command smoke check failed");
+  const api = new DemoApi();
+  const page = await api.call<{ items: unknown[] }>("library.list", { kind: "tracks" });
+  if (!page.items.length) throw new Error("API fixture smoke check failed");
+  process.stdout.write("resonance-opentui smoke: status parser, command mapping, and workspace API OK\n");
 }
-
 async function main(): Promise<void> {
-  const parsedArgs = parseArgs(Bun.argv.slice(2));
-  if (parsedArgs === "help") {
-    process.stdout.write(usage);
-    return;
-  }
-  if (typeof parsedArgs === "string") {
-    process.stderr.write(`${parsedArgs}\n\n${usage}`);
-    process.exitCode = 2;
-    return;
-  }
-  if (parsedArgs.smoke) {
-    await smoke();
-    return;
-  }
-
-  // Reading the frontend preference never creates or mutates a file. Demo
-  // mode intentionally starts from light unless explicitly overridden and
-  // does not install a persistence callback.
-  const initialTheme = parsedArgs.theme ?? (parsedArgs.demo ? DEFAULT_THEME : readThemePreference().theme);
-  const persistTheme = parsedArgs.demo
-    ? undefined
-    : (theme: ThemeName): void => {
-        const result = saveThemePreference(theme);
-        if (!result.ok) {
-          const message = result.error ?? "unable to save theme preference";
-          throw new Error(message);
-        }
-      };
-
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: true,
-    targetFps: 30,
-    useMouse: true,
-    backgroundColor: paletteForTheme(initialTheme).background,
-    onDestroy: () => undefined,
-  });
-
-  let transport: CommandTransport;
-  let app: ReturnType<typeof mountResonance>;
-  let demoTimer: ReturnType<typeof setInterval> | undefined;
-
-  if (parsedArgs.demo) {
-    transport = new DemoTransport();
-    app = mountResonance(renderer, {
-      transport,
-      connected: false,
-      connectionMessage: "offline preview",
-      theme: initialTheme,
-      onThemeChange: persistTheme,
-    });
-    app.setStatus(demoStatus());
-    demoTimer = setInterval(() => app.tick(), 250);
+  const parsed = parseArgs(Bun.argv.slice(2));
+  if (parsed === "help") { process.stdout.write(usage); return; }
+  if (typeof parsed === "string") { process.stderr.write(`${parsed}\n\n${usage}`); process.exitCode = 2; return; }
+  if (parsed.smoke) { await smoke(); return; }
+  const theme = parsed.theme ?? (parsed.demo ? DEFAULT_THEME : readThemePreference().theme);
+  let descriptor: number | undefined;
+  if (parsed.debug) descriptor = openSync(parsed.debug, "a", 0o600);
+  const trace = (message: string) => { if (descriptor !== undefined) appendFileSync(descriptor, `${new Date().toISOString()} ${message}\n`); };
+  const renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 30, useMouse: true, backgroundColor: paletteForTheme(theme).background });
+  let app: ReturnType<typeof mountWorkspace>;
+  let client: WorkspaceClient | undefined;
+  let demo: DemoApi | undefined;
+  let transport: RpcApi;
+  if (parsed.demo) {
+    demo = new DemoApi(status => app?.setStatus(status)); transport = demo;
   } else {
-    const client = new IpcClient(parsedArgs.socket!, {
-      onStatus: (status) => app?.setStatus(status),
-      onOpen: () => app?.setConnection(true, "live socket"),
-      onClose: (error) => app?.setConnection(false, error ? `socket error: ${error.message}` : "socket closed"),
-      // Ignore one malformed line and keep listening for the next valid status.
-      onMalformedLine: () => undefined,
+    client = new WorkspaceClient(parsed.socket!, {
+      onStatus: status => app?.setStatus(status),
+      onClose: error => app?.setConnection(false, error ? `Engine error: ${error.message}` : "Engine disconnected; reopen to attach"),
     });
     transport = client;
-    app = mountResonance(renderer, {
-      transport,
-      connected: false,
-      connectionMessage: "connecting",
-      theme: initialTheme,
-      onThemeChange: persistTheme,
-    });
-    try {
-      await client.connect();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      app.setConnection(false, `socket unavailable: ${message}`);
-    }
   }
-
-  const teardown = (): void => {
-    if (demoTimer) clearInterval(demoTimer);
-    app.dispose();
-  };
+  const api: RpcApi = { async call<T>(method: string, params?: Params): Promise<T> {
+    const start = performance.now();
+    try {
+      if (method === "settings.action" && params?.action === "command" && typeof params.command === "string") {
+        const { routeForCommand } = await import("./workspace/bindings.js");
+        if (routeForCommand(params.command) || params.command.startsWith("move ") || ["quit", "q", "x"].includes(params.command.trim())) return await app.command(params.command) as T;
+      }
+      const value = await transport.call<T>(method, params);
+      if (method === "settings.get" && app && value && typeof value === "object") {
+        const settings = value as { values?: { keybindings?: unknown }; bindings?: Record<string, string> };
+        app.setBindings(settings.values?.keybindings); settings.bindings = app.bindings();
+      }
+      trace(`rpc ${method} ok duration_ms=${Math.round(performance.now() - start)}`); return value;
+    }
+    catch (error) { trace(`rpc ${method} error=${error instanceof RpcError ? error.code : "error"} duration_ms=${Math.round(performance.now() - start)}`); throw error; }
+  } };
+  let timer: ReturnType<typeof setInterval> | undefined;
+  app = mountWorkspace(renderer, {
+    api, theme, route: parsed.route,
+    reducedMotion: parsed.reducedMotion ?? (parsed.demo ? false : readReducedMotion()),
+    onThemeChange: parsed.demo ? undefined : value => { const saved = saveThemePreference(value); if (!saved.ok) throw new Error(saved.error); },
+    onReducedMotionChange: parsed.demo ? undefined : saveReducedMotion,
+    onQuit: () => client?.close(),
+  });
+  const teardown = () => { if (timer) clearInterval(timer); app.dispose(); client?.close(); if (descriptor !== undefined) { closeSync(descriptor); descriptor = undefined; } };
   renderer.once("destroy", teardown);
+  if (demo) { app.setStatus(demo.status); app.setConnection(false, "Offline interactive preview"); timer = setInterval(() => demo!.tick(), 1000); }
+  else {
+    try { await client!.connect(); app.setConnection(true, "Live engine"); await api.call("settings.get"); await app.refresh(); }
+    catch (error) { app.setConnection(false, `Unable to attach: ${error instanceof Error ? error.message : error}`); app.notify("Engine unavailable. Close this window and reopen Resonance; --legacy-ui remains available."); }
+  }
 }
-
-main().catch((error) => {
-  process.stderr.write(`resonance-opentui: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+if (import.meta.main) main().catch(error => { process.stderr.write(`resonance-opentui: ${error instanceof Error ? error.message : error}\n`); process.exitCode = 1; });

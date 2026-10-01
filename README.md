@@ -6,9 +6,10 @@
   <img alt="Resonance search tab" src="images/screenshot.png">
 </div>
 
-Resonance is a KanterLabs-maintained terminal client for Spotify. It is built in Rust with
-[librespot](https://github.com/librespot-org/librespot), and keeps the small, keyboard-focused
-interface that made the upstream project useful on servers, laptops, and the BSDs.
+Resonance is a KanterLabs-maintained terminal client for Spotify. Its Rust backend uses
+[librespot](https://github.com/librespot-org/librespot) for playback, with an OpenTUI workspace
+as the default interface on Unix. The retained ncspot Cursive interface is available with
+`--legacy-ui`; Windows currently uses that interface.
 
 This fork carries substantial code and design from [ncspot](https://github.com/hrkfdn/ncspot),
 the original project by Henrik Friedrichsen and contributors. Please see the upstream project for
@@ -21,7 +22,8 @@ free accounts.
 ## Features
 
 - Browse tracks, albums, playlists, genres, podcasts, and search results
-- Vim keybindings and a low resource footprint
+- Keyboard and mouse navigation across a complete OpenTUI workspace
+- Light and dark appearance, reduced motion, and sampled audio visualization
 - IPC socket and MPRIS controls for desktop integrations
 - Spotify Connect and Roku casting
 - A local radio station ranked from cached library metadata
@@ -29,21 +31,29 @@ free accounts.
 
 ## Installation
 
-KanterLabs has not published Resonance packages yet. Build it from this repository with a current
-[Rust toolchain](https://www.rust-lang.org/tools/install):
+Build the Rust backend and the standalone OpenTUI executable from this repository with a
+current [Rust toolchain](https://www.rust-lang.org/tools/install) and Bun 1.4.2:
 
 ```sh
 cargo build --release
+cd prototype/opentui
+bun install --frozen-lockfile
+bun run build
+cd ../..
+install -m 0755 prototype/opentui/dist/resonance-opentui target/release/resonance-opentui
 ./target/release/resonance
 ```
 
-The build also provides a compatibility executable at `target/release/ncspot` for existing update
-scripts. Both commands run Resonance and use the same configuration and authentication identity;
-`resonance` is the canonical command for new integrations.
+Keep `resonance` and `resonance-opentui` together when installing. The packaged frontend is
+standalone and does not require Bun at runtime. The Rust build also provides `ncspot` as a legacy
+executable alias; it runs Resonance with the same configuration and authentication identity.
+Fedora release archives contain all three executables and dependency notices. Restart Resonance
+after updating so the backend and frontend use the same version.
 
-The upstream [user guide](/doc/users.md) contains ncspot's historical package and distribution
-instructions. Those channels are not release channels for Resonance; use the source build above
-until a Resonance package is published.
+Use `resonance --headless` to run only the Rust engine, or `resonance --legacy-ui` for the retained
+Cursive interface. Windows currently uses the legacy interface. The upstream
+[user guide](/doc/users.md) retains ncspot's historical distribution instructions; those package
+channels are separate from KanterLabs' Resonance builds.
 
 ## Spotify app setup
 
@@ -91,29 +101,38 @@ The file accepts the playback, appearance, keybinding, casting, and Spotify app 
 the client. See the [configuration reference](/doc/users.md#configuration) for the shared ncspot
 settings retained by this fork.
 
-## Experimental OpenTUI view
+## OpenTUI workspace
 
-Press **F5** (or `:prototype`) to open the [OpenTUI Now Playing prototype](doc/opentui-prototype.md)
-in a separate desktop terminal. It follows the same playback session and offers transport,
-radio, Discovery, and Up Next controls. **F5**, **Esc**, or **q** in that window closes only the
-prototype. **L** toggles the Liquid Glass inspired light theme and dark theme; the choice is
-remembered. Fedora packages include its standalone `resonance-opentui` executable.
+`resonance` starts the Rust playback engine and OpenTUI in the same terminal on Unix. Closing this
+launched interface stops the engine and saves queue and listening state. An interface attached
+manually to `resonance --headless` closes independently of that engine. Authentication, audio,
+library caches, queue, radio, and persisted user data remain owned by Rust. Existing ncspot
+configuration and cache paths continue to be used when present.
+
+The workspace includes Now Playing, Queue, Library, Search, Browse, Playlists, Podcasts, Radio,
+Settings, Help, and Cast. Use **1–9**, **B**, and **?** to switch screens, **Space** to play/pause,
+**Shift+R** to start radio, **L** to change appearance, **:** for commands, and **q** or **Ctrl+C**
+to quit. Focused text inputs capture normal typing. **Esc** cancels a prompt or returns to Now
+Playing. Each screen shows its own action keys.
+
+Light/dark preferences and reduced motion are saved separately from Rust configuration. Now
+Playing displays sampled audio bands when Rust supplies them; otherwise its graphic is labeled
+**Ambient · playback progress**. Cover art currently uses initials. See the
+[workspace guide](doc/opentui-prototype.md) for routes, controls, attachment, and debug logging.
 
 ## Local radio and diagnostics
 
-The Now Playing Discovery dial goes from familiar favorites (0) to locally
-unplayed songs and unfamiliar artists (100), with a balanced default of 50.
-Click its arrows or use `:discovery 75`, then press **Shift+R** to start radio.
-After clicking the dial, left/right arrows adjust it; the mouse wheel also works
-over the dial. Changing it leaves playback and the existing queue alone. A brief animated
-transition shows the new level; `visualizer_fps = 0` disables animation.
+The Radio screen's Discovery level goes from familiar favorites (0) to locally unplayed songs
+and unfamiliar artists (100), with a balanced default of 50. Use left/right or **[ / ]** to adjust
+it, or enter `:discovery 75`. Changing the level leaves playback and existing queue entries alone.
+Press **Shift+R** to start radio from the current song.
 
 Ranking uses cached metadata and local listening history, with no Spotify
 recommendation calls. “Unplayed” refers to this device’s history. When history
 is sparse, saved songs provide a familiarity hint and diagnostics explain any
 shortfall in the requested mix.
 
-Click **Radio** in Now Playing or press **Shift+R** to build a station from metadata already cached
+Use the Radio screen or press **Shift+R** to build a station from metadata already cached
 by Resonance, keeping the current song and playback position. It can warm a station in
 the background while the current track plays and records explainable scores and exclusions for
 debugging. Radio keeps topping up the queue and never automatically repeats a

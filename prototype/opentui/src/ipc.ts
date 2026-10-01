@@ -25,6 +25,9 @@ export class IpcClient {
   private closed = false;
   private opened = false;
   private closeNotified = false;
+  private writes: Uint8Array[] = [];
+  private writeOffset = 0;
+  private queuedBytes = 0;
 
   constructor(path: string, events: IpcClientEvents) {
     this.path = path;
@@ -51,7 +54,9 @@ export class IpcClient {
           data: (_openedSocket, data) => {
             this.receiveBuffer += this.decoder.decode(data, { stream: true });
             this.drainLines();
+            if (this.receiveBuffer.length > 8 * 1024 * 1024) this.fail(new Error("Engine frame exceeds the IPC limit"));
           },
+          drain: () => { this.flushWrites(); },
           close: (_openedSocket, error) => {
             this.opened = false;
             this.socket = null;
@@ -83,9 +88,28 @@ export class IpcClient {
   /** Write exactly one ncspot command line. Returns false when disconnected. */
   send(command: string): boolean {
     if (!this.isOpen || !command.trim()) return false;
-    const bytes = this.socket?.write(`${command.trim()}\n`) ?? -1;
-    return bytes >= 0;
+    const data = new TextEncoder().encode(`${command.trim()}\n`);
+    if (data.length > 1024 * 1024 || this.queuedBytes + data.length > 2 * 1024 * 1024) return false;
+    this.writes.push(data); this.queuedBytes += data.length;
+    return this.flushWrites();
   }
+
+  private flushWrites(): boolean {
+    try {
+      while (this.socket && this.writes.length) {
+        const head = this.writes[0]!;
+        const written = this.socket.write(head, this.writeOffset, head.length - this.writeOffset);
+        if (written < 0) { this.fail(new Error("Engine socket closed while sending")); return false; }
+        if (written === 0) break;
+        this.writeOffset += written; this.queuedBytes -= written;
+        if (this.writeOffset < head.length) break;
+        this.writes.shift(); this.writeOffset = 0;
+      }
+      return !this.closed;
+    } catch (error) { this.fail(error instanceof Error ? error : new Error(String(error))); return false; }
+  }
+
+  private fail(error: Error): void { this.notifyClose(error); this.close(); }
 
   close(): void {
     if (this.closed) return;
@@ -93,6 +117,7 @@ export class IpcClient {
     this.opened = false;
     const socket = this.socket;
     this.socket = null;
+    this.writes = []; this.writeOffset = 0; this.queuedBytes = 0;
     socket?.close();
     this.notifyClose();
   }
@@ -102,6 +127,7 @@ export class IpcClient {
     while (newlineIndex >= 0) {
       const line = this.receiveBuffer.slice(0, newlineIndex).replace(/\r$/, "");
       this.receiveBuffer = this.receiveBuffer.slice(newlineIndex + 1);
+      if (line.length > 8 * 1024 * 1024) { this.fail(new Error("Engine frame exceeds the IPC limit")); return; }
       if (line.trim()) {
         const status = parseStatus(line);
         if (status) this.events.onStatus(status);

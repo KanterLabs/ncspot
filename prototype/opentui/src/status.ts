@@ -42,12 +42,14 @@ export interface PrototypeStatus {
   radio_active: boolean;
   radio_waiting: boolean;
   up_next: Track[];
+  audio?: { bands: number[]; level: number; pulse: number; tempo: number | null };
 }
 
 export interface ParsedStatus {
   mode: PlayerMode;
   playable: Playable | null;
   prototype: PrototypeStatus | null;
+  notifications?: Array<{ id: number; message: string; created_at_ms: number }>;
 }
 
 export interface UiState extends ParsedStatus {
@@ -177,6 +179,12 @@ function parsePrototype(value: unknown): PrototypeStatus | null {
     up_next: Array.isArray(raw.up_next)
       ? raw.up_next.map(parseTrack).filter((track): track is Track => track !== null)
       : [],
+    ...(objectRecord(raw.audio) && Array.isArray(objectRecord(raw.audio)!.bands) ? { audio: {
+      bands: (objectRecord(raw.audio)!.bands as unknown[]).map(value => clamp(finiteNumber(value), 0, 1)),
+      level: clamp(finiteNumber(objectRecord(raw.audio)!.level), 0, 1),
+      pulse: clamp(finiteNumber(objectRecord(raw.audio)!.pulse), 0, 1),
+      tempo: typeof objectRecord(raw.audio)!.tempo === "number" ? finiteNumber(objectRecord(raw.audio)!.tempo) : null,
+    } } : {}),
   };
 }
 
@@ -206,6 +214,10 @@ export function parseStatus(line: string | unknown): ParsedStatus | null {
     mode,
     playable,
     prototype,
+    ...(Array.isArray(raw.notifications) ? { notifications: raw.notifications.filter((entry): entry is {id:number;message:string;created_at_ms:number} => {
+      const notice = objectRecord(entry);
+      return notice !== null && typeof notice.id === "number" && typeof notice.message === "string" && typeof notice.created_at_ms === "number";
+    }) } : {}),
   };
 }
 
@@ -319,4 +331,3 @@ export function demoStatus(index = 0, positionMs = 82_000): ParsedStatus {
     },
   };
 }
-

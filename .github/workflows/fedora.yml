@@ -143,12 +143,13 @@ jobs:
       - name: Running cargo build
         run: cargo build --profile "$PROFILE" --locked
 
-      - name: Build OpenTUI prototype
+      - name: Build and verify OpenTUI workspace
         working-directory: prototype/opentui
         run: |
           bun install --frozen-lockfile
           bun run typecheck
           bun test
+          bun run test/engine-contract.ts
           bun run build
           ./dist/resonance-opentui --smoke
           test -x dist/resonance-opentui

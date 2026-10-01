@@ -41,6 +41,7 @@ pub struct Queue {
     /// The internal data, which doesn't change with shuffle or repeat. This is
     /// the raw data only.
     pub queue: Arc<RwLock<Vec<Playable>>>,
+    rpc_mutation: Mutex<u64>,
     /// The playback order of the queue, as indices into `self.queue`.
     random_order: RwLock<Option<Vec<usize>>>,
     current_track: RwLock<Option<usize>>,
@@ -149,6 +150,7 @@ impl Queue {
             )),
             session_played: Mutex::new(HashSet::new()),
             radio_generated: RwLock::new(HashSet::new()),
+            rpc_mutation: Mutex::new(0),
             played_indices: RwLock::new(HashSet::new()),
             radio: Mutex::new(RadioState::default()),
         }
@@ -169,6 +171,7 @@ impl Queue {
             )),
             session_played: Mutex::new(HashSet::new()),
             radio_generated: RwLock::new(HashSet::new()),
+            rpc_mutation: Mutex::new(0),
             played_indices: RwLock::new(HashSet::new()),
             radio: Mutex::new(RadioState::default()),
         }
@@ -205,11 +208,13 @@ impl Queue {
     /// The index of the previous item in `self.queue` that should be played.
     /// None if at the start of the queue.
     pub fn previous_index(&self) -> Option<usize> {
-        match *self.current_track.read().unwrap() {
+        // Copy and release before taking shuffle order: edits acquire order before current.
+        let current = self.get_current_index();
+        match current {
             Some(mut index) => {
                 let random_order = self.random_order.read().unwrap();
                 if let Some(order) = random_order.as_ref() {
-                    index = order.iter().position(|&i| i == index).unwrap();
+                    index = order.iter().position(|&i| i == index)?;
                 }
 
                 if index > 0 {
@@ -500,6 +505,12 @@ impl Queue {
     /// Insert `track` as the item that should logically follow the currently
     /// playing item, taking into account shuffle status.
     pub fn insert_after_current(&self, track: Playable) {
+        let mut generation = self.rpc_mutation.lock().unwrap();
+        self.insert_after_current_inner(track);
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn insert_after_current_inner(&self, track: Playable) {
         if let Some(index) = self.get_current_index() {
             let mut random_order = self.random_order.write().unwrap();
             if let Some(order) = random_order.as_mut() {
@@ -518,12 +529,18 @@ impl Queue {
             shift_indices_on_insert(&mut self.radio_generated.write().unwrap(), index + 1, 1);
             shift_indices_on_insert(&mut self.played_indices.write().unwrap(), index + 1, 1);
         } else {
-            self.append(track);
+            self.append_inner(track);
         }
     }
 
     /// Add `track` to the end of the queue.
     pub fn append(&self, track: Playable) {
+        let mut generation = self.rpc_mutation.lock().unwrap();
+        self.append_inner(track);
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn append_inner(&self, track: Playable) {
         let mut random_order = self.random_order.write().unwrap();
         if let Some(order) = random_order.as_mut() {
             order.push(order.len());
@@ -574,6 +591,8 @@ impl Queue {
         seed: Option<&str>,
         tracks: &[Playable],
     ) -> Option<(usize, usize)> {
+        let mut generation_guard = self.rpc_mutation.lock().unwrap();
+        *generation_guard = generation_guard.wrapping_add(1);
         let mut random_order = self.random_order.write().unwrap();
         let mut q = self.queue.write().unwrap();
 
@@ -648,6 +667,8 @@ impl Queue {
         tracks: &[Playable],
         after_current: bool,
     ) -> Option<usize> {
+        let mut generation_guard = self.rpc_mutation.lock().unwrap();
+        *generation_guard = generation_guard.wrapping_add(1);
         let radio = self.radio.lock().unwrap();
         if !self.radio_is_current_locked(&radio, generation) {
             return None;
@@ -724,6 +745,12 @@ impl Queue {
     /// Remove the item at `index`. This doesn't take into account shuffle
     /// status, and will literally remove the item at `index` in `self.queue`.
     pub fn remove(&self, index: usize) {
+        let mut generation = self.rpc_mutation.lock().unwrap();
+        self.remove_inner(index);
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn remove_inner(&self, index: usize) {
         let (current, len) = {
             // Use the same order as station insertion and shuffle generation.
             let _station = self.radio.lock().unwrap();
@@ -769,16 +796,129 @@ impl Queue {
 
     /// Clear all the items from the queue and stop playback.
     pub fn clear(&self) {
+        let mut generation = self.rpc_mutation.lock().unwrap();
+        self.clear_inner();
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn clear_inner(&self) {
         self.stop();
 
         let mut random_order = self.random_order.write().unwrap();
         let mut q = self.queue.write().unwrap();
         q.clear();
+        // A concurrent play may have selected an item after stop but before this write lock.
+        // Reset while holding items, matching play's items -> current lock order.
+        *self.current_track.write().unwrap() = None;
         if let Some(o) = random_order.as_mut() {
             o.clear()
         }
         self.radio_generated.write().unwrap().clear();
         self.played_indices.write().unwrap().clear();
+    }
+
+    /// Append and select one exact occurrence atomically with other structural edits.
+    pub fn rpc_append_play(&self, item: Playable) {
+        self.rpc_append_play_many(&[item]);
+    }
+
+    /// Append an entire explicit user context without interleaving radio insertions.
+    pub fn rpc_append_many(&self, items: &[Playable]) {
+        if items.is_empty() {
+            return;
+        }
+        let mut generation = self.rpc_mutation.lock().unwrap();
+        for item in items {
+            self.append_inner(item.clone());
+        }
+        *generation = generation.wrapping_add(1);
+    }
+
+    /// Append a complete explicit user context and select its first exact occurrence atomically.
+    pub fn rpc_append_play_many(&self, items: &[Playable]) {
+        if items.is_empty() {
+            return;
+        }
+        let mut generation = self.rpc_mutation.lock().unwrap();
+        let index = self.len();
+        for item in items {
+            self.append_inner(item.clone());
+        }
+        self.play(index, false, false);
+        *generation = generation.wrapping_add(1);
+    }
+
+    /// A revision identifies one exact structural snapshot, including duplicate occurrences.
+    pub fn rpc_snapshot(&self) -> (String, Vec<Playable>, Option<usize>) {
+        let generation = self.rpc_mutation.lock().unwrap();
+        let items = self.queue.read().unwrap().clone();
+        let revision = Self::rpc_revision(*generation, &items);
+        (revision, items, self.get_current_index())
+    }
+
+    fn rpc_revision(generation: u64, items: &[Playable]) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        generation.hash(&mut hash);
+        for item in items {
+            item.uri().hash(&mut hash);
+        }
+        format!("{:016x}", hash.finish())
+    }
+
+    /// Validate and mutate under the same structural lock used by queue and radio edits.
+    pub fn rpc_checked_action(
+        &self,
+        action: &str,
+        revision: &str,
+        entry_id: Option<&str>,
+        to: Option<usize>,
+    ) -> Result<(), String> {
+        let mut generation = self.rpc_mutation.lock().unwrap();
+        let (current_revision, len) = {
+            let items = self.queue.read().unwrap();
+            (Self::rpc_revision(*generation, &items), items.len())
+        };
+        if revision != current_revision {
+            return Err("Queue changed; refresh before editing".into());
+        }
+        let index = if action == "clear" {
+            0
+        } else {
+            let prefix = format!("{revision}:");
+            entry_id
+                .and_then(|id| id.strip_prefix(&prefix))
+                .and_then(|index| index.parse::<usize>().ok())
+                .filter(|index| *index < len)
+                .ok_or_else(|| "Queue entry no longer exists".to_string())?
+        };
+        match action {
+            "play" => {
+                let active = self.radio.lock().unwrap().active;
+                let consumed = self.played_indices.read().unwrap().contains(&index);
+                let automatic = self.radio_generated.read().unwrap().contains(&index);
+                if consumed && (active || automatic) {
+                    return Err(
+                        "Entry already played this session; append another occurrence to replay"
+                            .into(),
+                    );
+                }
+                self.play(index, false, false);
+            }
+            "remove" => self.remove_inner(index),
+            "clear" => self.clear_inner(),
+            "move" => {
+                let destination = to
+                    .filter(|to| *to < len)
+                    .ok_or_else(|| "Destination out of bounds".to_string())?;
+                self.shift_inner(index, destination);
+            }
+            _ => return Err("Unsupported queue mutation".into()),
+        }
+        if action != "play" {
+            *generation = generation.wrapping_add(1);
+        }
+        Ok(())
     }
 
     /// The amount of items in `self.queue`.
@@ -788,6 +928,12 @@ impl Queue {
 
     /// Shift the item at `from` in `self.queue` to `to`.
     pub fn shift(&self, from: usize, to: usize) {
+        let mut generation = self.rpc_mutation.lock().unwrap();
+        self.shift_inner(from, to);
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn shift_inner(&self, from: usize, to: usize) {
         let mut random_order = self.random_order.write().unwrap();
         let mut queue = self.queue.write().unwrap();
         let item = queue.remove(from);
@@ -1043,7 +1189,9 @@ impl Queue {
         let mut order: Vec<usize> = Vec::with_capacity(q.len());
         let mut random: Vec<usize> = (0..q.len()).collect();
 
-        if let Some(current) = *self.current_track.read().unwrap() {
+        if let Some(current) =
+            (*self.current_track.read().unwrap()).filter(|current| *current < q.len())
+        {
             order.push(current);
             random.remove(current);
         }
@@ -1071,11 +1219,18 @@ impl Queue {
         match event {
             QueueEvent::PreloadTrackRequest => {
                 if let Some(next_index) = self.next_index() {
-                    let track = self.queue.read().unwrap()[next_index].clone();
-                    debug!("Preloading track {track} as requested by librespot");
-                    self.spotify.preload(&track);
+                    self.preload_at(next_index);
                 }
             }
+        }
+    }
+
+    /// The candidate index may become stale while an RPC removes or clears entries.
+    fn preload_at(&self, index: usize) {
+        let track = self.queue.read().unwrap().get(index).cloned();
+        if let Some(track) = track {
+            debug!("Preloading track {track} as requested by librespot");
+            self.spotify.preload(&track);
         }
     }
 
@@ -1159,6 +1314,82 @@ mod tests {
             // Must be Some(true) so Spotify::load() doesn't fire events.
             is_playable: Some(true),
         })
+    }
+
+    #[test]
+    fn preload_tolerates_entry_removed_after_next_index_snapshot() {
+        let queue = make_queue(vec![make_track(1), make_track(2)], Some(0));
+        let candidate = queue.next_index().unwrap();
+        assert_eq!(candidate, 1);
+        queue.remove(candidate);
+        queue.preload_at(candidate);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.get_current_index(), Some(0));
+    }
+
+    #[test]
+    fn previous_index_tolerates_current_absent_from_new_shuffle_snapshot() {
+        let queue = make_queue(vec![make_track(1), make_track(2), make_track(3)], Some(1));
+        // Models the order after an edit between current snapshot and order acquisition.
+        *queue.random_order.write().unwrap() = Some(vec![0, 2]);
+        assert_eq!(queue.previous_index(), None);
+    }
+
+    #[test]
+    fn shuffle_and_clear_tolerate_stale_current_on_empty_queue() {
+        let queue = make_queue(vec![], Some(3));
+        queue.generate_random_order();
+        assert_eq!(queue.get_random_order(), Some(vec![]));
+        queue.clear();
+        assert_eq!(queue.get_current_index(), None);
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn rpc_duplicate_occurrences_and_stale_revision() {
+        let queue = make_queue(vec![make_track(1), make_track(1), make_track(2)], None);
+        let (revision, items, _) = queue.rpc_snapshot();
+        assert_eq!(items.len(), 3);
+        let duplicate_id = format!("{revision}:1");
+        queue
+            .rpc_checked_action("remove", &revision, Some(&duplicate_id), None)
+            .unwrap();
+        assert_eq!(queue.len(), 2);
+        assert_eq!(track_id(&queue.queue.read().unwrap()[0]), "id_1");
+        assert_eq!(track_id(&queue.queue.read().unwrap()[1]), "id_2");
+        assert!(
+            queue
+                .rpc_checked_action("remove", &revision, Some(&duplicate_id), None)
+                .is_err()
+        );
+        let (revision, _, _) = queue.rpc_snapshot();
+        assert!(
+            queue
+                .rpc_checked_action("move", &revision, Some(&format!("{revision}:0")), Some(2))
+                .is_err()
+        );
+        queue
+            .rpc_checked_action("move", &revision, Some(&format!("{revision}:0")), Some(1))
+            .unwrap();
+        assert_eq!(track_id(&queue.queue.read().unwrap()[0]), "id_2");
+    }
+
+    #[test]
+    fn rpc_revision_changes_for_identical_duplicate_reorder() {
+        let queue = make_queue(vec![make_track(1), make_track(1)], None);
+        let (before, _, _) = queue.rpc_snapshot();
+        queue.shift(0, 1);
+        let (after, _, _) = queue.rpc_snapshot();
+        assert_ne!(before, after);
+        assert!(
+            queue
+                .rpc_checked_action("clear", &before, None, None)
+                .is_err()
+        );
+        queue
+            .rpc_checked_action("clear", &after, None, None)
+            .unwrap();
+        assert_eq!(queue.len(), 0);
     }
 
     fn track_id(p: &Playable) -> &str {

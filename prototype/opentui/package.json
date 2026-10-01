@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "KanterLabs Resonance now playing prototype for ncspot",
+  "description": "KanterLabs Resonance terminal workspace, built on ncspot",
   "scripts": {
     "dev": "bun run src/main.ts",
     "start": "bun run src/main.ts",

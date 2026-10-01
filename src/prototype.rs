@@ -19,7 +19,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn frontend_binary() -> Result<PathBuf, String> {
+pub fn frontend_binary() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("RESONANCE_OPENTUI_BIN") {
         let path = PathBuf::from(path);
         if path.is_absolute() && executable(&path) {
