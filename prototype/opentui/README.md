@@ -60,6 +60,13 @@ briefly highlights as the list moves up, and fresh radio additions brighten once
 Radio pulse for mouse and keyboard actions. Reduced motion removes these transitions while
 keeping playback progress and status current.
 
+Radio Studio groups the station seed and its cached cover, a clickable discovery slider,
+Familiar/Balanced/Explore presets, and up to 15 upcoming songs. Use S to start/stop, ←/→ to
+tune by five points, or F/M/E for the presets. Settings apply to future radio picks without
+replacing songs already queued. D opens deterministic cache diagnostics; Enter reveals a
+candidate's score components and Esc returns to the studio. Smaller terminals keep the station
+controls visible and show the full queue on the Queue page.
+
 For visual review, `bun run test/visual-capture.ts --theme both` captures the actual native
 renderer cells at 189×34 and 80×24 as JSON, SVG and text under `/tmp/resonance-visual`.
 Motion timings and state detection live in `src/screens/now-playing/motion.ts`; the focused

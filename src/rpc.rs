@@ -133,6 +133,31 @@ fn playable(p: &Playable) -> Value {
         Playable::Episode(e) => episode(e),
     }
 }
+fn cached_radio_seed_track(
+    queue: &Queue,
+    library: &Library,
+    seed_uri: Option<&str>,
+) -> Option<Track> {
+    let seed_uri = seed_uri?;
+    queue
+        .queue
+        .read()
+        .unwrap()
+        .iter()
+        .find_map(|item| match item {
+            Playable::Track(track) if track.uri == seed_uri => Some(track.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            library
+                .tracks
+                .read()
+                .unwrap()
+                .iter()
+                .find(|track| track.uri == seed_uri)
+                .cloned()
+        })
+}
 fn playlist_item(p: &Playable) -> Value {
     let mut row = playable(p);
     if !row["meta"].is_object() {
@@ -758,9 +783,14 @@ impl RpcService {
             "player.artwork" => self.player_artwork(p),
             "library.action" => self.library_action(p),
             "playlist.action" => self.playlist_action(p),
-            "radio.status" => Ok(
-                json!({"active":self.queue.radio_active(),"waiting":self.queue.radio_waiting() || self.queue.radio_natural_end(),"seed":self.queue.radio_seed(),"discovery":self.config.discovery(),"played_count":self.queue.session_played().len(),"cache_tracks":self.library.tracks.read().unwrap().len()}),
-            ),
+            "radio.status" => {
+                let seed = self.queue.radio_seed();
+                let seed_track =
+                    cached_radio_seed_track(&self.queue, &self.library, seed.as_deref());
+                Ok(
+                    json!({"active":self.queue.radio_active(),"waiting":self.queue.radio_waiting() || self.queue.radio_natural_end(),"seed":seed,"seed_track":seed_track,"discovery":self.config.discovery(),"played_count":self.queue.session_played().len(),"cache_tracks":self.library.tracks.read().unwrap().len()}),
+                )
+            }
             "radio.action" => {
                 match string(p, "action")? {
                     "start" => {
@@ -1697,6 +1727,63 @@ mod tests {
             is_playable: Some(true),
         }
     }
+    #[test]
+    fn cached_radio_seed_track_uses_queue_then_library_and_handles_misses() {
+        let service = service();
+        let queue_seed = fixture_track("QueueSeed", "Queue Seed", 0);
+        let mut library_copy = queue_seed.clone();
+        library_copy.title = "Library Copy".to_owned();
+        let library_seed = fixture_track("LibrarySeed", "Library Seed", 1);
+        service
+            .queue
+            .queue
+            .write()
+            .unwrap()
+            .push(Playable::Track(queue_seed.clone()));
+        service
+            .library
+            .tracks
+            .write()
+            .unwrap()
+            .extend([library_copy, library_seed.clone()]);
+
+        assert_eq!(
+            cached_radio_seed_track(&service.queue, &service.library, Some(&queue_seed.uri))
+                .map(|track| serde_json::to_value(track).unwrap()),
+            Some(serde_json::to_value(&queue_seed).unwrap())
+        );
+        assert_eq!(
+            cached_radio_seed_track(&service.queue, &service.library, Some(&library_seed.uri),)
+                .map(|track| serde_json::to_value(track).unwrap()),
+            Some(serde_json::to_value(&library_seed).unwrap())
+        );
+        assert!(
+            cached_radio_seed_track(
+                &service.queue,
+                &service.library,
+                Some("spotify:track:MissingSeed"),
+            )
+            .is_none()
+        );
+        assert!(cached_radio_seed_track(&service.queue, &service.library, None).is_none());
+    }
+
+    #[test]
+    fn radio_status_reports_seed_track_when_playback_has_moved() {
+        let service = service();
+        let seed = fixture_track("RadioSeed", "Radio Seed", 0);
+        let current = fixture_track("RadioCurrent", "Radio Current", 1);
+        service
+            .queue
+            .rpc_append_play_many(&[Playable::Track(seed.clone()), Playable::Track(current)]);
+        service.queue.start_radio(&seed.uri);
+        service.queue.play(1, false, false);
+
+        let result = service.dispatch("radio.status", &json!({})).unwrap();
+        assert_eq!(result["seed"], seed.uri);
+        assert_eq!(result["seed_track"], serde_json::to_value(seed).unwrap());
+    }
+
     #[test]
     fn remote_page_cache_is_bounded_expires_and_skips_fetching() {
         let service = service();

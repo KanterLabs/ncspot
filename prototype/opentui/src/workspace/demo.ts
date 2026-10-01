@@ -19,6 +19,7 @@ export class DemoApi implements RpcApi {
   private repeat = "off";
   private shuffled = false;
   private played = 0;
+  private radioSeed: Track | null = null;
   private values: Params = { volume: 68, repeat: "off", shuffle: false, demo: true, source, logged_in: true };
   private tracks: Row[] = DEMO_TRACKS.map(track => ({ id: track.id!, kind: "track", title: track.title, subtitle: track.artists.join(" · "), detail: track.album, uri: `spotify:track:${track.id}`, duration_ms: track.duration, saved: true }));
   private queue: Row[] = this.tracks.map((row, i) => ({ ...row, id: `entry-${i + 1}`, meta: { playable_id: row.id } }));
@@ -110,11 +111,15 @@ export class DemoApi implements RpcApi {
         const item = items.find(row => row.id === p.id || row.uri === p.uri); if (!item) fail("not_found", "Demo item not found"); item.saved = action === "save"; return { source, saved: item.saved };
       }
       case "playlist.action": return this.playlistAction(p);
-      case "radio.status": return { source, active: this.status.prototype!.radio_active, waiting: false, discovery: this.status.prototype!.discovery, played_count: this.played, cache_tracks: this.tracks.length };
+      case "radio.status": return { source, active: this.status.prototype!.radio_active, waiting: this.status.prototype!.radio_waiting, seed: this.radioSeed?.uri ?? null, seed_track: this.radioSeed, discovery: this.status.prototype!.discovery, played_count: this.played, cache_tracks: this.tracks.length };
       case "radio.action": {
         const action = string(p, "action");
         if (p.uri !== undefined) this.byUri(string(p, "uri"));
-        if (action === "start" || action === "stop") this.status.prototype!.radio_active = action === "start";
+        if (action === "start") {
+          const seed = p.uri !== undefined ? this.playable(this.byUri(string(p, "uri"))[0]!) : this.status.playable;
+          if (!seed || seed.type === "Episode") fail("invalid_params", "Radio needs a track seed");
+          this.radioSeed = clone(seed); this.status.prototype!.radio_active = true;
+        } else if (action === "stop") { this.status.prototype!.radio_active = false; this.radioSeed = null; }
         else if (action === "discovery") { const value = number(p, "value"); if (value < 0 || value > 100) fail("invalid_params", "Discovery must be 0–100"); this.status.prototype!.discovery = value; }
         else fail("invalid_params", "Unsupported radio action"); this.publish(); return this.dispatch("radio.status", {});
       }

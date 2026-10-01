@@ -83,3 +83,16 @@ test("unsupported and malformed requests reject RpcError and results are detache
   page.items[0]!.title = "Tampered";
   expect((await demo.call<Page>("library.list", { kind: "tracks" })).items[0]!.title).toBe("The Colour of Air");
 });
+
+test("demo radio retains its seed as playback advances and rejects podcast seeds", async () => {
+  const demo = new DemoApi();
+  const seed = structuredClone(demo.status.playable);
+  await demo.call("radio.action", { action: "start" });
+  await demo.call("player.action", { action: "next" });
+  expect(demo.status.playable?.uri).not.toBe(seed?.uri);
+  expect(await demo.call("radio.status")).toMatchObject({ active: true, seed: seed?.uri, seed_track: seed });
+  await demo.call("radio.action", { action: "stop" });
+  expect(await demo.call("radio.status")).toMatchObject({ active: false, seed: null, seed_track: null });
+  await expect(demo.call("radio.action", { action: "start", uri: "spotify:episode:demo-1" })).rejects.toMatchObject({ code: "invalid_params" });
+  expect(await demo.call("radio.status")).toMatchObject({ active: false, seed_track: null });
+});

@@ -67,8 +67,9 @@ test("radio controls render at 80x24 in light and dark and clamp discovery", asy
   try {
     await screen.refresh();
     await setup.renderOnce();
-    expect(setup.captureCharFrame()).toContain("Radio & Discovery");
-    expect(setup.captureCharFrame()).toContain("Session exclusions: 4");
+    expect(setup.captureCharFrame()).toContain("RADIO STUDIO");
+    expect(setup.captureCharFrame()).toContain("Choose a song");
+    expect(setup.captureCharFrame()).not.toContain("Session exclusions:");
     screen.handleKey({ name: "right" });
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(calls.find(call => call.method === "radio.action")?.params).toEqual({ action: "discovery", value: 100 });
@@ -80,7 +81,7 @@ test("radio controls render at 80x24 in light and dark and clamp discovery", asy
     expect(screen.handleKey({ name: "1" })).toBe(false);
     screen.setTheme("dark");
     await setup.renderOnce();
-    expect(setup.captureCharFrame()).toContain("Discovery: 100%");
+    expect(setup.captureCharFrame()).toContain("Explore  100%");
     screen.handleKey({ name: "d" });
     expect(screen.editing?.()).toBe(true);
     screen.handleKey({ name: "escape" });
@@ -97,5 +98,8 @@ test("radio controls render at 80x24 in light and dark and clamp discovery", asy
     screen.handleKey({ name: "escape" });
     await setup.renderOnce();
     expect(setup.captureCharFrame()).toContain("Session exclusions: 4");
+    screen.handleKey({ name: "escape" });
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("RADIO STUDIO");
   } finally { screen.dispose(); setup.renderer.destroy(); }
 });
