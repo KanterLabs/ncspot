@@ -2,6 +2,8 @@ import { BoxRenderable, TextRenderable, MouseButton, RGBA, StyledText, TextAttri
 import type { ScreenFactory, Params } from "../../workspace/contracts.js";
 import { formatTime, initials, playableTitle, playableArtists, playableAlbum, positionAt } from "../../status.js";
 import { paletteForTheme, type ThemePalette } from "../../theme.js";
+import { artworkTint, blendHex, blendPixels } from "./motion-colors.js";
+import { MOTION, PlayerMotion, ease, playingBars, queueKeys } from "./motion.js";
 
 export function ambientProgress(position: number, duration: number, width = 36): string {
   const fraction = duration > 0 ? Math.min(1, Math.max(0, position / duration)) : 0;
@@ -35,6 +37,9 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   let positionBase = status ? positionAt(status, receivedAt) : 0;
   let disposed = false;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let timerCadence = 0;
+  const noBorders: [] = [];
+  const motion = new PlayerMotion();
   let repeat = "unknown";
   let shuffle: boolean | undefined;
   const saved = new Set<string>();
@@ -45,6 +50,13 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   let artworkKey = "";
   let artworkGeneration = 0;
   let coverLines: StyledText[] | null = null;
+  let coverValue: Artwork | null = null;
+  let coverFrom: string[] | null = null;
+  let coverAt = -Infinity;
+  let paintedPixels: readonly string[] | null = null;
+  let tintFrom: string | null = null;
+  let tintTo: string | null = null;
+  let tintAt = -Infinity;
   let artWidth = 20;
   let artHeight = 10;
   const texts: Array<{ node: TextRenderable; tone: keyof ThemePalette; background: keyof ThemePalette }> = [];
@@ -68,7 +80,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   text(heading, "heading-label", "NOW PLAYING", { width: 14 }, "dim");
   const mode = text(heading, "mode", "", { width: 24, textAlign: "right" }, "teal");
   const hero = row(card, "np-hero", 10, { gap: 3 });
-  const coverBox = new BoxRenderable(ctx.renderer, { id: "np-cover-box", width: 20, height: 10, flexShrink: 0, flexDirection: "column", justifyContent: "center", alignItems: "center" });
+  const coverBox = new BoxRenderable(ctx.renderer, { id: "np-cover-box", width: 22, height: 10, border: ["left", "right"], flexShrink: 0, flexDirection: "column", justifyContent: "center", alignItems: "center" });
   hero.add(coverBox);
   const coverFallback = text(coverBox, "cover", "", { width: "100%", textAlign: "center", attributes: TextAttributes.BOLD }, "accent", "cover");
   const artNodes: TextRenderable[] = [];
@@ -97,7 +109,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   const repeatButton = button(options, "repeat", "Repeat", 15, () => void cycleRepeat());
   const shuffleButton = button(options, "shuffle", "Shuffle", 15, () => void toggleShuffle());
   const savedButton = button(options, "save", "♡ Save", 11, () => void toggleSaved());
-  button(options, "radio", "✧ Radio  ⇧R", 16, () => void startRadio(), true);
+  const radioButton = button(options, "radio", "✧ Radio  ⇧R", 16, () => void startRadio(), true);
   const utility = row(card, "np-volume", 1, { justifyContent: "space-between" });
   const seekControls = row(utility, "np-seek-controls", 1, { width: 18 });
   button(seekControls, "seek-back", "[ −5s", 8, () => void seek(-5000));
@@ -114,13 +126,17 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   const queueHeading = row(queueCard, "np-queue-heading", 2, { justifyContent: "space-between" });
   text(queueHeading, "queue-label", "UP NEXT", { width: 12 }, "dim");
   button(queueHeading, "open-queue", "Queue →", 9, () => ctx.navigate("queue"));
-  const queueBody = new BoxRenderable(ctx.renderer, { id: "np-queue-body", flexGrow: 1, minHeight: 0, flexDirection: "column", gap: 0 }); queueCard.add(queueBody);
+  const queueBody = new BoxRenderable(ctx.renderer, { id: "np-queue-body", flexGrow: 1, minHeight: 0, flexDirection: "column", gap: 0, overflow: "hidden" }); queueCard.add(queueBody);
   const queueItems = Array.from({ length: 15 }, (_, index) => {
     const item = new BoxRenderable(ctx.renderer, { id: `np-up-next-${index}`, height: 1, width: "100%", flexShrink: 0, flexDirection: "row", gap: 1, onMouseDown: event => { if (event.button === MouseButton.LEFT) ctx.navigate("queue"); } });
     queueBody.add(item);
-    text(item, `queue-number-${index}`, String(index + 1).padStart(2, "0"), { width: 2 }, "dim");
-    return { root: item, title: text(item, `queue-title-${index}`, "", { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }), duration: text(item, `queue-duration-${index}`, "", { width: 5, textAlign: "right" }, "muted") };
+    const number = text(item, `queue-number-${index}`, String(index + 1).padStart(2, "0"), { width: 2 }, "dim");
+    return { root: item, number, title: text(item, `queue-title-${index}`, "", { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }), duration: text(item, `queue-duration-${index}`, "", { width: 5, textAlign: "right" }, "muted") };
   });
+  const leavingRow = new BoxRenderable(ctx.renderer, { id: "np-queue-leaving", position: "absolute", top: 0, left: 0, height: 1, width: "100%", visible: false, flexDirection: "row", gap: 1 }); queueBody.add(leavingRow);
+  const leavingNumber = text(leavingRow, "leaving-number", "01", { width: 2 }, "accent");
+  const leavingTitle = text(leavingRow, "leaving-title", "", { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }, "accentBright");
+  const leavingDuration = text(leavingRow, "leaving-duration", "", { width: 5, textAlign: "right" }, "muted");
   const queueEmpty = text(queueBody, "queue-empty", "Nothing queued yet", { width: "100%", height: 4 }, "muted");
   const emptyRadio = new BoxRenderable(ctx.renderer, { id: "np-empty-radio", width: "100%", height: 3, border: true, borderStyle: "rounded", alignItems: "center", justifyContent: "center", onMouseDown: event => { if (event.button === MouseButton.LEFT) { void startRadio(); event.preventDefault(); } } });
   queueBody.add(emptyRadio);
@@ -130,14 +146,15 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   function currentPosition() { return Math.min(status?.playable?.duration ?? 0, positionBase + (status?.mode.kind === "playing" ? Math.max(0, Date.now() - receivedAt) : 0)); }
   function uri() { const p = status?.playable; return p?.uri ?? (p?.id ? `spotify:${p.type === "Episode" ? "episode" : "track"}:${p.id}` : undefined); }
   function notice(message: string) { if (!disposed) ctx.notify(message); }
-  async function mutate(method: string, params: Params, message: string, acknowledged?: () => void) {
+  async function mutate(method: string, params: Params, message: string, acknowledged?: () => void, feedback?: string) {
     if (pending || disposed) return;
     pending = true;
+    if (feedback && !ctx.reducedMotion()) { motion.pulse(feedback, Date.now()); render(); syncTimer(); }
     try { await ctx.api.call(method, params); if (!disposed) { acknowledged?.(); notice(message); render(); } }
     catch (error) { notice(`Unable to apply: ${error instanceof Error ? error.message : String(error)}`); }
     finally { pending = false; }
   }
-  function player(action: string, message: string, value?: unknown, acknowledged?: () => void) { return mutate("player.action", { action, ...(value === undefined ? {} : { value }) }, message, acknowledged); }
+  function player(action: string, message: string, value?: unknown, acknowledged?: () => void) { return mutate("player.action", { action, ...(value === undefined ? {} : { value }) }, message, acknowledged, action === "play_pause" ? "play" : undefined); }
   function seek(delta: number) {
     if (!status?.playable) { notice("Choose a track or episode before seeking"); return; }
     const target = Math.max(0, Math.min(status.playable.duration, currentPosition() + delta));
@@ -153,11 +170,11 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   function toggleSaved() {
     const identity = uri(); if (!identity) { notice("Choose an item before saving"); return; }
     const value = !saved.has(identity);
-    return mutate("library.action", { action: value ? "save" : "unsave", kind: status?.playable?.type === "Episode" ? "episode" : "track", uri: identity }, value ? "Saved to your library" : "Removed from your library", () => { value ? saved.add(identity) : saved.delete(identity); });
+    return mutate("library.action", { action: value ? "save" : "unsave", kind: status?.playable?.type === "Episode" ? "episode" : "track", uri: identity }, value ? "Saved to your library" : "Removed from your library", () => { value ? saved.add(identity) : saved.delete(identity); }, "save");
   }
   function startRadio() {
     const identity = uri(); if (!identity || status?.playable?.type === "Episode") { notice("Choose a track to start radio"); return; }
-    return mutate("radio.action", { action: "start", uri: identity }, "Radio started from this track");
+    return mutate("radio.action", { action: "start", uri: identity }, "Radio started from this track", undefined, "radio");
   }
   async function shareCurrent() {
     const identity = uri(); if (!identity) { notice("Choose an item before sharing"); return; }
@@ -167,25 +184,62 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     catch (error) { notice(`Unable to share: ${error instanceof Error ? error.message : String(error)}`); }
     finally { pending = false; }
   }
-  function paintCover() {
-    for (const node of artNodes) { coverBox.remove(node); node.destroy(); }
-    artNodes.length = 0; coverFallback.visible = !coverLines; coverBox.backgroundColor = colors.cover;
-    if (coverLines) for (const [index, line] of coverLines.entries()) { const node = new TextRenderable(ctx.renderer, { id: `np-art-${index}`, content: line, width: artWidth, height: 1, flexShrink: 0, selectable: false }); artNodes.push(node); coverBox.add(node); }
+  function coverPixels(now: number): string[] | null {
+    const target = coverValue?.pixels;
+    if (target) {
+      const progress = ctx.reducedMotion() ? 1 : ease((now - coverAt) / MOTION.cover);
+      return progress >= 1 ? target : blendPixels(coverFrom, target, progress, colors.cover);
+    }
+    // Fade an outgoing cover while the cache responds. No extra artwork RPCs.
+    if (!ctx.reducedMotion() && coverFrom?.length === artWidth * artHeight * 2 && now - coverAt < 180) {
+      return blendPixels(null, coverFrom, 1 - ease((now - coverAt) / 180), colors.cover);
+    }
+    return null;
+  }
+  function currentTint(now: number): string {
+    return blendHex(tintFrom ?? colors.accent, tintTo ?? colors.accent, ctx.reducedMotion() ? 1 : ease((now - tintAt) / MOTION.tint));
+  }
+  function paintCover(now = Date.now(), force = false) {
+    const pixels = coverPixels(now);
+    if (force || pixels !== paintedPixels) {
+      paintedPixels = pixels;
+      coverLines = pixels ? artworkLines({ available: true, uri: uri() ?? "", width: artWidth, height: artHeight, pixels }) : null;
+      while (artNodes.length > (coverLines?.length ?? 0)) { const node = artNodes.pop()!; coverBox.remove(node); node.destroy(); }
+      coverLines?.forEach((line, index) => {
+        let node = artNodes[index];
+        if (!node) { node = new TextRenderable(ctx.renderer, { id: `np-art-${index}`, content: line, width: artWidth, height: 1, flexShrink: 0, selectable: false }); artNodes.push(node); coverBox.add(node); }
+        else { node.width = artWidth; node.content = line; }
+      });
+    }
+    coverFallback.visible = !coverLines;
+    const tint = currentTint(now);
+    coverBox.backgroundColor = blendHex(colors.cover, tint, 0.08);
+    coverBox.borderColor = blendHex(colors.coverBorder, tint, 0.48);
+    card.borderColor = blendHex(colors.border, tint, 0.18);
   }
   async function loadArtwork(force = false) {
     const identity = uri(); const key = `${identity ?? ""}:${artWidth}:${artHeight}`;
     if (!force && key === artworkKey) return;
-    artworkKey = key; const generation = ++artworkGeneration; coverLines = null; paintCover();
+    const now = Date.now();
+    coverFrom = coverPixels(now); coverValue = null; coverAt = now;
+    tintFrom = currentTint(now); tintTo = null; tintAt = now;
+    artworkKey = key; const generation = ++artworkGeneration; paintCover(now); syncTimer();
     if (!identity) return;
     try {
       const value = await ctx.api.call<Artwork>("player.artwork", { uri: identity, width: artWidth, height: artHeight });
       if (disposed || generation !== artworkGeneration || identity !== uri()) return;
-      if (value.uri === identity && value.width === artWidth && value.height === artHeight) coverLines = artworkLines(value);
-      paintCover();
+      if (value.uri === identity && value.width === artWidth && value.height === artHeight && artworkLines(value)) {
+        const loadedAt = Date.now();
+        coverFrom = coverPixels(loadedAt); coverValue = value; coverAt = loadedAt;
+        tintFrom = currentTint(loadedAt); tintTo = artworkTint(value.pixels!); tintAt = loadedAt;
+      }
+      paintCover(); syncTimer();
     } catch { /* A missing cover must never interrupt playback or navigation. */ }
   }
   function render() {
     if (disposed) return;
+    const now = Date.now(); const reduced = ctx.reducedMotion();
+    if (reduced) motion.settle();
     const p = status?.playable ?? null;
     const position = currentPosition(); const duration = p?.duration ?? 0;
     const compact = ctx.renderer.height < 30;
@@ -199,17 +253,26 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     queueCard.visible = sideBySide; queueCard.height = card.height; columns.height = card.height;
     heading.height = compact ? 1 : 2; hero.height = compact ? 6 : 10; metadata.gap = compact ? 0 : 1;
     title.height = compact ? 1 : 2; album.visible = !compact; ambient.height = compact ? 1 : 2;
-    transport.height = compact ? 1 : 3; playChip.height = compact ? 1 : 3; playChip.border = !compact; navigation.visible = !compact;
+    transport.height = compact ? 1 : 3; playChip.height = compact ? 1 : 3;
+    // An empty side list stays borderless when OpenTUI's color setter runs;
+    // `false` would be promoted back to a full border by that setter.
+    playChip.border = compact ? noBorders : true; navigation.visible = !compact;
     const wantedHeight = compact ? 6 : 10; const wantedWidth = wantedHeight * 2;
-    if (artWidth !== wantedWidth || artHeight !== wantedHeight) { artWidth = wantedWidth; artHeight = wantedHeight; coverBox.width = artWidth; coverBox.height = artHeight; }
-    coverFallback.content = initials(p); title.content = playableTitle(p); artist.content = playableArtists(p); album.content = playableAlbum(p);
+    if (artWidth !== wantedWidth || artHeight !== wantedHeight) { artWidth = wantedWidth; artHeight = wantedHeight; coverBox.width = artWidth + 2; coverBox.height = artHeight; }
+    coverFallback.content = initials(p); artist.content = playableArtists(p); album.content = playableAlbum(p);
+    artist.fg = blendHex(colors.panel, colors.muted, reduced ? 1 : motion.trackProgress(now, 110));
+    album.fg = blendHex(colors.panel, colors.dim, reduced ? 1 : motion.trackProgress(now, 150));
     mode.content = `${status?.mode.kind === "playing" ? "●" : "○"} ${status?.mode.kind.toUpperCase() ?? "READY"}${status?.prototype?.radio_active ? "  ·  RADIO" : ""}`;
-    const spectrumWidth = Math.max(12, playerWidth - artWidth - 9); const audio = status?.prototype?.audio;
+    const spectrumWidth = Math.max(12, playerWidth - artWidth - 11); const audio = status?.prototype?.audio;
     if (audio) {
       const active = status?.mode.kind === "playing" && audio.level > 0; const target = active ? audio.bands : audio.bands.map(() => 0);
       if (ctx.reducedMotion() || !active || displayedBands.length !== target.length) displayedBands = [...target];
       ambient.content = compact ? audioSpectrum(displayedBands, spectrumWidth) : `${active ? "Audio spectrum" : "Audio spectrum · silence"}\n${audioSpectrum(displayedBands, spectrumWidth)}`;
     } else ambient.content = compact ? "" : `${ctx.reducedMotion() ? "Reduced motion" : "Playback progress"}\n${ambientProgress(position, duration, spectrumWidth)}`;
+    title.content = new StyledText([
+      { __isChunk: true, text: `${playingBars(status?.mode.kind === "playing", audio ? displayedBands : undefined, audio?.level, now, reduced)}  `, fg: RGBA.fromHex(colors.teal), bg: RGBA.fromHex(colors.panel) },
+      { __isChunk: true, text: playableTitle(p), fg: RGBA.fromHex(blendHex(colors.panel, colors.text, reduced ? 1 : motion.trackProgress(now, 40))), bg: RGBA.fromHex(colors.panel) },
+    ]);
     const trackWidth = Math.max(12, playerWidth - 6);
     const filled = duration > 0 ? Math.min(trackWidth, Math.floor(trackWidth * position / duration)) : 0;
     timeline.content = new StyledText([
@@ -220,33 +283,72 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     playButton.content = status?.mode.kind === "playing" ? "Ⅱ Pause" : "▶ Play";
     repeatButton.content = `Repeat: ${repeat}`; shuffleButton.content = `Shuffle: ${shuffle === undefined ? "—" : shuffle ? "on" : "off"}`;
     savedButton.content = saved.has(uri() ?? "") ? "♥ Saved" : "♡ Save";
+    const playPulse = reduced ? 0 : motion.button("play", now);
+    const playBackground = blendHex(colors.cover, colors.queueCurrent, playPulse * 0.7);
+    playChip.backgroundColor = playButton.bg = playBackground;
+    playChip.borderColor = blendHex(colors.coverBorder, colors.accent, playPulse * 0.8);
+    for (const [key, node] of [["save", savedButton], ["radio", radioButton]] as const) {
+      const pulse = reduced ? 0 : motion.button(key, now);
+      node.bg = blendHex(colors.panel, colors.cover, pulse * 0.8);
+      node.fg = blendHex(key === "radio" ? colors.accentBright : colors.muted, colors.accentBright, pulse);
+    }
+    const radioPulse = reduced ? 0 : motion.button("radio", now);
+    emptyRadio.borderColor = blendHex(colors.coverBorder, colors.accent, radioPulse);
     detail.content = `Volume ${status?.prototype ? `${status.prototype.volume_percent}%` : "—"}`;
     const upNext = status?.prototype?.up_next ?? [];
+    const keys = queueKeys(upNext);
     queueItems.forEach((item, index) => {
       const track = upNext[index]; item.root.visible = !!track;
+      // Native terminal positions are integers; round explicitly so the first
+      // frames retain the previous row position before moving up one cell.
+      item.root.translateY = reduced ? 0 : Math.round(motion.queueOffset(now));
+      item.root.opacity = reduced ? 1 : 1 - motion.queueOffset(now) * 0.25;
       if (track) {
+        const highlight = reduced ? 0 : motion.refill(keys[index]!, now);
+        const background = blendHex(colors.panel, colors.cover, highlight * 0.8);
+        item.root.backgroundColor = background;
+        item.number.bg = item.duration.bg = background;
+        item.number.fg = blendHex(colors.dim, colors.accent, highlight);
         item.title.content = new StyledText([
-          { __isChunk: true, text: track.title, fg: RGBA.fromHex(colors.text), bg: RGBA.fromHex(colors.panel) },
-          { __isChunk: true, text: track.artists.length ? ` · ${track.artists.join(" · ")}` : "", fg: RGBA.fromHex(colors.muted), bg: RGBA.fromHex(colors.panel) },
+          { __isChunk: true, text: track.title, fg: RGBA.fromHex(colors.text), bg: RGBA.fromHex(background) },
+          { __isChunk: true, text: track.artists.length ? ` · ${track.artists.join(" · ")}` : "", fg: RGBA.fromHex(colors.muted), bg: RGBA.fromHex(background) },
         ]);
         item.duration.content = formatTime(track.duration);
       }
     });
+    const offset = reduced ? 0 : motion.queueOffset(now);
+    leavingRow.visible = !!motion.departing && offset > 0;
+    if (motion.departing && leavingRow.visible) {
+      const background = blendHex(colors.panel, colors.cover, offset * 0.75);
+      leavingRow.backgroundColor = background; leavingRow.opacity = offset;
+      for (const node of [leavingNumber, leavingTitle, leavingDuration]) node.bg = background;
+      leavingTitle.content = motion.departing.title; leavingDuration.content = formatTime(motion.departing.duration);
+    }
     queueEmpty.visible = !upNext.length;
     queueEmpty.content = status?.prototype?.radio_active ? "Finding fresh tracks…\n\nYour radio station is active." : "Nothing queued yet\n\nStart radio from this song\nto keep the music going.";
     emptyRadio.visible = !upNext.length && !!p && p.type !== "Episode" && !status?.prototype?.radio_active;
     const upcoming = `${Math.min(15, upNext.length)}${upNext.length > 15 ? "+" : ""} upcoming · 2 open queue`;
     queueFoot.content = status?.prototype?.radio_active ? `✧ Continuous radio\n${upNext.length ? upcoming : "Finding fresh tracks…"}` : upNext.length ? upcoming : "✧ Shift+R starts radio";
     void loadArtwork();
+    paintCover(now);
   }
   function syncTimer() {
+    const now = Date.now(); const reduced = ctx.reducedMotion();
+    const finite = !reduced && (motion.active(now) || now - coverAt < MOTION.cover || now - tintAt < MOTION.tint);
+    const playing = status?.mode.kind === "playing";
+    // Short transitions get 25 frames/sec. Once settled, measured audio uses
+    // 12.5 frames/sec and the playback-only icon needs just 6.25 frames/sec.
+    const cadence = disposed ? 0 : reduced ? playing ? 1000 : 0 : finite ? 40 : playing ? status?.prototype?.audio ? 80 : 160 : 0;
+    if (timer && cadence === timerCadence) return;
     if (timer) { clearInterval(timer); timer = undefined; }
-    if (!disposed && status?.mode.kind === "playing" && !ctx.reducedMotion()) timer = setInterval(() => {
-      if (disposed || !root.visible || !root.parent || ctx.reducedMotion()) { if (timer) clearInterval(timer); timer = undefined; return; }
+    timerCadence = cadence;
+    if (cadence) timer = setInterval(() => {
+      if (disposed || !root.visible || !root.parent) { if (timer) clearInterval(timer); timer = undefined; return; }
       const audio = status?.prototype?.audio;
       if (audio) displayedBands = audio.bands.map((band, index) => { const value = audio.level > 0 ? band : 0; const previous = displayedBands[index] ?? 0; return value <= 0 ? 0 : previous + (value - previous) * 0.35; });
       render();
-    }, status?.prototype?.audio ? 80 : 1000);
+      syncTimer();
+    }, cadence);
   }
   async function loadMetadata() {
     const identity = uri();
@@ -266,7 +368,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     emptyRadio.backgroundColor = colors.cover; emptyRadio.borderColor = colors.coverBorder;
     coverBox.backgroundColor = colors.cover;
   }
-  const unsubscribe = ctx.onStatus(value => { const previous = uri(); status = value; receivedAt = Date.now(); positionBase = positionAt(value, receivedAt); render(); syncTimer(); if (uri() !== previous) void loadMetadata(); });
+  const unsubscribe = ctx.onStatus(value => { const previous = uri(); const now = Date.now(); motion.observe(status, value, now, ctx.reducedMotion()); status = value; receivedAt = now; positionBase = positionAt(value, receivedAt); render(); syncTimer(); if (uri() !== previous) void loadMetadata(); });
   const onResize = () => render(); ctx.renderer.on("resize", onResize);
   applyTheme(); render(); syncTimer(); void loadMetadata();
   return {

@@ -135,7 +135,11 @@ export function mountWorkspace(renderer: CliRenderer, options: WorkspaceOptions)
       if (name === "l") { context.setTheme(theme === "light" ? "dark" : "light"); key.preventDefault(); return; }
       if (name === "q" || name === "f5") { quit(); key.preventDefault(); return; }
       if (name === ":" || key.sequence === ":") { navigate("help", { command: true }); key.preventDefault(); return; }
-      if (name === "r" && key.shift) { void action("radio.action", { action: "start" }); key.preventDefault(); return; }
+      if (name === "r" && key.shift) {
+        // Let the player own its action feedback and current-track seed.
+        if (route !== "now-playing" || !screen?.handleKey(key)) void action("radio.action", { action: "start" });
+        key.preventDefault(); return;
+      }
     }
     if (screen?.handleKey(key)) { key.preventDefault(); return; }
     if (wasEditing || screen?.editing?.() || key.ctrl || key.meta) return;

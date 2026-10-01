@@ -69,3 +69,17 @@ test("configured workspace bindings navigate and move locally while prompts reta
     await app.command("focus library"); expect(app.route).toBe("library");
   } finally { app.dispose(); renderer.destroy(); }
 });
+
+test("Shift+R in Now Playing uses the player action once with its current seed", async () => {
+  const { renderer, mockInput, renderOnce } = await createTestRenderer({ width: 120, height: 35 });
+  const api = new DemoApi();
+  const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  const app = mountWorkspace(renderer, { api: { async call<T>(method: string, params?: Record<string, unknown>) { calls.push({ method, params }); return api.call<T>(method, params); } }, theme: "light", reducedMotion: true });
+  try {
+    app.setStatus(api.status); await settle(); await renderOnce();
+    mockInput.pressKey("r", { shift: true }); await settle();
+    const radio = calls.filter(call => call.method === "radio.action");
+    expect(radio).toHaveLength(1);
+    expect(radio[0]?.params).toEqual({ action: "start", uri: api.status.playable!.uri });
+  } finally { app.dispose(); renderer.destroy(); }
+});

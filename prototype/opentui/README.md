@@ -53,10 +53,18 @@ previews do not save them. Now Playing groups artwork, metadata and controls in 
 card, with an Up Next card on wide terminals. Real cover images use Rust's existing disk cache;
 only a missing cover needs a CDN download, without a Spotify Web API call. Initials remain the
 fallback when an image is unavailable. Sampled audio drives the spectrum; without samples the
-view shows playback progress. Reduced motion disables interpolation while status still updates.
+view shows playback progress. Tracks crossfade their covers and stagger their metadata, with a
+restrained border tint drawn from the artwork. Three playing bars follow sampled audio when
+available and settle during pause or silence. Up Next keeps 15 compact rows: the departing song
+briefly highlights as the list moves up, and fresh radio additions brighten once. Play, Save and
+Radio pulse for mouse and keyboard actions. Reduced motion removes these transitions while
+keeping playback progress and status current.
 
 For visual review, `bun run test/visual-capture.ts --theme both` captures the actual native
 renderer cells at 189×34 and 80×24 as JSON, SVG and text under `/tmp/resonance-visual`.
+Motion timings and state detection live in `src/screens/now-playing/motion.ts`; the focused
+`player-motion.test.ts` and native `now-playing.test.ts` checks exercise repeated status updates,
+cover blending, queue bounds, finite feedback, reduced motion and unchanged artwork RPC counts.
 
 ## API and debug behavior
 
