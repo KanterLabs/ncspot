@@ -48,6 +48,8 @@ test("workspace global transport, notification dedup, motion restart and disposa
     app.context.setReducedMotion(true); await settle(); expect(app.context.reducedMotion()).toBe(true);
     await mockInput.typeText("q"); expect(quit).toBe(1);
     app.setStatus(api.status); app.dispose();
+    expect(() => app.setConnection(false, "Late socket close")).not.toThrow();
+    expect(() => app.context.setReducedMotion(false)).not.toThrow();
   } finally { app.dispose(); renderer.destroy(); }
 });
 

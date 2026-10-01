@@ -63,6 +63,7 @@ export function mountWorkspace(renderer: CliRenderer, options: WorkspaceOptions)
     },
     reducedMotion: () => reducedMotion,
     setReducedMotion(value) {
+      if (disposed) return;
       reducedMotion = value;
       try { options.onReducedMotionChange?.(value); } catch (error) { notify(`Motion preference saving failed: ${error instanceof Error ? error.message : error}`); }
       // Re-mount to release any screen animation timer immediately.
@@ -152,7 +153,7 @@ export function mountWorkspace(renderer: CliRenderer, options: WorkspaceOptions)
         ? Object.fromEntries(Object.entries(bindings).filter((entry): entry is [string, string] => typeof entry[1] === "string")) : {};
     },
     bindings() { return { ...WORKSPACE_BINDINGS, ...customBindings }; },
-    setConnection(connected: boolean, message: string) { connection = connected ? "Live engine" : message; renderFooter(); },
+    setConnection(connected: boolean, message: string) { if (disposed) return; connection = connected ? "Live engine" : message; renderFooter(); },
     setStatus(next: ParsedStatus) {
       if (disposed) return; status = next; receivedAt = Date.now();
       for (const entry of next.notifications ?? []) {
