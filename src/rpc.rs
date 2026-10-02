@@ -1387,6 +1387,12 @@ impl RpcService {
     fn player_artwork(&self, p: &Value) -> Result<Value> {
         let width = dimension(p, "width", artwork::DEFAULT_WIDTH, artwork::MAX_WIDTH)?;
         let height = dimension(p, "height", artwork::DEFAULT_HEIGHT, artwork::MAX_HEIGHT)?;
+        let want_image = match p.get("format") {
+            None | Some(Value::Null) => false,
+            Some(Value::String(format)) if format == "pixels" => false,
+            Some(Value::String(format)) if format == "png" => true,
+            Some(_) => return Err(invalid("format must be pixels or png")),
+        };
         let requested_uri = match p.get("uri") {
             None | Some(Value::Null) => None,
             Some(Value::String(uri)) if !uri.trim().is_empty() => Some(uri.clone()),
@@ -1422,8 +1428,11 @@ impl RpcService {
             return Ok(unavailable_artwork(Some(&uri), width, height, "no_cover"));
         };
 
-        let pixels = match self.artwork.get_or_fetch(&cover_url, width, height) {
-            Ok(pixels) => pixels,
+        let artwork = match self
+            .artwork
+            .get_or_fetch_with_image(&cover_url, width, height, want_image)
+        {
+            Ok(artwork) => artwork,
             Err(error) => {
                 return Ok(unavailable_artwork(
                     Some(&uri),
@@ -1448,13 +1457,22 @@ impl RpcService {
                 "stale_current",
             ));
         }
-        Ok(json!({
+        let mut response = json!({
             "available": true,
             "uri": uri,
             "width": width,
             "height": height,
-            "pixels": pixels,
-        }))
+            "pixels": artwork.pixels,
+        });
+        if let Some(image) = artwork.image {
+            response["image"] = json!({
+                "mime": "image/png",
+                "width": image.width,
+                "height": image.height,
+                "data": image.data,
+            });
+        }
+        Ok(response)
     }
     fn queue_action(&self, p: &Value) -> Result<Value> {
         let action = string(p, "action")?;
@@ -1739,6 +1757,7 @@ impl RpcService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artwork::ArtworkImage;
     fn service() -> RpcService {
         let config = Config::new_for_test();
         let events = EventManager::new();
@@ -2160,6 +2179,17 @@ mod tests {
     }
 
     #[test]
+    fn artwork_rejects_unsupported_format() {
+        let service = service();
+        for format in [json!("jpg"), json!(""), json!(true)] {
+            let error = service
+                .dispatch("player.artwork", &json!({"format":format}))
+                .unwrap_err();
+            assert_eq!(error.code, "invalid_params");
+        }
+    }
+
+    #[test]
     fn artwork_cache_hit_returns_exact_requested_grid() {
         let service = service();
         let mut current = fixture_track("ArtworkTrack", "Artwork", 0);
@@ -2188,6 +2218,27 @@ mod tests {
         assert_eq!(result["pixels"].as_array().unwrap().len(), 4);
         assert_eq!(result["pixels"][0], "#FF0000");
         assert_eq!(result["pixels"][3], "#FFFFFF");
+        assert!(result.get("image").is_none());
+
+        service.artwork.remember_image_for_test(
+            "https://i.scdn.co/image/artwork-fixture",
+            ArtworkImage {
+                width: 2,
+                height: 2,
+                data: "cG5n".into(),
+            },
+        );
+        let png = service
+            .dispatch(
+                "player.artwork",
+                &json!({"uri":uri,"width":2,"height":1,"format":"png"}),
+            )
+            .unwrap();
+        assert_eq!(png["pixels"], result["pixels"]);
+        assert_eq!(png["image"]["mime"], "image/png");
+        assert_eq!(png["image"]["width"], 2);
+        assert_eq!(png["image"]["height"], 2);
+        assert_eq!(png["image"]["data"], "cG5n");
     }
 
     #[test]

@@ -1,10 +1,11 @@
-import { BoxRenderable, TextRenderable, MouseButton, RGBA, StyledText, TextAttributes, type TextChunk } from "@opentui/core";
+import { BoxRenderable, ImageRenderable, TextRenderable, MouseButton, RGBA, StyledText, TextAttributes, type TextChunk } from "@opentui/core";
 import type { ScreenFactory, Params } from "../../workspace/contracts.js";
 import { formatTime, initials, playableTitle, playableArtists, playableAlbum, positionAt } from "../../status.js";
 import { paletteForTheme, type ThemePalette } from "../../theme.js";
 import { artworkTint, blendHex, blendPixels } from "./motion-colors.js";
 import { MOTION, PlayerMotion, ease, playingBars, queueKeys } from "./motion.js";
 import { createQuickSearch } from "./quick-search.js";
+import { glassArtwork, supportsImageArtwork, type HighResolutionArtwork } from "./glass-artwork.js";
 
 export function ambientProgress(position: number, duration: number, width = 36): string {
   const fraction = duration > 0 ? Math.min(1, Math.max(0, position / duration)) : 0;
@@ -21,7 +22,7 @@ export function audioSpectrum(bands: readonly number[], width = 36): string {
   }).join("");
 }
 
-export interface Artwork { available: boolean; uri: string; width: number; height: number; pixels?: string[] }
+export interface Artwork { available: boolean; uri: string; width: number; height: number; pixels?: string[]; image?: HighResolutionArtwork }
 
 /** Each cell combines two image pixels without depending on terminal image protocols. */
 export function artworkLines(value: Artwork): StyledText[] | null {
@@ -60,6 +61,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   let tintAt = -Infinity;
   let artWidth = 20;
   let artHeight = 10;
+  let nativeUri: string | undefined;
   const texts: Array<{ node: TextRenderable; tone: keyof ThemePalette; background: keyof ThemePalette }> = [];
   const root = new BoxRenderable(ctx.renderer, { id: "np-root", width: "100%", height: "100%", minHeight: 0, flexDirection: "column", justifyContent: "center", alignItems: "center" });
   const quickSearch = createQuickSearch(ctx, root);
@@ -86,6 +88,8 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   hero.add(coverBox);
   const coverFallback = text(coverBox, "cover", "", { width: "100%", textAlign: "center", attributes: TextAttributes.BOLD }, "accent", "cover");
   const artNodes: TextRenderable[] = [];
+  const coverImage = new ImageRenderable(ctx.renderer, { id: "np-cover-image", visible: false, width: artWidth, height: artHeight, flexShrink: 0, fit: "fit", protocol: "auto", onLoad: () => { if (!disposed) paintCover(); }, onError: () => { if (!disposed) { nativeUri = undefined; paintCover(); } } });
+  coverBox.add(coverImage);
   const metadata = new BoxRenderable(ctx.renderer, { id: "np-metadata", flexGrow: 1, minWidth: 0, height: "100%", flexDirection: "column", justifyContent: "center", gap: 1 }); hero.add(metadata);
   const title = text(metadata, "title", "", { width: "100%", height: 2, wrapMode: "word", attributes: TextAttributes.BOLD });
   const artist = text(metadata, "artist", "", { width: "100%" }, "muted");
@@ -203,6 +207,11 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     return blendHex(tintFrom ?? colors.accent, tintTo ?? colors.accent, ctx.reducedMotion() ? 1 : ease((now - tintAt) / MOTION.tint));
   }
   function paintCover(now = Date.now(), force = false) {
+    const native = supportsImageArtwork(ctx.renderer) && nativeUri === uri() && !!coverImage.image;
+    coverImage.visible = native;
+    coverImage.width = artWidth; coverImage.height = artHeight;
+    coverImage.opacity = ctx.reducedMotion() ? 1 : ease((now - coverAt) / MOTION.cover);
+    coverBox.border = native ? noBorders : ["left", "right"];
     const pixels = coverPixels(now);
     if (force || pixels !== paintedPixels) {
       paintedPixels = pixels;
@@ -214,27 +223,37 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
         else { node.width = artWidth; node.content = line; }
       });
     }
-    coverFallback.visible = !coverLines;
+    for (const node of artNodes) node.visible = !native;
+    coverFallback.visible = !native && !coverLines;
     const tint = currentTint(now);
     coverBox.backgroundColor = blendHex(colors.cover, tint, 0.08);
     coverBox.borderColor = blendHex(colors.coverBorder, tint, 0.48);
     card.borderColor = blendHex(colors.border, tint, 0.18);
   }
+  function updateNativeArtwork() {
+    const source = coverValue?.image && supportsImageArtwork(ctx.renderer) ? glassArtwork(coverValue.image, theme) : null;
+    nativeUri = source ? coverValue?.uri : undefined;
+    coverImage.source = source ?? undefined;
+    source?.dispose(); // ImageRenderable synchronously retains its own reference.
+  }
   async function loadArtwork(force = false) {
-    const identity = uri(); const key = `${identity ?? ""}:${artWidth}:${artHeight}`;
+    const identity = uri(); const highResolution = supportsImageArtwork(ctx.renderer);
+    const key = `${identity ?? ""}:${artWidth}:${artHeight}:${highResolution}`;
     if (!force && key === artworkKey) return;
     const now = Date.now();
     coverFrom = coverPixels(now); coverValue = null; coverAt = now;
+    nativeUri = undefined; coverImage.source = undefined;
     tintFrom = currentTint(now); tintTo = null; tintAt = now;
     artworkKey = key; const generation = ++artworkGeneration; paintCover(now); syncTimer();
     if (!identity) return;
     try {
-      const value = await ctx.api.call<Artwork>("player.artwork", { uri: identity, width: artWidth, height: artHeight });
+      const value = await ctx.api.call<Artwork>("player.artwork", { uri: identity, width: artWidth, height: artHeight, ...(highResolution ? { format: "png" } : {}) });
       if (disposed || generation !== artworkGeneration || identity !== uri()) return;
       if (value.uri === identity && value.width === artWidth && value.height === artHeight && artworkLines(value)) {
         const loadedAt = Date.now();
         coverFrom = coverPixels(loadedAt); coverValue = value; coverAt = loadedAt;
         tintFrom = currentTint(loadedAt); tintTo = artworkTint(value.pixels!); tintAt = loadedAt;
+        updateNativeArtwork();
       }
       paintCover(); syncTimer();
     } catch { /* A missing cover must never interrupt playback or navigation. */ }
@@ -373,6 +392,15 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   }
   const unsubscribe = ctx.onStatus(value => { const previous = uri(); const now = Date.now(); motion.observe(status, value, now, ctx.reducedMotion()); status = value; receivedAt = now; positionBase = positionAt(value, receivedAt); render(); syncTimer(); if (uri() !== previous) void loadMetadata(); });
   const onResize = () => render(); ctx.renderer.on("resize", onResize);
+  ctx.renderer.on("capabilities", onResize);
+  let graphicsReady = supportsImageArtwork(ctx.renderer);
+  const onFrame = () => {
+    const ready = supportsImageArtwork(ctx.renderer);
+    if (ready !== graphicsReady) { graphicsReady = ready; render(); }
+  };
+  // Pixel geometry arrives asynchronously without a resize event. Recheck
+  // only protocol readiness, including for paused/reduced-motion sessions.
+  ctx.renderer.on("frame", onFrame);
   applyTheme(); render(); syncTimer(); void loadMetadata();
   return {
     root, title: "Now Playing", editing: quickSearch.isOpen,
@@ -395,7 +423,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
       return false;
     },
     async refresh() { render(); syncTimer(); await Promise.all([loadMetadata(), loadArtwork(true)]); },
-    setTheme(value) { theme = value; applyTheme(); quickSearch.setTheme(value); render(); },
-    dispose() { if (disposed) return; disposed = true; ++artworkGeneration; if (timer) clearInterval(timer); unsubscribe(); ctx.renderer.off("resize", onResize); quickSearch.dispose(); root.destroyRecursively(); },
+    setTheme(value) { theme = value; applyTheme(); updateNativeArtwork(); quickSearch.setTheme(value); render(); },
+    dispose() { if (disposed) return; disposed = true; ++artworkGeneration; if (timer) clearInterval(timer); unsubscribe(); ctx.renderer.off("resize", onResize); ctx.renderer.off("capabilities", onResize); ctx.renderer.off("frame", onFrame); quickSearch.dispose(); root.destroyRecursively(); },
   };
 };

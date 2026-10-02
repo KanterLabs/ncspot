@@ -5,6 +5,8 @@
 //! own decoded-cover cache and cell quantisation.  This cache is bounded and its
 //! mutex is never held while a cover is read, downloaded, or decoded.
 
+#[cfg(any(test, feature = "album_art", feature = "cover"))]
+use base64::Engine;
 use std::hash::Hash;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -28,6 +30,8 @@ pub const DEFAULT_WIDTH: usize = 20;
 pub const DEFAULT_HEIGHT: usize = 10;
 pub const MAX_WIDTH: usize = 40;
 pub const MAX_HEIGHT: usize = 20;
+const MAX_IMAGE_CACHE_ENTRIES: usize = 8;
+const MAX_IMAGE_CACHE_BYTES: usize = 20 * 1024 * 1024;
 
 /// Keep the response cache small.  The largest response is 40*40 RGB cells,
 /// represented as seven-byte strings (including `#`); at most 64 resized covers
@@ -46,6 +50,8 @@ const MAX_SOURCE_DIMENSION: u32 = 4096;
 const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(any(feature = "album_art", feature = "cover"))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(any(feature = "album_art", feature = "cover"))]
+const MAX_IMAGE_DIMENSION: u32 = 640;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct CacheKey {
@@ -61,9 +67,31 @@ struct CacheEntry {
     used_at: Instant,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtworkImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: String,
+}
+
+#[derive(Debug)]
+struct ImageCacheEntry {
+    key: String,
+    image: ArtworkImage,
+    bytes: usize,
+    used_at: Instant,
+}
+
+#[derive(Debug)]
+pub struct ArtworkResponse {
+    pub pixels: Vec<String>,
+    pub image: Option<ArtworkImage>,
+}
+
 /// A bounded cache of resized artwork responses.
 pub struct ArtworkCache {
     entries: Mutex<Vec<CacheEntry>>,
+    images: Mutex<Vec<ImageCacheEntry>>,
 }
 
 impl Default for ArtworkCache {
@@ -76,6 +104,7 @@ impl ArtworkCache {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
+            images: Mutex::new(Vec::new()),
         }
     }
 
@@ -84,31 +113,86 @@ impl ArtworkCache {
     /// The cache lock is held only for the lookup and insertion.  In particular,
     /// network I/O and image decompression happen after the lookup lock has been
     /// released, so an unavailable CDN cannot block another RPC request forever.
+    #[cfg(test)]
     pub fn get_or_fetch(
         &self,
         url: &str,
         width: usize,
         height: usize,
     ) -> Result<Vec<String>, ArtworkError> {
+        self.get_or_fetch_with_image(url, width, height, false)
+            .map(|response| response.pixels)
+    }
+
+    /// Return a cached response, optionally including a normalized PNG image.
+    ///
+    /// The source image is loaded at most once for a cache miss.  If the cell
+    /// grid is already cached, PNG generation only reads the shared on-disk
+    /// source; it never starts another network request.  The cache mutexes are
+    /// held only for lookups and insertions.
+    pub fn get_or_fetch_with_image(
+        &self,
+        url: &str,
+        width: usize,
+        height: usize,
+        want_image: bool,
+    ) -> Result<ArtworkResponse, ArtworkError> {
         validate_dimensions(width, height)?;
         let key = CacheKey {
             url: url.to_owned(),
             width,
             height,
         };
-        if let Some(pixels) = self.cached(&key) {
-            return Ok(pixels);
+        let cached_pixels = self.cached(&key);
+        let cached_image = want_image.then(|| self.cached_image(url)).flatten();
+        if let Some(pixels) = cached_pixels.as_ref()
+            && (!want_image || cached_image.is_some())
+        {
+            return Ok(ArtworkResponse {
+                pixels: pixels.clone(),
+                image: cached_image,
+            });
         }
 
         #[cfg(any(feature = "album_art", feature = "cover"))]
         {
-            let pixels = load_and_resize(url, width, height)?;
-            self.remember(key, pixels.clone());
-            Ok(pixels)
+            let mut source = None;
+            let pixels = match cached_pixels {
+                Some(pixels) => pixels,
+                None => {
+                    let (bytes, downloaded) = load_source(url)?;
+                    let pixels = decode_pixels(&bytes, width, height)?;
+                    if downloaded {
+                        persist_cached(&cover_path(url)?, &bytes);
+                    }
+                    self.remember(key, pixels.clone());
+                    source = Some(bytes);
+                    pixels
+                }
+            };
+
+            let image = if !want_image {
+                None
+            } else if cached_image.is_some() {
+                cached_image
+            } else {
+                // A grid cache hit means the source may already be on disk,
+                // but it must never trigger a second CDN request here.
+                let bytes = match source {
+                    Some(bytes) => Ok(bytes),
+                    None => read_source_cached(url),
+                };
+                bytes
+                    .ok()
+                    .and_then(|bytes| encode_png(&bytes).ok())
+                    .inspect(|image| self.remember_image(url, image.clone()))
+            };
+
+            Ok(ArtworkResponse { pixels, image })
         }
         #[cfg(not(any(feature = "album_art", feature = "cover")))]
         {
-            let _ = (url, key);
+            let _ = (url, key, cached_pixels, cached_image);
             Err(ArtworkError::FeatureDisabled)
         }
     }
@@ -118,6 +202,51 @@ impl ArtworkCache {
         let entry = entries.iter_mut().find(|entry| entry.key == *key)?;
         entry.used_at = Instant::now();
         Some(entry.pixels.clone())
+    }
+
+    fn cached_image(&self, url: &str) -> Option<ArtworkImage> {
+        let mut images = self.images.lock().unwrap();
+        let entry = images.iter_mut().find(|entry| entry.key == url)?;
+        entry.used_at = Instant::now();
+        Some(entry.image.clone())
+    }
+
+    fn remember_image(&self, url: &str, image: ArtworkImage) {
+        let bytes = image.data.len();
+        if bytes > MAX_IMAGE_CACHE_BYTES {
+            return;
+        }
+
+        let mut images = self.images.lock().unwrap();
+        let now = Instant::now();
+        let mut total = images.iter().map(|entry| entry.bytes).sum::<usize>();
+        if let Some(index) = images.iter().position(|entry| entry.key == url) {
+            total = total.saturating_sub(images.remove(index).bytes);
+        }
+
+        while (images.len() >= MAX_IMAGE_CACHE_ENTRIES
+            || total.saturating_add(bytes) > MAX_IMAGE_CACHE_BYTES)
+            && !images.is_empty()
+        {
+            let Some(oldest) = images
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.used_at)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            total = total.saturating_sub(images[oldest].bytes);
+            images.remove(oldest);
+        }
+        if total.saturating_add(bytes) <= MAX_IMAGE_CACHE_BYTES {
+            images.push(ImageCacheEntry {
+                key: url.to_owned(),
+                image,
+                bytes,
+                used_at: now,
+            });
+        }
     }
 
     #[cfg(any(test, feature = "album_art", feature = "cover"))]
@@ -166,6 +295,26 @@ impl ArtworkCache {
     #[cfg(test)]
     fn len_for_test(&self) -> usize {
         self.entries.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remember_image_for_test(&self, url: &str, image: ArtworkImage) {
+        self.remember_image(url, image);
+    }
+
+    #[cfg(test)]
+    fn image_len_for_test(&self) -> usize {
+        self.images.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    fn image_bytes_for_test(&self) -> usize {
+        self.images
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.bytes)
+            .sum()
     }
 }
 
@@ -219,18 +368,19 @@ fn validate_dimensions(width: usize, height: usize) -> Result<(), ArtworkError> 
 }
 
 #[cfg(any(feature = "album_art", feature = "cover"))]
-fn load_and_resize(url: &str, width: usize, height: usize) -> Result<Vec<String>, ArtworkError> {
+fn load_source(url: &str) -> Result<(Vec<u8>, bool), ArtworkError> {
     let path = cover_path(url)?;
     let (bytes, downloaded) = match read_cached(&path) {
         Ok(bytes) => (bytes, false),
         Err(ArtworkError::CacheUnavailable) if !path.exists() => (download(url)?, true),
         Err(error) => return Err(error),
     };
-    let pixels = decode_pixels(&bytes, width, height)?;
-    if downloaded {
-        persist_cached(&path, &bytes);
-    }
-    Ok(pixels)
+    Ok((bytes, downloaded))
+}
+
+#[cfg(any(feature = "album_art", feature = "cover"))]
+fn read_source_cached(url: &str) -> Result<Vec<u8>, ArtworkError> {
+    read_cached(&cover_path(url)?)
 }
 
 #[cfg(any(feature = "album_art", feature = "cover"))]
@@ -313,19 +463,7 @@ fn download(url: &str) -> Result<Vec<u8>, ArtworkError> {
 
 #[cfg(any(feature = "album_art", feature = "cover"))]
 fn decode_pixels(bytes: &[u8], width: usize, height: usize) -> Result<Vec<String>, ArtworkError> {
-    let mut reader = image::ImageReader::new(Cursor::new(bytes));
-    reader = reader
-        .with_guessed_format()
-        .map_err(|_| ArtworkError::DecodeFailed)?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
-    limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
-    limits.max_alloc = Some(MAX_DECODE_BYTES);
-    reader.limits(limits);
-    let image = reader.decode().map_err(|error| match error {
-        image::ImageError::Limits(_) => ArtworkError::TooLarge,
-        _ => ArtworkError::DecodeFailed,
-    })?;
+    let image = decode_image(bytes)?;
     let resized = image.resize_exact(
         width as u32,
         (height * 2) as u32,
@@ -339,6 +477,48 @@ fn decode_pixels(bytes: &[u8], width: usize, height: usize) -> Result<Vec<String
             format!("#{red:02X}{green:02X}{blue:02X}")
         })
         .collect())
+}
+
+#[cfg(any(feature = "album_art", feature = "cover"))]
+fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage, ArtworkError> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes));
+    reader = reader
+        .with_guessed_format()
+        .map_err(|_| ArtworkError::DecodeFailed)?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
+    limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    reader.decode().map_err(|error| match error {
+        image::ImageError::Limits(_) => ArtworkError::TooLarge,
+        _ => ArtworkError::DecodeFailed,
+    })
+}
+
+#[cfg(any(feature = "album_art", feature = "cover"))]
+fn encode_png(bytes: &[u8]) -> Result<ArtworkImage, ArtworkError> {
+    let original = decode_image(bytes)?;
+    let image = if original.width() > MAX_IMAGE_DIMENSION || original.height() > MAX_IMAGE_DIMENSION
+    {
+        original.resize(
+            MAX_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        original
+    };
+    let (width, height) = (image.width(), image.height());
+    let mut encoded = Cursor::new(Vec::new());
+    image
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .map_err(|_| ArtworkError::DecodeFailed)?;
+    Ok(ArtworkImage {
+        width,
+        height,
+        data: base64::engine::general_purpose::STANDARD.encode(encoded.into_inner()),
+    })
 }
 
 #[cfg(any(feature = "album_art", feature = "cover"))]
@@ -423,6 +603,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn image_cache_is_bounded_by_entries_and_encoded_bytes() {
+        let cache = ArtworkCache::new();
+        for index in 0..(MAX_IMAGE_CACHE_ENTRIES + 3) {
+            cache.remember_image_for_test(
+                &format!("https://i.scdn.co/image/{index}"),
+                ArtworkImage {
+                    width: 1,
+                    height: 1,
+                    data: format!("png-{index}"),
+                },
+            );
+        }
+        assert_eq!(cache.image_len_for_test(), MAX_IMAGE_CACHE_ENTRIES);
+        assert!(cache.image_bytes_for_test() <= MAX_IMAGE_CACHE_BYTES);
+
+        cache.remember_image_for_test(
+            "https://i.scdn.co/image/too-large",
+            ArtworkImage {
+                width: 1,
+                height: 1,
+                data: "x".repeat(MAX_IMAGE_CACHE_BYTES + 1),
+            },
+        );
+        assert_eq!(cache.image_len_for_test(), MAX_IMAGE_CACHE_ENTRIES);
+        assert!(cache.image_bytes_for_test() <= MAX_IMAGE_CACHE_BYTES);
+    }
+
     #[cfg(any(feature = "album_art", feature = "cover"))]
     #[test]
     fn deterministic_png_decodes_to_exact_rgb_grid() {
@@ -448,5 +656,56 @@ mod tests {
         assert_eq!(pixels[1], "#00FF00");
         assert_eq!(pixels[2], "#0000FF");
         assert_eq!(pixels[3], "#FFFFFF");
+    }
+
+    #[cfg(any(feature = "album_art", feature = "cover"))]
+    #[test]
+    fn deterministic_png_normalizes_without_upscaling_and_keeps_detail() {
+        let source = image::RgbImage::from_fn(1280, 320, |x, y| {
+            if x < 640 {
+                image::Rgb([255, y as u8, 0])
+            } else {
+                image::Rgb([0, y as u8, 255])
+            }
+        });
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(source)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+
+        let image = encode_png(bytes.get_ref()).unwrap();
+        assert_eq!((image.width, image.height), (640, 160));
+        let encoded = base64::engine::general_purpose::STANDARD
+            .decode(&image.data)
+            .unwrap();
+        let decoded = image::load_from_memory(&encoded).unwrap().to_rgb8();
+        assert_eq!((decoded.width(), decoded.height()), (640, 160));
+        assert_eq!(decoded.get_pixel(0, 0).0[0], 255);
+        assert!(decoded.get_pixel(0, 0).0[1] <= 2);
+        assert_eq!(decoded.get_pixel(0, 0).0[2], 0);
+        assert_eq!(decoded.get_pixel(639, 0).0[0], 0);
+        assert!(decoded.get_pixel(639, 0).0[1] <= 2);
+        assert_eq!(decoded.get_pixel(639, 0).0[2], 255);
+
+        let cache = ArtworkCache::new();
+        cache.remember_for_test(
+            "https://i.scdn.co/image/deterministic",
+            1,
+            1,
+            vec!["#010203".into()],
+        );
+        cache.remember_image_for_test("https://i.scdn.co/image/deterministic", image.clone());
+        let cached = cache
+            .get_or_fetch_with_image("https://i.scdn.co/image/deterministic", 1, 1, true)
+            .unwrap();
+        assert_eq!(cached.image, Some(image));
+
+        let small = image::RgbImage::from_pixel(2, 3, image::Rgb([12, 34, 56]));
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(small)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let image = encode_png(bytes.get_ref()).unwrap();
+        assert_eq!((image.width, image.height), (2, 3));
     }
 }

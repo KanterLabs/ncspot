@@ -86,9 +86,19 @@ Now Playing renders **Audio spectrum** from sampled bands supplied by Rust when 
 including a silence label when appropriate. Without audio samples, it shows playback progress.
 Reduced motion disables animation interpolation while keeping live status updates. A centered
 player card displays real album artwork, with a separate Up Next card on wide terminals.
-Artwork loads from the existing Rust cover cache and appears as two RGB pixels per terminal
-cell; cache misses download the cover from Spotify's image CDN without a Web API call.
+Artwork loads from the existing Rust cover cache. Terminals supporting Kitty graphics or Sixel
+display a sharp image (up to 640 pixels), with rounded corners, a subtle reflection, and a
+theme tint that retains fine detail. Theme changes reuse the same cached image. Other terminals,
+including Ptyxis without Sixel support, use the portable two RGB pixels per terminal cell.
+Cache misses download the cover from Spotify's image CDN without a Web API call.
 Unavailable covers fall back to initials, and compact terminals retain the playback controls.
+
+To try native artwork in WezTerm without changing its saved configuration, close Resonance
+and reopen it with:
+
+```sh
+wezterm --config enable_kitty_graphics=true start --always-new-process -- resonance
+```
 
 ```sh
 resonance-opentui --demo --theme dark --route queue --reduced-motion

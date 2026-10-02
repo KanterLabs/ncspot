@@ -4,6 +4,8 @@ import { createNowPlayingScreen, ambientProgress, artworkLines, audioSpectrum, t
 import { mountWorkspace } from "../src/workspace/app.js";
 import { demoStatus, type ParsedStatus } from "../src/status.js";
 import type { ScreenContext, Params } from "../src/workspace/contracts.js";
+import { testPng } from "./helpers/png.js";
+import type { ImageRenderable } from "@opentui/core";
 
 type ArtworkResolver = (params: Params) => Artwork | Promise<Artwork>;
 type RpcResponder = (method: string, params?: Params) => unknown | Promise<unknown>;
@@ -15,6 +17,7 @@ interface FixtureOptions {
   reducedMotion?: boolean;
   artwork?: ArtworkResolver;
   respond?: RpcResponder;
+  nativeArtwork?: boolean | "sixel";
 }
 
 interface Deferred<T> {
@@ -74,6 +77,7 @@ function textValue(value: unknown): string {
 
 async function fixtureCtx(options: FixtureOptions = {}) {
   const setup = await createTestRenderer({ width: options.width ?? 96, height: options.height ?? 34, useMouse: true });
+  if (options.nativeArtwork) Object.defineProperty(setup.renderer, "capabilities", { get: () => ({ kitty_graphics: options.nativeArtwork === true, sixel: options.nativeArtwork === "sixel", multiplexer: "none", image_protocol: "auto" }) });
   let status: ParsedStatus = options.status ?? trackStatus();
   let listener: ((s: ParsedStatus) => void) | undefined;
   const calls: { method: string; params?: Params }[] = [];
@@ -117,6 +121,64 @@ async function fixtureCtx(options: FixtureOptions = {}) {
     close() { screen.dispose(); setup.renderer.destroy(); },
   };
 }
+
+test("native covers retain full image detail, repaint themes locally, and preserve metadata", async () => {
+  const f = await fixtureCtx({ nativeArtwork: true, artwork: params => ({
+    ...coloredArtwork(String(params.uri), Number(params.width), Number(params.height)),
+    image: { mime: "image/png", width: 64, height: 64, data: testPng(64, 64) },
+  }) });
+  try {
+    await settle(f);
+    const node = f.screen.root.findDescendantById("np-cover-image") as ImageRenderable;
+    expect(node.visible).toBe(true);
+    expect(node.effectiveProtocol).toBe("kitty");
+    expect(node.image?.width).toBe(64);
+    expect(node.image?.height).toBe(64);
+    expect(f.calls.filter(call => call.method === "player.artwork")[0]?.params?.format).toBe("png");
+    expect(f.screen.root.findDescendantById("np-art-0")?.visible).toBe(false);
+    const before = node.image!.raw().data.slice();
+    const requests = f.calls.filter(call => call.method === "player.artwork").length;
+    f.screen.setTheme("dark"); await settle(f);
+    expect(node.image!.raw().data).not.toEqual(before);
+    expect(f.calls.filter(call => call.method === "player.artwork")).toHaveLength(requests);
+    expect(f.captureCharFrame()).toContain("Now Playing".toUpperCase());
+  } finally { f.close(); }
+});
+
+test("Sixel geometry arriving while paused switches from cells to native artwork", async () => {
+  const paused = trackStatus(); paused.mode = { kind: "paused", positionMs: 82_000 };
+  const f = await fixtureCtx({ nativeArtwork: "sixel", status: paused, reducedMotion: true, artwork: params => ({
+    ...coloredArtwork(String(params.uri), Number(params.width), Number(params.height)),
+    ...(params.format === "png" ? { image: { mime: "image/png" as const, width: 64, height: 64, data: testPng(64, 64) } } : {}),
+  }) });
+  try {
+    await settle(f);
+    const node = f.screen.root.findDescendantById("np-cover-image") as ImageRenderable;
+    expect(node.visible).toBe(false);
+    Object.defineProperty(f.renderer, "resolution", { get: () => ({ width: 960, height: 680 }) });
+    f.renderer.emit("frame"); await settle(f);
+    expect(node.visible).toBe(true);
+    expect(node.effectiveProtocol).toBe("sixel");
+    expect(f.calls.filter(call => call.method === "player.artwork").at(-1)?.params?.format).toBe("png");
+  } finally { f.close(); }
+});
+
+test("late native covers cannot replace a newer track and bad high-resolution data falls back to pixels", async () => {
+  const first = deferred<Artwork>();
+  const f = await fixtureCtx({ nativeArtwork: true, artwork: params => params.uri === "spotify:track:demo1" ? first.promise : ({
+    ...coloredArtwork(String(params.uri), Number(params.width), Number(params.height)),
+    image: { mime: "image/png", width: 64, height: 64, data: "broken" },
+  }) });
+  try {
+    f.update(trackStatus(1)); await settle(f);
+    first.resolve({ ...coloredArtwork("spotify:track:demo1", 20, 10), image: { mime: "image/png", width: 64, height: 64, data: testPng(64, 64) } });
+    await settle(f);
+    const node = f.screen.root.findDescendantById("np-cover-image") as ImageRenderable;
+    expect(node.visible).toBe(false);
+    expect(node.image).toBeNull();
+    expect(f.screen.root.findDescendantById("np-art-0")?.visible).toBe(true);
+  } finally { f.close(); }
+});
 
 test("Now Playing renders live metadata, artwork fallback, and truthful ambient label", async () => {
   const f = await fixtureCtx();
