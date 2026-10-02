@@ -115,6 +115,10 @@ Settings, Help, and Cast. Use **1–9**, **B**, and **?** to switch screens, **S
 to quit. Focused text inputs capture normal typing. **Esc** cancels a prompt or returns to Now
 Playing. Each screen shows its own action keys.
 
+In Now Playing, press **/** for quick search. Type a song or artist and select with **↑/↓**;
+**Enter** plays it now, **Ctrl+N** plays it next, and **Ctrl+E** adds it to the queue.
+**Esc** closes the popup. Search uses cached results first, without leaving Now Playing.
+
 Light/dark preferences and reduced motion are saved separately from Rust configuration. Now
 Playing centers the player beside an Up Next card on wide terminals and adapts to 80×24.
 It displays real artwork from the existing cover cache and sampled audio bands when Rust supplies

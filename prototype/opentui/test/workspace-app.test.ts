@@ -2,9 +2,84 @@ import { expect, test } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
 import { mountWorkspace } from "../src/workspace/app.js";
 import { DemoApi } from "../src/workspace/demo.js";
-import { ROUTES } from "../src/workspace/contracts.js";
+import { ROUTES, type Page } from "../src/workspace/contracts.js";
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 10));
+
+test("Now Playing popup captures route, theme, configured binding and quit letters until Escape", async () => {
+  const native = await createTestRenderer({ width: 80, height: 24 });
+  const api = new DemoApi();
+  let quit = 0;
+  const app = mountWorkspace(native.renderer, { api, theme: "light", reducedMotion: true, onQuit: () => quit++ });
+  try {
+    app.setStatus(api.status);
+    app.setBindings({ z: "focus queue" });
+    await native.mockInput.typeText("/");
+    await native.mockInput.typeText("1lqrz");
+    native.mockInput.pressKey("r", { shift: true });
+    await native.renderOnce();
+    expect(app.route).toBe("now-playing");
+    expect(app.context.theme()).toBe("light");
+    expect(quit).toBe(0);
+    expect(native.captureCharFrame()).toContain("1lqrzR");
+    for (const [width, height] of [[189, 34], [80, 24]]) {
+      native.resize(width!, height!); await native.renderOnce(); await native.renderOnce();
+      const popup = native.renderer.root.findDescendantById("np-quick-search")!;
+      const parent = native.renderer.root.findDescendantById("np-root")!;
+      expect(popup.x).toBeGreaterThanOrEqual(parent.x);
+      expect(popup.y).toBeGreaterThanOrEqual(parent.y);
+      expect(popup.x + popup.width).toBeLessThanOrEqual(parent.x + parent.width);
+      expect(popup.y + popup.height).toBeLessThanOrEqual(parent.y + parent.height);
+      expect(Math.abs(popup.x + popup.width / 2 - parent.x - parent.width / 2)).toBeLessThanOrEqual(1);
+    }
+    native.mockInput.pressKey("ESCAPE");
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await native.mockInput.typeText("2");
+    expect(app.route).toBe("queue");
+  } finally { app.dispose(); native.renderer.destroy(); }
+});
+
+test("Now Playing native popup keys act on the selected cached track after refresh failure", async () => {
+  for (const action of ["play", "play_next", "append"] as const) {
+    const native = await createTestRenderer({ width: 80, height: 24 });
+    const api = new DemoApi();
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const page: Page = { items: [
+      { id: "alpha", kind: "track", title: "Quick Alpha", subtitle: "First artist", uri: "spotify:track:alpha" },
+      { id: "beta", kind: "track", title: "Quick Beta", subtitle: "Second artist", uri: "spotify:track:beta" },
+    ], offset: 0, limit: 20, total: 2, has_more: false, source: "search_cache", refresh_available: true };
+    const app = mountWorkspace(native.renderer, {
+      theme: "light", reducedMotion: true,
+      api: { async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+        calls.push({ method, params });
+        if (method === "search") {
+          if (params?.refresh) throw new Error("refresh unavailable");
+          return page as T;
+        }
+        if (method === "player.action" || method === "queue.action") return {} as T;
+        return api.call<T>(method, params);
+      } },
+    });
+    try {
+      app.setStatus(api.status);
+      await native.mockInput.typeText("/");
+      await native.mockInput.typeText("Quick");
+      await new Promise(resolve => setTimeout(resolve, 220));
+      await native.renderOnce();
+      expect(native.captureCharFrame()).toContain("Quick Beta");
+      expect(calls.some(call => call.method === "search" && call.params?.refresh === true)).toBe(true);
+      native.mockInput.pressArrow("down");
+      if (action === "play") native.mockInput.pressEnter();
+      else native.mockInput.pressKey(action === "play_next" ? "n" : "e", { ctrl: true });
+      await settle();
+      const mutations = calls.filter(call => call.method === "player.action" || call.method === "queue.action");
+      expect(mutations).toEqual([{ method: action === "play" ? "player.action" : "queue.action", params: { action, uri: "spotify:track:beta" } }]);
+      expect(app.route).toBe("now-playing");
+      await native.mockInput.typeText("2");
+      expect(app.route).toBe("queue");
+    } finally { app.dispose(); native.renderer.destroy(); }
+  }
+});
 test("Browse opens the selected category with native Enter and returns with Backspace", async () => {
   const { renderer, mockInput } = await createTestRenderer({ width: 80, height: 24 });
   const api = new DemoApi();

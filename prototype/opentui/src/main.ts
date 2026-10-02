@@ -27,6 +27,7 @@ Usage:
 1 Play · 2 Queue · 3 Library · 4 Search · 5 Playlists · 6 Podcasts
 7 Radio · 8 Settings · 9 Cast · B Browse · ? Help
 Space play/pause · Shift+R radio · L appearance · : commands · q quit
+Now Playing: / quick search · Enter play now · Ctrl+N next · Ctrl+E queue
 Focused inputs capture these keys; Escape cancels or returns.
 `;
 export interface CliOptions { socket?: string; demo: boolean; smoke: boolean; theme?: ThemeName; route?: Route; reducedMotion?: boolean; debug?: string }

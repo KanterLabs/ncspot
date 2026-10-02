@@ -39,7 +39,7 @@ In the legacy interface, F5 / `:prototype` still opens a separate companion term
 
 | Key | Screen | Actions |
 | --- | --- | --- |
-| 1 | Now Playing | Transport, seek, volume, repeat, shuffle, save, share, appearance and motion |
+| 1 | Now Playing | Transport, seek, volume, repeat, shuffle, save, share, quick search, appearance and motion |
 | 2 | Queue | Play/remove an entry, reorder, append/play next, clear, save as playlist |
 | 3 | Library | Saved tracks, albums and artists; details and save/unsave |
 | 4 | Search | Query tracks, albums, artists, playlists, shows and episodes |
@@ -61,6 +61,12 @@ Screen hints describe the available action keys. For example, Queue uses Enter t
 Delete/Backspace to remove, Shift+Up/Down to reorder, C to clear, and S to save as a playlist.
 Prompts use Enter to submit and Esc to cancel; confirmation prompts use Y to confirm and N to
 cancel. The shared player footer follows playback across screens.
+
+In Now Playing, **/** opens quick search without leaving the player. Type a song or artist;
+cached track results appear first while a background refresh can update them. Use **↑/↓**
+to select a song, **Enter** to play now, **Ctrl+N** to play next, or **Ctrl+E** to add to the
+queue. **Esc** closes the popup. Clickable buttons provide the same three actions. Play next
+and add to queue keep the current song playing and count as explicit user choices in radio.
 
 ## Appearance, audio, and covers
 

@@ -4,6 +4,7 @@ import { formatTime, initials, playableTitle, playableArtists, playableAlbum, po
 import { paletteForTheme, type ThemePalette } from "../../theme.js";
 import { artworkTint, blendHex, blendPixels } from "./motion-colors.js";
 import { MOTION, PlayerMotion, ease, playingBars, queueKeys } from "./motion.js";
+import { createQuickSearch } from "./quick-search.js";
 
 export function ambientProgress(position: number, duration: number, width = 36): string {
   const fraction = duration > 0 ? Math.min(1, Math.max(0, position / duration)) : 0;
@@ -61,6 +62,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   let artHeight = 10;
   const texts: Array<{ node: TextRenderable; tone: keyof ThemePalette; background: keyof ThemePalette }> = [];
   const root = new BoxRenderable(ctx.renderer, { id: "np-root", width: "100%", height: "100%", minHeight: 0, flexDirection: "column", justifyContent: "center", alignItems: "center" });
+  const quickSearch = createQuickSearch(ctx, root);
   const columns = new BoxRenderable(ctx.renderer, { id: "np-columns", width: "100%", maxWidth: 132, flexDirection: "row", gap: 3, justifyContent: "center", minWidth: 0 });
   root.add(columns);
   const card = new BoxRenderable(ctx.renderer, { id: "np-player-card", height: 24, width: 82, flexShrink: 0, border: true, borderStyle: "rounded", paddingX: 2, paddingY: 1, flexDirection: "column" });
@@ -114,6 +116,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   const seekControls = row(utility, "np-seek-controls", 1, { width: 18 });
   button(seekControls, "seek-back", "[ −5s", 8, () => void seek(-5000));
   button(seekControls, "seek-forward", "] +5s", 8, () => void seek(5000));
+  button(utility, "search", "/ Search", 10, () => quickSearch.open(), true);
   const volumeControls = row(utility, "np-volume-controls", 1, { width: 31, justifyContent: "center" });
   button(volumeControls, "quieter", "−", 3, () => void changeVolume(-5));
   const detail = text(volumeControls, "detail", "", { width: 21, textAlign: "center" }, "muted");
@@ -372,9 +375,11 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   const onResize = () => render(); ctx.renderer.on("resize", onResize);
   applyTheme(); render(); syncTimer(); void loadMetadata();
   return {
-    root, title: "Now Playing", editing: () => false,
+    root, title: "Now Playing", editing: quickSearch.isOpen,
     handleKey(key) {
+      if (quickSearch.isOpen()) return quickSearch.handleKey(key);
       const name = key.name ?? key.sequence ?? ""; if (key.ctrl || key.meta) return false;
+      if (name === "/" || name === "slash" || key.sequence === "/") { quickSearch.open(); return true; }
       if (name === "space" || name === " ") { void player("play_pause", "Playback toggled"); return true; }
       if (name === ",") { void player("previous", "Previous requested"); return true; }
       if (name === ".") { void player("next", "Next requested"); return true; }
@@ -390,7 +395,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
       return false;
     },
     async refresh() { render(); syncTimer(); await Promise.all([loadMetadata(), loadArtwork(true)]); },
-    setTheme(value) { theme = value; applyTheme(); render(); },
-    dispose() { if (disposed) return; disposed = true; ++artworkGeneration; if (timer) clearInterval(timer); unsubscribe(); ctx.renderer.off("resize", onResize); root.destroyRecursively(); },
+    setTheme(value) { theme = value; applyTheme(); quickSearch.setTheme(value); render(); },
+    dispose() { if (disposed) return; disposed = true; ++artworkGeneration; if (timer) clearInterval(timer); unsubscribe(); ctx.renderer.off("resize", onResize); quickSearch.dispose(); root.destroyRecursively(); },
   };
 };

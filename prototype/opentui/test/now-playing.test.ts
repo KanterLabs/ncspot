@@ -300,6 +300,7 @@ test("compact controls keep their IDs, show symbol-only volume buttons, and rema
     expect(frame).toContain("The Colour of Air");
     expect(frame).toContain("Pause");
     expect(frame).toContain("+5s");
+    expect(frame).toContain("/ Search");
     expect(textValue((quieter as { content?: unknown }).content)).toBe("−");
     expect(textValue((louder as { content?: unknown }).content)).toBe("+");
     expect(frame).not.toContain("Quieter");
@@ -312,6 +313,11 @@ test("compact controls keep their IDs, show symbol-only volume buttons, and rema
     expect(card.y).toBeGreaterThanOrEqual(0);
     expect(card.x + card.width).toBeLessThanOrEqual(80);
     expect(card.y + card.height).toBeLessThanOrEqual(24);
+    const quickSearch = f.screen.root.findDescendantById("np-search")!;
+    await f.mockMouse.click(quickSearch.x + 2, quickSearch.y);
+    expect(f.screen.editing?.()).toBe(true);
+    expect(f.screen.handleKey({ name: "escape" })).toBe(true);
+    expect(f.screen.editing?.()).toBe(false);
     expect(f.screen.root.findDescendantById("np-play")!.y).toBe(f.screen.root.findDescendantById("np-previous")!.y);
     const playChip = f.screen.root.findDescendantById("np-play-chip")!;
     expect((playChip as unknown as { border: unknown }).border).toEqual([]);

@@ -107,12 +107,60 @@ try {
     played = await client.call<typeof played>("player.status");
   }
   assert.equal(played.current?.uri, "spotify:track:FixtureTrackBeta000002", "native Enter did not play the selected cached search result");
+
+  // Quick search must reach the same real queue and player paths while the
+  // Now Playing screen remains mounted. Explicit queue choices may repeat.
+  app.navigate("now-playing");
+  async function quickSearch() {
+    await native.mockInput.typeText("/");
+    await native.mockInput.typeText("Fixture");
+    const deadline = Date.now() + 5000;
+    do {
+      await delay(20); await native.renderOnce();
+    } while (!renderer!.root.findDescendantById("np-quick-search-row-1")?.visible && Date.now() < deadline);
+    assert.ok(renderer!.root.findDescendantById("np-quick-search-row-1")?.visible, "quick search did not render cached results");
+    assert.equal(app!.route, "now-playing");
+  }
+  async function waitQueueSize(size: number) {
+    const deadline = Date.now() + 5000;
+    let page = await client.call<Page>("queue.list");
+    while (page.items.length !== size && Date.now() < deadline) {
+      await delay(20); page = await client.call<Page>("queue.list");
+    }
+    assert.equal(page.items.length, size);
+    await delay(20);
+    return page;
+  }
+  const beforeQuick = await client.call<Page>("queue.list");
+  await quickSearch();
+  native.mockInput.pressKey("n", { ctrl: true });
+  const withNext = await waitQueueSize(beforeQuick.items.length + 1);
+  const currentIndex = withNext.items.findIndex(row => row.meta?.current);
+  assert.equal(withNext.items[currentIndex + 1]?.uri, "spotify:track:FixtureTrackAlpha00001", "quick play next did not insert immediately after current");
+  assert.equal((await client.call<typeof played>("player.status")).current?.uri, played.current?.uri, "play next interrupted current playback");
+
+  await quickSearch();
+  native.mockInput.pressArrow("down");
+  native.mockInput.pressKey("e", { ctrl: true });
+  const withAppend = await waitQueueSize(withNext.items.length + 1);
+  assert.equal(withAppend.items.at(-1)?.uri, "spotify:track:FixtureTrackBeta000002", "quick queue did not append selected track");
+  assert.equal((await client.call<typeof played>("player.status")).current?.uri, played.current?.uri, "queue append interrupted current playback");
+
+  await quickSearch();
+  native.mockInput.pressEnter();
+  const quickPlayDeadline = Date.now() + 5000;
+  let quickPlayed = await client.call<typeof played>("player.status");
+  while (quickPlayed.current?.uri !== "spotify:track:FixtureTrackAlpha00001" && Date.now() < quickPlayDeadline) {
+    await delay(20); quickPlayed = await client.call<typeof played>("player.status");
+  }
+  assert.equal(quickPlayed.current?.uri, "spotify:track:FixtureTrackAlpha00001", "quick Enter did not play selected track now");
+  assert.equal(app.route, "now-playing");
   assert.ok(broadcasts > 1, "Status broadcasting stalled during RPC requests");
   app.dispose(); renderer.destroy(); renderer = undefined;
   await client.call("settings.action", { action: "command", command: "quit" });
   assert.equal(await fixture.exited, 0, await stderr);
   assert.ok(!existsSync(socket), "Server socket leaked after shutdown");
-  console.log("Engine contract passed: real Rust RPC, cached search Enter playback, isolated radio, explicit priority, context playback, stale edits, status broadcasts, all OpenTUI routes in both themes.");
+  console.log("Engine contract passed: real Rust RPC, cached search Enter, quick-search play now/next/queue, isolated radio, explicit priority, context playback, stale edits, status broadcasts, all OpenTUI routes in both themes.");
 } catch (error) { console.error(await Promise.race([stderr, delay(10).then(() => "")])); throw error; }
 finally {
   app?.dispose(); renderer?.destroy(); client.close();

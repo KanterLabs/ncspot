@@ -48,6 +48,11 @@ B for Browse and ? for Help. Space toggles playback, Shift+R starts radio, L cha
 inputs capture text; individual screens show their action keys. Lists support keyboard navigation,
 mouse selection and double-click activation.
 
+In Now Playing, **/** opens a quick-search popup while playback continues. Type a song or
+artist, use **↑/↓** to select, then **Enter** to play now, **Ctrl+N** to play next, or
+**Ctrl+E** to add to the queue. **Esc** closes the popup. Cached results appear first and
+stay usable if a background refresh fails. The popup also has clickable action buttons.
+
 Live sessions save light/dark and reduced-motion preferences separately from Rust settings. Demo
 previews do not save them. Now Playing groups artwork, metadata and controls in a centered player
 card, with an Up Next card on wide terminals. Real cover images use Rust's existing disk cache;
