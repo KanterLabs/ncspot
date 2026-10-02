@@ -67,6 +67,11 @@ cached track results appear first while a background refresh can update them. Us
 to select a song, **Enter** to play now, **Ctrl+N** to play next, or **Ctrl+E** to add to the
 queue. **Esc** closes the popup. Clickable buttons provide the same three actions. Play next
 and add to queue keep the current song playing and count as explicit user choices in radio.
+Live search uses ten results per request to match Spotify's current Search API limit.
+The Search screen's **[ / ]** keys move through consecutive ten-result pages.
+Cached results remain usable when a refresh fails; **Ctrl+R** retries in quick search.
+Search errors distinguish rejected requests, authentication, access, network, incompatible
+responses, and actual rate limits. Rate-limit errors include the remaining wait when available.
 
 ## Appearance, audio, and covers
 

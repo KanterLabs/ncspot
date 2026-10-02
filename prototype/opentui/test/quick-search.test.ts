@@ -84,6 +84,7 @@ test("native input stays focused while printable text and arrows are routed corr
     await f.renderOnce();
     expect(f.captureCharFrame()).toContain("Q1lr");
     expect(f.captureCharFrame()).toContain("Alpha");
+    expect(f.calls.filter(call => call.method === "search").every(call => call.params?.limit === 10)).toBe(true);
     f.mockInput.pressArrow("down");
     expect(f.renderer.currentFocusedRenderable).toBe(input!);
     f.mockInput.pressEnter();

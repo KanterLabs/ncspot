@@ -170,6 +170,35 @@ test("search cycles categories on a parsed Tab event", async () => {
     setup.renderer.destroy();
   }
 });
+test("live search and paging respect Spotify's ten-result limit without skipping results", async () => {
+  const setup = await createTestRenderer({ width: 80, height: 24 });
+  const calls: Params[] = [];
+  const context: ScreenContext = {
+    renderer: setup.renderer,
+    api: { async call<T>(_method: string, params?: Params) {
+      calls.push(params!);
+      if (Number(params?.limit) > 10) throw new Error("Spotify HTTP 400: invalid limit");
+      const offset = Number(params?.offset ?? 0);
+      return { items: Array.from({ length: 10 }, (_, n) => ({ ...row, id: String(offset + n), title: `Song ${offset + n}` })),
+        offset, limit: 10, total: 25, has_more: offset < 20, source: "spotify" } as T;
+    } },
+    theme: () => "dark", setTheme() {}, reducedMotion: () => true, setReducedMotion() {}, status: () => null,
+    onStatus: () => () => {}, navigate() {}, notify() {},
+  };
+  const screen = createSearchScreen(context, { query: "sa" });
+  setup.renderer.root.add(screen.root);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    screen.handleKey({ name: "]", sequence: "]" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    screen.handleKey({ name: "]", sequence: "]" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    screen.handleKey({ name: "[", sequence: "[" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls.map(params => params.offset)).toEqual([0, 10, 20, 10]);
+    expect(calls.every(params => params.limit === 10)).toBe(true);
+  } finally { screen.dispose(); setup.renderer.destroy(); }
+});
 test("search category cycling includes episodes and wraps in both directions", () => {
   expect(searchKind("episodes")).toBe("episodes");
   expect(cycleSearchKind("shows")).toBe("episodes");

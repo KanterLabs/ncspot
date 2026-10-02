@@ -86,6 +86,16 @@ fn bounds(p: &Value) -> Result<(usize, usize)> {
     }
     Ok((o, l))
 }
+fn search_bounds(p: &Value) -> Result<(usize, usize)> {
+    let (offset, limit) = bounds(p)?;
+    if offset > 1000 {
+        return Err(invalid("search offset must be from 0 to 1000"));
+    }
+    Ok((
+        offset,
+        limit.min(crate::spotify_api::SEARCH_MAX_LIMIT as usize),
+    ))
+}
 fn dimension(p: &Value, key: &str, default: usize, max: usize) -> Result<usize> {
     let value = number(p, key, default, max)?;
     if value == 0 {
@@ -1223,9 +1233,14 @@ impl RpcService {
         }
     }
     fn search(&self, p: &Value) -> Result<Value> {
+        // Use the same page size for local and remote results, so refreshing
+        // cached rows and advancing a page cannot skip Spotify results.
+        let (offset, limit) = search_bounds(p)?;
+        let mut params = p.clone();
+        params["limit"] = json!(limit);
+        let p = &params;
         let query = string(p, "query")?.trim();
         let kind = p.get("kind").and_then(Value::as_str).unwrap_or("tracks");
-        let (offset, limit) = bounds(p)?;
         let ty = match kind {
             "tracks" | "track" => SearchType::Track,
             "albums" | "album" => SearchType::Album,
@@ -1285,12 +1300,12 @@ impl RpcService {
                 }
             }
         }
-        let response = remote(self.queue.get_spotify().api.search(
-            ty,
-            query,
-            limit.min(50) as u32,
-            offset as u32,
-        ))?;
+        let response = self
+            .queue
+            .get_spotify()
+            .api
+            .search_detailed(ty, query, limit as u32, offset as u32)
+            .map_err(|error| fail(error.code, error.message))?;
         let (rows, total) = match response {
             SearchResult::Tracks(r) => {
                 let tracks = r.items.iter().map(Track::from).collect::<Vec<_>>();
@@ -1326,7 +1341,7 @@ impl RpcService {
             ),
         };
         let count = rows.len();
-        let result = json!({"items":rows,"offset":offset,"limit":limit.min(50),"total":total,"has_more":offset.saturating_add(count)<total as usize,"source":"spotify"});
+        let result = json!({"items":rows,"offset":offset,"limit":limit,"total":total,"has_more":count > 0 && offset.saturating_add(count) <= 1000 && offset.saturating_add(count)<total as usize,"source":"spotify"});
         self.remember_page(key, &result);
         Ok(result)
     }
@@ -2084,6 +2099,37 @@ mod tests {
         assert!(bounds(&json!({"offset":-1})).is_err());
         assert!(bounds(&json!({"limit":0})).is_err());
         assert!(bounds(&json!({"limit":201})).is_err());
+    }
+    #[test]
+    fn search_pages_follow_spotify_bounds_even_for_cached_results() {
+        assert_eq!(search_bounds(&json!({})).unwrap(), (0, 10));
+        assert_eq!(search_bounds(&json!({"limit":20})).unwrap(), (0, 10));
+        assert_eq!(
+            search_bounds(&json!({"offset":10,"limit":5})).unwrap(),
+            (10, 5)
+        );
+        assert!(search_bounds(&json!({"offset":1001})).is_err());
+        assert!(search_bounds(&json!({"limit":0})).is_err());
+        let service = service();
+        for n in 0..25 {
+            service.library.tracks.write().unwrap().push(fixture_track(
+                &format!("SearchPage{n}"),
+                &format!("Search Paging {n}"),
+                n,
+            ));
+        }
+        let first = service
+            .search(&json!({"query":"Search Paging","limit":20}))
+            .unwrap();
+        let next = service
+            .search(&json!({"query":"Search Paging","offset":10,"limit":20}))
+            .unwrap();
+        assert_eq!(first["limit"], 10);
+        assert_eq!(first["items"].as_array().unwrap().len(), 10);
+        assert_eq!(next["items"].as_array().unwrap().len(), 10);
+        assert_eq!(next["items"][0]["id"], "SearchPage10");
+        assert_eq!(next["has_more"], true);
+        assert_eq!(service.queue.len(), 0);
     }
 
     #[test]

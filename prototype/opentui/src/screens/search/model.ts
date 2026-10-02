@@ -1,6 +1,8 @@
 import type { Page, Params, Row, RpcApi, ScreenContext } from "../../workspace/contracts.js";
 
 export const SEARCH_KINDS = ["tracks", "albums", "artists", "playlists", "shows", "episodes"] as const;
+// Spotify's current Search API accepts at most ten results per request.
+export const SEARCH_PAGE_SIZE = 10;
 export type SearchKind = typeof SEARCH_KINDS[number];
 export function searchKind(value: unknown): SearchKind {
   return SEARCH_KINDS.includes(value as SearchKind) ? value as SearchKind : "tracks";

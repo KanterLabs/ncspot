@@ -2,7 +2,7 @@ import { BoxRenderable, InputRenderable, LayoutEvents, MouseButton, TextRenderab
 import { formatTime } from "../../status.js";
 import { paletteForTheme, type ThemeName, type ThemePalette } from "../../theme.js";
 import type { Page, Row, ScreenContext, ScreenKey } from "../../workspace/contracts.js";
-import { errorMessage, PageLoader } from "../search/model.js";
+import { errorMessage, PageLoader, SEARCH_PAGE_SIZE } from "../search/model.js";
 
 /**
  * The small search controller used by Now Playing.  It intentionally owns a
@@ -99,7 +99,7 @@ export function createQuickSearch(ctx: ScreenContext, parent: BoxRenderable): Qu
       if (disposed || !openState) return;
       // `r` is printable query text while this input has focus, so expose the
       // retry affordance through its non-input Ctrl+R binding instead.
-      message = value.replace(/\br retry\b/g, "Ctrl+R retry");
+      message = value.replace(/\br retry\b/g, "Ctrl+R retry").replace(" • ] next page", " • Refine query for more");
       if (!/loading|refreshing…/i.test(value)) searchPending = false;
       messageError = /request failed|failed:/i.test(value);
       paint();
@@ -228,7 +228,7 @@ export function createQuickSearch(ctx: ScreenContext, parent: BoxRenderable): Qu
     const value = query.trim();
     if (!value) { clearSearchState(); return; }
     searchPending = true;
-    void loader.load("search", { query: value, kind: "tracks", offset: 0, limit: 20, ...(force ? { refresh: true } : {}) });
+    void loader.load("search", { query: value, kind: "tracks", offset: 0, limit: SEARCH_PAGE_SIZE, ...(force ? { refresh: true } : {}) });
   }
 
   function scheduleSearch(value: string) {

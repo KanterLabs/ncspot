@@ -31,6 +31,71 @@ const MAX_RETRY_AFTER_SECS: u64 = 10;
 /// expired rather than on the boundary.
 const RATE_LIMIT_GRACE: Duration = Duration::from_secs(1);
 
+/// Spotify's current Development Mode limit for a Search API page.
+pub const SEARCH_MAX_LIMIT: u32 = 10;
+
+/// A safe, user-facing classification for a failed Web API request.
+///
+/// The underlying HTTP response can contain account or request details, so callers receive only
+/// this classification and a sanitized message.  The code is stable for RPC clients; keep it
+/// aligned with the frontend's error handling when adding a new variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl ApiError {
+    fn upstream() -> Self {
+        Self {
+            code: "upstream_error",
+            message: "Spotify request failed".to_owned(),
+        }
+    }
+
+    fn from_status(status: u16, retry_after: Option<Duration>) -> Self {
+        match status {
+            400 => Self {
+                code: "invalid_request",
+                message: "Spotify rejected the request (HTTP 400)".to_owned(),
+            },
+            401 => Self {
+                code: "authentication",
+                message: "Spotify authentication failed (HTTP 401)".to_owned(),
+            },
+            403 => Self {
+                code: "access_denied",
+                message: "Spotify denied access (HTTP 403)".to_owned(),
+            },
+            429 => Self::rate_limited(retry_after),
+            _ => Self {
+                code: "upstream_error",
+                message: format!("Spotify request failed (HTTP {status})"),
+            },
+        }
+    }
+
+    fn rate_limited(wait: Option<Duration>) -> Self {
+        let message = match wait {
+            Some(wait) if wait.as_secs() > 0 => {
+                format!("Spotify rate limit reached; retry in {}s", wait.as_secs())
+            }
+            _ => "Spotify rate limit reached; retry later".to_owned(),
+        };
+        Self {
+            code: "rate_limited",
+            message,
+        }
+    }
+
+    fn network() -> Self {
+        Self {
+            code: "network_error",
+            message: "Could not reach Spotify".to_owned(),
+        }
+    }
+}
+
 /// Convenient wrapper around the rspotify web API functionality.
 #[derive(Clone)]
 pub struct WebApi {
@@ -177,67 +242,112 @@ impl WebApi {
             .map(|remaining| remaining + RATE_LIMIT_GRACE)
     }
 
-    /// Execute `api_call` and retry once if a rate limit occurs.
-    fn api_with_retry<F, R>(&self, api_call: F) -> Option<R>
+    /// Execute `api_call`, retrying once for a short rate limit or an expired token.
+    ///
+    /// This is the detailed form used by endpoints whose callers need to tell authentication,
+    /// request, and rate-limit failures apart.  It deliberately keeps response bodies out of the
+    /// returned error and logs only safe classifications, because an upstream body may contain
+    /// account or request details.
+    fn api_with_retry_result<F, R>(&self, api_call: F) -> Result<R, ApiError>
     where
         F: Fn(&AuthCodePkceSpotify) -> ClientResult<R>,
     {
         #[cfg(test)]
         if self.offline_for_test {
-            return None;
+            return Err(ApiError::upstream());
         }
-        // Inside a rate limit every request is refused, and sending them anyway only
-        // keeps the limit going; callers that can come back later ask for the wait.
+
+        // Inside a rate limit every request is refused, and sending them anyway only keeps the
+        // limit going; callers that can come back later ask for the wait.
         if let Some(wait) = self.rate_limit_wait() {
-            debug!("rate limited for another {}s, not sending", wait.as_secs());
-            return None;
+            debug!("Spotify API request skipped during a rate-limit window");
+            return Err(ApiError::rate_limited(Some(wait)));
         }
+
         self.refresh_token_if_needed();
-        let result = { api_call(&self.api) };
-        match result {
-            Ok(v) => Some(v),
-            Err(ClientError::Http(error)) => {
-                debug!("http error: {error:?}");
-                match error.as_ref() {
-                    HttpError::StatusCode(response) => match response.status() {
-                        429 => {
-                            let waiting_duration = response
-                                .header("Retry-After")
-                                .and_then(|v| v.parse::<u64>().ok())
-                                .unwrap_or(0);
+        let mut rate_limit_retried = false;
+        let mut auth_retried = false;
+
+        loop {
+            // Another request may have reported a longer wait while this one
+            // slept or renewed its token.
+            if let Some(wait) = self.rate_limit_wait() {
+                return Err(ApiError::rate_limited(Some(wait)));
+            }
+            let result = { api_call(&self.api) };
+            match result {
+                Ok(value) => return Ok(value),
+                Err(ClientError::Http(error)) => match *error {
+                    HttpError::StatusCode(response) => {
+                        let status = response.status();
+                        let retry_after = response
+                            .header("Retry-After")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .map(Duration::from_secs);
+                        debug!("Spotify API request failed with HTTP status {status}");
+
+                        if status == 429 {
+                            let wait = retry_after
+                                .unwrap_or(Duration::from_secs(1))
+                                .max(Duration::from_secs(1));
+                            self.note_rate_limit(wait);
 
                             // Spotify can ask for a wait of minutes, which is longer than any
-                            // caller should be held for; give up and let it try again later.
-                            if waiting_duration > MAX_RETRY_AFTER_SECS {
-                                error!(
-                                    "rate limited for {waiting_duration}s, abandoning call for now"
-                                );
-                                self.note_rate_limit(Duration::from_secs(waiting_duration));
-                                return None;
+                            // caller should be held for. Keep this process-wide window so cloned
+                            // WebApi handles do not continue sending requests into it.
+                            if wait.as_secs() > MAX_RETRY_AFTER_SECS {
+                                return Err(ApiError::rate_limited(self.rate_limit_wait()));
                             }
 
-                            debug!("rate limit hit. waiting {waiting_duration} seconds");
-                            thread::sleep(Duration::from_secs(waiting_duration));
-                            api_call(&self.api).ok()
+                            // A short rate limit is safe to wait out once. If Spotify sends a
+                            // second 429, return it instead of silently converting it to None.
+                            if !rate_limit_retried {
+                                rate_limit_retried = true;
+                                thread::sleep(wait + RATE_LIMIT_GRACE);
+                                continue;
+                            }
+
+                            return Err(ApiError::rate_limited(self.rate_limit_wait()));
                         }
-                        401 => {
-                            debug!("token unauthorized. trying refresh..");
+
+                        // Retry a 401 once after forcing the shared token to renew. The second
+                        // response is classified below rather than being discarded.
+                        if status == 401 && !auth_retried {
+                            auth_retried = true;
                             self.force_token_refresh();
-                            api_call(&self.api).ok()
+                            continue;
                         }
-                        _ => {
-                            error!("unhandled api error: {response:?}");
-                            None
-                        }
-                    },
-                    _ => None,
+
+                        return Err(ApiError::from_status(status, retry_after));
+                    }
+                    _ => {
+                        error!("Spotify API request failed before receiving an HTTP status");
+                        return Err(ApiError::network());
+                    }
+                },
+                Err(ClientError::ParseJson(_)) => {
+                    error!("Spotify API response could not be decoded");
+                    return Err(ApiError {
+                        code: "invalid_response",
+                        message: "Spotify returned an incompatible response".to_owned(),
+                    });
+                }
+                Err(ClientError::Io(_)) => return Err(ApiError::network()),
+                Err(ClientError::InvalidToken) => return Err(ApiError::from_status(401, None)),
+                Err(_) => {
+                    error!("Spotify API request failed");
+                    return Err(ApiError::upstream());
                 }
             }
-            Err(e) => {
-                error!("unhandled api error: {e}");
-                None
-            }
         }
+    }
+
+    /// Execute `api_call` with the shared retry policy, preserving the historical `Option` API.
+    fn api_with_retry<F, R>(&self, api_call: F) -> Option<R>
+    where
+        F: Fn(&AuthCodePkceSpotify) -> ClientResult<R>,
+    {
+        self.api_with_retry_result(api_call).ok()
     }
 
     /// Append `tracks` at `position` in the playlist with `playlist_id`.
@@ -429,17 +539,28 @@ impl WebApi {
         limit: u32,
         offset: u32,
     ) -> Result<SearchResult, ()> {
-        self.api_with_retry(|api| {
+        self.search_detailed(searchtype, query, limit, offset)
+            .map_err(|_| ())
+    }
+
+    /// Search with a sanitized error classification for RPC callers.
+    pub fn search_detailed(
+        &self,
+        searchtype: SearchType,
+        query: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<SearchResult, ApiError> {
+        self.api_with_retry_result(|api| {
             api.search(
                 query,
                 searchtype,
                 Some(Market::FromToken),
                 None,
-                Some(limit),
+                Some(limit.min(SEARCH_MAX_LIMIT)),
                 Some(offset),
             )
         })
-        .ok_or(())
     }
 
     /// Fetch all the current user's playlists.
@@ -909,6 +1030,101 @@ impl WebApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_failures_have_safe_classifications() {
+        assert_eq!(ApiError::from_status(400, None).code, "invalid_request");
+        assert_eq!(ApiError::from_status(401, None).code, "authentication");
+        assert_eq!(ApiError::from_status(403, None).code, "access_denied");
+
+        let rate_limited = ApiError::from_status(429, Some(Duration::from_secs(12)));
+        assert_eq!(rate_limited.code, "rate_limited");
+        assert!(rate_limited.message.contains("12s"));
+        assert_eq!(ApiError::from_status(503, None).code, "upstream_error");
+    }
+
+    #[test]
+    fn invalid_requests_and_responses_are_not_reported_as_rate_limits() {
+        let api = WebApi::new();
+        *api.token_expiration.write().unwrap() = Utc::now() + ChronoDuration::hours(1);
+        let error = api
+            .api_with_retry_result(|_| -> ClientResult<()> {
+                Err(ClientError::Http(Box::new(HttpError::StatusCode(
+                    "HTTP/1.1 400 Bad Request\r\n\r\nprivate response detail"
+                        .parse()
+                        .unwrap(),
+                ))))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_request");
+        assert!(error.message.contains("HTTP 400"));
+        assert!(!error.message.contains("private"));
+        assert!(api.rate_limit_wait().is_none());
+        let error = api
+            .api_with_retry_result(|_| -> ClientResult<()> {
+                Err(ClientError::ParseJson(
+                    serde_json::from_str::<serde_json::Value>("private invalid payload")
+                        .unwrap_err(),
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_response");
+        assert!(!error.message.contains("private"));
+        assert!(api.rate_limit_wait().is_none());
+    }
+
+    #[test]
+    fn a_second_short_rate_limit_records_cooldown_for_every_handle() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let api = WebApi::new();
+        *api.token_expiration.write().unwrap() = Utc::now() + ChronoDuration::hours(1);
+        let calls = AtomicUsize::new(0);
+        let error = api
+            .api_with_retry_result(|_| -> ClientResult<()> {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(ClientError::Http(Box::new(HttpError::StatusCode(
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\n\r\n"
+                        .parse()
+                        .unwrap(),
+                ))))
+            })
+            .unwrap_err();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(error.code, "rate_limited");
+        assert!(api.rate_limit_wait().is_some());
+        let blocked = api
+            .clone()
+            .api_with_retry_result(|_| -> ClientResult<()> {
+                panic!("shared cooldown must block requests")
+            })
+            .unwrap_err();
+        assert_eq!(blocked.code, "rate_limited");
+    }
+
+    #[test]
+    fn detailed_search_keeps_offline_failures_generic() {
+        let api = WebApi::new_offline_for_test();
+        let detailed = api
+            .search_detailed(SearchType::Track, "offline", 20, 0)
+            .expect_err("the offline fixture must not call Spotify");
+        assert_eq!(detailed.code, "upstream_error");
+        assert_eq!(api.search(SearchType::Track, "offline", 20, 0), Err(()));
+    }
+
+    #[test]
+    fn cloned_api_handles_report_the_shared_rate_limit() {
+        let api = WebApi::new();
+        let clone = api.clone();
+        api.note_rate_limit(Duration::from_secs(30));
+
+        let error = clone
+            .api_with_retry_result(|_| -> ClientResult<()> {
+                panic!("a shared cooldown must prevent the request")
+            })
+            .expect_err("the clone must see the original handle's cooldown");
+        assert_eq!(error.code, "rate_limited");
+        assert!(error.message.contains("retry in"));
+    }
 
     #[test]
     fn a_rate_limit_is_reported_until_it_expires() {
