@@ -175,6 +175,9 @@ impl CommandManager {
                 Ok(None)
             }
             Command::Quit => {
+                let (explicit_queued, radio_generated) = self.queue.queue_provenance();
+                let resume_context = self.queue.queue_resume_context();
+                let resume_context_valid = self.queue.queue_resume_context_valid();
                 let queue = self.queue.queue.read().unwrap();
                 self.config.with_state_mut(move |s| {
                     debug!(
@@ -186,6 +189,10 @@ impl CommandManager {
                     s.queuestate.random_order = self.queue.get_random_order();
                     s.queuestate.current_track = self.queue.get_current_index();
                     s.queuestate.track_progress = self.spotify.get_current_progress();
+                    s.queuestate.explicit_queued.clone_from(&explicit_queued);
+                    s.queuestate.radio_generated.clone_from(&radio_generated);
+                    s.queuestate.resume_context.clone_from(&resume_context);
+                    s.queuestate.resume_context_valid = resume_context_valid;
                 });
                 self.config.save_state();
                 s.quit();

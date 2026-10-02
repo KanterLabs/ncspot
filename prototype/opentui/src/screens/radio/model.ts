@@ -13,19 +13,34 @@ export function radioLines(status: RecordValue, diagnostic?: RecordValue): strin
   const report = record(diagnostic?.report);
   const discovery = record(report.discovery);
   const level = discoveryLevel(status.discovery);
+  const catalogTracks = number(status.catalog_tracks);
+  const likedTracks = number(status.cache_tracks);
   const lines = [
     `Active: ${flag(status.active)}   Waiting: ${flag(status.waiting)}`,
     `Discovery: ${level === undefined ? "unavailable" : `${level}%`}   Familiar 0 ─ Balanced 50 ─ Explore 100`,
-    `Session exclusions: ${number(status.played_count)}   Cache tracks: ${number(status.cache_tracks)}`,
+    `Session exclusions: ${number(status.played_count)}   Catalog tracks: ${catalogTracks}   Liked tracks: ${likedTracks}`,
     "Radio avoids session repeats; explicitly queued tracks may repeat.",
   ];
   if (!diagnostic) return [...lines, "Diagnostics: press d to load a deterministic local report."];
   lines.push(`Unique catalog: ${number(diagnostic.source_count)}   Ranked: ${number(report.catalog_count)}   Candidates: ${number(report.candidate_count)}`);
   lines.push(`RNG: ${number(report.rng_seed)}   Shortlist cached: ${flag(diagnostic.shortlist_hit)}   Confidence: ${number(report.confidence)}`);
+  if (typeof diagnostic.applied_count === "number") lines.push(`Applied picks: ${number(diagnostic.applied_count)}`);
+  if (typeof diagnostic.discarded_reason === "string") lines.push(`Discarded: ${diagnostic.discarded_reason}`);
   if (typeof diagnostic.history_status === "string") lines.push(`History: ${diagnostic.history_status}`);
   if (typeof diagnostic.enrichment_status === "string") lines.push(`Cache coverage: ${diagnostic.enrichment_status}`);
   if (discovery.level !== undefined) lines.push(`Discovery unplayed: ${number(discovery.selected_unplayed)}/${number(discovery.target_unplayed)}   Shortfall: ${number(discovery.shortfall)}`);
-  const reasons = words(report.reasons);
+  if (typeof report.fallback === "boolean") {
+    lines.push(`Quality: ${report.fallback ? "broader-cache fallback" : "related candidates"}`);
+  }
+  const candidates = list(report.candidates).map(record);
+  const rejected = candidates.filter(candidate => candidate.excluded === true).length;
+  if (candidates.length > 0 && rejected > 0) {
+    lines.push(`Rejected: ${rejected}/${candidates.length} cached candidates`);
+  }
+  const reasons = [...list(report.reasons), ...list(discovery.reasons)]
+    .filter((reason): reason is string => typeof reason === "string")
+    .filter((reason, index, values) => values.indexOf(reason) === index)
+    .join(" · ");
   if (reasons) lines.push(reasons);
   return lines;
 }

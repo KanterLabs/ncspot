@@ -13,7 +13,7 @@ use crate::{
 };
 use rspotify::model::{SearchResult, SearchType};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -764,7 +764,7 @@ impl RpcService {
                     .map(|(i, item)| {
                         let mut r = playable(item);
                         r["id"] = json!(format!("{revision}:{i}"));
-                        r["meta"] = json!({"index":i,"current":current==Some(i)});
+                        r["meta"] = json!({"index":i,"current":current==Some(i),"origin":self.queue.queue_origin(i)});
                         r
                     })
                     .collect();
@@ -785,11 +785,36 @@ impl RpcService {
             "playlist.action" => self.playlist_action(p),
             "radio.status" => {
                 let seed = self.queue.radio_seed();
-                let seed_track =
-                    cached_radio_seed_track(&self.queue, &self.library, seed.as_deref());
-                Ok(
-                    json!({"active":self.queue.radio_active(),"waiting":self.queue.radio_waiting() || self.queue.radio_natural_end(),"seed":seed,"seed_track":seed_track,"discovery":self.config.discovery(),"played_count":self.queue.session_played().len(),"cache_tracks":self.library.tracks.read().unwrap().len()}),
-                )
+                let seed_track = self.queue.radio_seed_track().or_else(|| {
+                    cached_radio_seed_track(&self.queue, &self.library, seed.as_deref())
+                });
+                let catalog = crate::recommendations::catalog(&self.queue, &self.library);
+                let catalog_tracks = catalog
+                    .tracks
+                    .iter()
+                    .map(|track| &track.uri)
+                    .collect::<HashSet<_>>()
+                    .len();
+                let upcoming = self.queue.upcoming(usize::MAX);
+                let radio_pending_count = upcoming
+                    .iter()
+                    .filter(|(index, _)| self.queue.queue_origin(*index) == "radio")
+                    .count();
+                let explicit_pending_count = upcoming
+                    .iter()
+                    .filter(|(index, _)| self.queue.queue_origin(*index) == "explicit")
+                    .count();
+                Ok(json!({
+                    "active":self.queue.radio_active(),
+                    "waiting":self.queue.radio_waiting() || self.queue.radio_natural_end(),
+                    "seed":seed,"seed_track":seed_track,"discovery":self.config.discovery(),
+                    "played_count":self.queue.session_played().len(),
+                    "cache_tracks":self.library.tracks.read().unwrap().len(),
+                    "catalog_tracks":catalog_tracks,
+                    "queue_mode":if self.queue.radio_active() { "station" } else { "context" },
+                    "parked_count":self.queue.parked_context_count(),
+                    "radio_pending_count":radio_pending_count,"explicit_pending_count":explicit_pending_count
+                }))
             }
             "radio.action" => {
                 match string(p, "action")? {
@@ -818,7 +843,7 @@ impl RpcService {
                             .as_deref()
                             != Some(&uri)
                         {
-                            self.queue.rpc_append_play(Playable::Track(track.clone()));
+                            self.queue.rpc_append_play_radio_seed(&track);
                         }
                         crate::ui::radio::start(
                             self.queue.clone(),
@@ -845,7 +870,14 @@ impl RpcService {
                     .or_else(|| self.queue.radio_seed())
                     .or_else(|| self.queue.get_current().map(|t| t.uri()));
                 let seed = if let Some(uri) = uri {
-                    self.resolve(&uri)?.track()
+                    match self
+                        .queue
+                        .radio_seed_track()
+                        .filter(|track| track.uri == uri)
+                    {
+                        Some(track) => Some(track),
+                        None => self.resolve(&uri)?.track(),
+                    }
                 } else {
                     self.library.tracks.read().unwrap().first().cloned()
                 }
@@ -1727,6 +1759,42 @@ mod tests {
             is_playable: Some(true),
         }
     }
+    #[test]
+    fn radio_status_distinguishes_parked_context_explicit_queue_and_full_catalog() {
+        let service = service();
+        let seed = fixture_track("StatusStationSeed", "Station Seed", 0);
+        service.queue.queue.write().unwrap().extend([
+            Playable::Track(seed.clone()),
+            Playable::Track(fixture_track("StatusContext", "Previous Playlist", 1)),
+        ]);
+        service.queue.play(0, false, false);
+        service.library.tracks.write().unwrap().push(seed.clone());
+        service.queue.start_radio_track(&seed);
+        service
+            .queue
+            .rpc_append_many(&[Playable::Track(fixture_track(
+                "StatusExplicit",
+                "My Choice",
+                2,
+            ))]);
+        let result = service.dispatch("radio.status", &json!({})).unwrap();
+        assert_eq!(result["queue_mode"], "station");
+        assert_eq!(result["parked_count"], 1);
+        assert_eq!(result["radio_pending_count"], 0);
+        assert_eq!(result["explicit_pending_count"], 1);
+        assert_eq!(result["cache_tracks"], 1);
+        assert!(result["catalog_tracks"].as_u64().unwrap() >= 3);
+        assert_eq!(service.queue.queue.read().unwrap().len(), 3);
+        service.queue.cancel_radio();
+        let stopped = service.dispatch("radio.status", &json!({})).unwrap();
+        assert_eq!(stopped["queue_mode"], "context");
+        assert_eq!(stopped["parked_count"], 0);
+        // Your queued choice keeps priority, then the parked context resumes.
+        assert_eq!(service.queue.next_index(), Some(2));
+        service.queue.play(2, false, false);
+        assert_eq!(service.queue.next_index(), Some(1));
+    }
+
     #[test]
     fn cached_radio_seed_track_uses_queue_then_library_and_handles_misses() {
         let service = service();

@@ -34,6 +34,7 @@ test("parses ncspot's serde status and prototype metadata", () => {
             duration: 120_000,
           },
         ],
+        up_next_origins: ["radio"],
       },
     }),
   );
@@ -44,6 +45,7 @@ test("parses ncspot's serde status and prototype metadata", () => {
     "Hit Me Where It Hurts",
   );
   expect(status?.prototype?.up_next[0]?.title).toBe("New Track");
+  expect(status?.prototype?.up_next_origins).toEqual(["radio"]);
   expect(positionAt(status!)).toBe(25_575);
   expect(playableAlbum(status?.playable ?? null)).toBe("Pang");
   expect(formatTime(184_132)).toBe("3:04");

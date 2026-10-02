@@ -1,6 +1,6 @@
 import { BoxRenderable, TextRenderable, MouseButton, RGBA, StyledText, TextAttributes } from "@opentui/core";
 import type { Row, ScreenFactory } from "../../workspace/contracts.js";
-import { formatTime, initials, parseTrack, playableArtists, playableTitle, type ParsedStatus, type Track } from "../../status.js";
+import { formatTime, initials, parseTrack, playableArtists, playableTitle, type ParsedStatus, type Track, type UpNextOrigin } from "../../status.js";
 import { paletteForTheme, type ThemePalette } from "../../theme.js";
 import { createSurface } from "../../workspace/surface.js";
 import { artworkLines, type Artwork } from "../now-playing/index.js";
@@ -8,6 +8,27 @@ import { playingBars } from "../now-playing/motion.js";
 import { artworkTint, blendHex } from "../now-playing/motion-colors.js";
 import { RadioController } from "./controller.js";
 import { discoveryLevel } from "./model.js";
+
+type QueueMode = "station" | "context";
+
+function nonNegativeCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+function queueMode(value: unknown): QueueMode | undefined {
+  return value === "station" || value === "context" ? value : undefined;
+}
+
+function originMark(origin: UpNextOrigin | undefined): string {
+  if (origin === "explicit") return "+";
+  if (origin === "radio") return "◇";
+  if (origin === "context") return "·";
+  return "";
+}
 
 export const createRadioScreen: ScreenFactory = ctx => {
   let colors = paletteForTheme(ctx.theme());
@@ -81,16 +102,17 @@ export const createRadioScreen: ScreenFactory = ctx => {
   button(actions, "diagnostics", "Diagnostics D", () => openDiagnostics(), false, 15);
 
   const nextHeading = row(nextCard, "next-heading", 2, { justifyContent: "space-between" });
-  text(nextHeading, "next-title", "UP NEXT", { width: 12 }, "dim");
+  const nextTitle = text(nextHeading, "next-title", "UP NEXT", { width: 18 }, "dim");
   text(nextHeading, "queue-link", "Queue →", { width: 9, textAlign: "right", onMouseDown: event => { if (event.button === MouseButton.LEFT) { ctx.navigate("queue"); event.preventDefault(); } } }, "accent");
   const nextBody = new BoxRenderable(ctx.renderer, { id: "radio-next-body", flexGrow: 1, minHeight: 0, minWidth: 0, flexDirection: "column", overflow: "hidden" }); nextCard.add(nextBody);
   const nextItems = Array.from({ length: 15 }, (_, index) => {
     const entry = row(nextBody, `next-${index}`, 1, { gap: 1, onMouseDown: event => { if (event.button === MouseButton.LEFT) { ctx.navigate("queue"); event.preventDefault(); } } });
     text(entry, `next-number-${index}`, String(index + 1).padStart(2, "0"), { width: 2 }, "dim");
-    return { root: entry, title: text(entry, `next-name-${index}`, "", { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }), duration: text(entry, `next-duration-${index}`, "", { width: 5, textAlign: "right" }, "muted") };
+    const origin = text(entry, `next-origin-${index}`, "", { width: 2, textAlign: "center" }, "dim");
+    return { root: entry, origin, title: text(entry, `next-name-${index}`, "", { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }), duration: text(entry, `next-duration-${index}`, "", { width: 5, textAlign: "right" }, "muted") };
   });
   const empty = text(nextBody, "next-empty", "", { width: "100%", height: 4 }, "muted");
-  const nextFoot = text(nextCard, "next-footer", "", { width: "100%", height: 2 }, "dim");
+  const nextFoot = text(nextCard, "next-footer", "", { width: "100%", height: 3 }, "dim");
 
   const debug = createSurface(ctx, "Radio diagnostics", "↑/↓ candidates · Enter score details · d rerun · Esc studio"); debug.root.visible = false; root.add(debug.root);
 
@@ -166,8 +188,19 @@ export const createRadioScreen: ScreenFactory = ctx => {
     const active = status.active === true;
     const waiting = status.waiting === true;
     const audio = live?.prototype?.audio;
+    const upcoming = live?.prototype?.up_next ?? [];
+    const parsedOrigins = live?.prototype?.up_next_origins ?? [];
+    const origins = parsedOrigins.length === upcoming.length ? parsedOrigins : [];
+    const mode = queueMode(status.queue_mode);
+    const stationKnown = active && (mode === "station" || origins.includes("radio"));
     const bars = playingBars(live?.mode.kind === "playing", audio?.bands, audio?.level, Date.now(), ctx.reducedMotion());
-    state.content = active ? waiting ? "◌ FINDING FRESH TRACKS" : `${bars}  LIVE STATION` : status.active === false ? "○ RADIO OFF" : "CONNECTING…";
+    state.content = active
+      ? waiting && !upcoming.length
+        ? "◌ RELATED CACHE EXHAUSTED"
+        : waiting
+          ? "◌ STATION QUEUED"
+          : `${bars}  LIVE STATION`
+      : status.active === false ? "○ RADIO OFF" : "CONNECTING…";
     state.fg = waiting ? colors.amber : active ? colors.teal : colors.muted;
     const seed = seedTrack();
     seedLabel.content = active ? "STATION SEED" : "START FROM NOW PLAYING";
@@ -188,26 +221,54 @@ export const createRadioScreen: ScreenFactory = ctx => {
       preset.text.fg = selected ? colors.accentBright : colors.muted;
       preset.text.attributes = selected ? TextAttributes.BOLD : TextAttributes.NONE;
     }
-    const summary = level === undefined ? "Refresh to load your station settings." : level < 25 ? "More familiar artists and favorite tracks." : level > 75 ? "Unplayed songs and artists you listen to less." : "A mix of familiar favorites and fresh directions.";
-    caption.content = `${summary}\n←/→ tune · Future picks only; queued songs stay.`;
+    const summary = level === undefined ? "Refresh to load your station settings." : level < 25 ? "More familiar related artists and favorite tracks." : level > 75 ? "More unplayed songs from related artists." : "A mix of related favorites and fresh directions.";
+    caption.content = `${summary}\nRelated songs only · Explore stays cache-bound.`;
     toggle.text.content = active ? "Stop radio  S" : currentTrack() ? "Start radio  S" : "Choose a song";
     reseed.box.visible = active && !!currentTrack();
-    const upcoming = live?.prototype?.up_next ?? [];
     nextItems.forEach((entry, index) => {
       const track = upcoming[index]; entry.root.visible = !!track;
       if (track) {
+        const origin = origins[index];
+        entry.origin.content = originMark(origin);
+        entry.origin.fg = origin === "explicit" ? colors.accentBright : origin === "radio" ? colors.muted : colors.dim;
         entry.title.content = new StyledText([
           { __isChunk: true, text: track.title, fg: RGBA.fromHex(colors.text), bg: RGBA.fromHex(colors.panel) },
           { __isChunk: true, text: track.artists.length ? ` · ${track.artists.join(" · ")}` : "", fg: RGBA.fromHex(colors.muted), bg: RGBA.fromHex(colors.panel) },
         ]); entry.duration.content = formatTime(track.duration);
+      } else {
+        entry.origin.content = "";
+        entry.title.content = "";
+        entry.duration.content = "";
       }
     });
     empty.visible = !upcoming.length;
-    empty.content = active ? "Finding fresh tracks…\n\nRadio will keep filling your queue." : "Your next songs appear here.\n\nStart radio to keep listening.";
+    empty.content = active
+      ? waiting
+        ? "Related cache exhausted\n\nWaiting for related metadata."
+        : stationKnown
+          ? "No related tracks queued\n\nNo related songs are cached yet."
+          : "Queue is empty\n\nRadio status details are unavailable."
+      : "Your next songs appear here.\n\nStart radio to keep listening.";
     const count = `${Math.min(15, upcoming.length)}${upcoming.length > 15 ? "+" : ""} upcoming`;
     const played = typeof status.played_count === "number" ? `${status.played_count} session exclusions` : "Session repeats blocked";
-    const cached = typeof status.cache_tracks === "number" ? ` · ${status.cache_tracks} cached` : "";
-    nextFoot.content = `${active ? "∞ Continuous radio" : count}\n${played}${cached}`;
+    const catalog = nonNegativeCount(status.catalog_tracks);
+    const liked = nonNegativeCount(status.cache_tracks);
+    const coverage = catalog !== undefined ? `${formatCount(catalog)} catalog · no auto repeats` : liked !== undefined ? `${formatCount(liked)} liked · no auto repeats` : "Catalog count unavailable";
+    const parked = nonNegativeCount(status.parked_count);
+    const radioPending = nonNegativeCount(status.radio_pending_count);
+    const explicitPending = nonNegativeCount(status.explicit_pending_count);
+    const pending = [
+      radioPending !== undefined && radioPending > 0 ? `${formatCount(radioPending)} radio` : "",
+      explicitPending !== undefined && explicitPending > 0 ? `${formatCount(explicitPending)} queued (+)` : "",
+    ].filter(Boolean).join(" · ");
+    const queueLine = active
+      ? stationKnown
+        ? upcoming.length ? pending || "STATION QUEUED" : waiting ? "RELATED CACHE EXHAUSTED" : "NO RELATED TRACKS QUEUED"
+        : upcoming.length ? `QUEUE UPCOMING · ${count}` : "QUEUE EMPTY"
+      : count;
+    const parkedLine = parked !== undefined ? `${formatCount(parked)} parked · stop resumes` : active ? "Context status unavailable" : played;
+    nextTitle.content = stationKnown ? "UP NEXT · STATION" : active ? "UP NEXT · QUEUE" : "UP NEXT";
+    nextFoot.content = `${queueLine}\n${parkedLine}\n${coverage}`;
     void loadArtwork(seed);
     if (diagnostics && !details) { debug.setLines(lines); debug.setRows(candidates, selectedId, showDetail); selectedId = undefined; }
   }

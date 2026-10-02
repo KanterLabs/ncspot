@@ -7,8 +7,24 @@ import type { Params, RpcApi, ScreenContext } from "../src/workspace/contracts.j
 import { demoStatus, type ParsedStatus } from "../src/status.js";
 
 test("radio diagnostics show returned evidence and explicit unavailable fields", () => {
-  const report = { source_count: 80, report: { catalog_count: 60, rng_seed: 42, selected: [{ track: { title: "Next song", uri: "spotify:track:next" }, score: 1.25, reasons: ["artist affinity"], components: { artist_affinity: .5, recent_penalty: -.2 } }] } };
-  expect(radioLines({ active: true, waiting: false, discovery: 75, played_count: 4, cache_tracks: 80 }, report).join("\n")).toContain("Unique catalog: 80");
+  const report = {
+    source_count: 80,
+    report: {
+      catalog_count: 60,
+      rng_seed: 42,
+      fallback: false,
+      reasons: ["seed relation available"],
+      candidates: [{ track_uri: "spotify:track:rejected", excluded: true }],
+      selected: [{ track: { title: "Next song", uri: "spotify:track:next" }, score: 1.25, reasons: ["artist affinity"], components: { artist_affinity: .5, recent_penalty: -.2 } }],
+      discovery: { reasons: ["discovery target shortfall"] },
+    },
+  };
+  const lines = radioLines({ active: true, waiting: false, discovery: 75, played_count: 4, cache_tracks: 80, catalog_tracks: 1136 }, report).join("\n");
+  expect(lines).toContain("Unique catalog: 80");
+  expect(lines).toContain("Catalog tracks: 1136   Liked tracks: 80");
+  expect(lines).toContain("Quality: related candidates");
+  expect(lines).toContain("Rejected: 1/1 cached candidates");
+  expect(lines).toContain("seed relation available · discovery target shortfall");
   expect(radioLines({}).join("\n")).toContain("Discovery: unavailable");
   expect(radioLines({}).join("\n")).toContain("explicitly queued tracks may repeat");
   const rows = diagnosticRows(report);

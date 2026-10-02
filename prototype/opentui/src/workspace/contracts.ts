@@ -75,7 +75,7 @@ export type ScreenFactory = (context: ScreenContext, params?: Params) => Screen;
  * library.action {action:"save"|"unsave"|"refresh",kind?,id?,uri?}
  * search {query,kind?,offset?,limit?} -> Page
  * playlist.action {action:"create"|"rename"|"add"|"remove"|"delete",id?,name?,uri?,position?}
- * radio.status -> {active,waiting,seed,seed_track,discovery,played_count,cache_tracks,...}
+ * radio.status -> {active,waiting,seed,seed_track,discovery,played_count,cache_tracks,catalog_tracks,queue_mode,parked_count,radio_pending_count,explicit_pending_count,...}
  * radio.action {action:"start"|"stop"|"discovery",value?,uri?}
  * radio.debug {limit?,rng_seed?} -> structured local diagnostic report
  * settings.get -> {values:Record<string,unknown>,bindings:Record<string,string>}

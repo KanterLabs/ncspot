@@ -124,9 +124,13 @@ them; otherwise it shows playback progress. Missing artwork falls back to initia
 ## Local radio and diagnostics
 
 The Radio screen's Discovery level goes from familiar favorites (0) to locally unplayed songs
-and unfamiliar artists (100), with a balanced default of 50. Use left/right or **[ / ]** to adjust
+and less familiar related artists (100), with a balanced default of 50. All levels
+require a relationship to the station seed; unrelated cached songs cannot fill a quota. Use left/right or **[ / ]** to adjust
 it, or enter `:discovery 75`. Changing the level leaves playback and existing queue entries alone.
-Press **Shift+R** to start radio from the current song.
+Press **Shift+R** to start radio from the current song. The original seed stays fixed
+through every refill until you choose another seed. That fresh artist choice takes
+precedence over inherited artist-level skip history; individual skipped songs still
+receive their normal penalty.
 
 Ranking uses cached metadata and local listening history, with no Spotify
 recommendation calls. “Unplayed” refers to this device’s history. When history
@@ -137,10 +141,18 @@ Use the Radio screen or press **Shift+R** to build a station from metadata alrea
 by Resonance, keeping the current song and playback position. It can warm a station in
 the background while the current track plays and records explainable scores and exclusions for
 debugging. Radio keeps topping up the queue and never automatically repeats a
-song played earlier in this terminal session. Explicitly queued duplicates remain
-playable. Stop playback to end the station. If no unheard candidates remain, the
-station stays active and waits for more cached metadata rather than replaying
-songs. The command-line report is local and deterministic:
+song played earlier in this terminal session, including another release with the same
+cached title and artists. Explicitly queued duplicates remain playable and take priority.
+Starting radio parks the previous playback context without deleting it; stopping radio
+returns to that context. Newly queued songs remain explicit choices. The Up Next list
+shows the actual station lane and marks your queued choices separately. Queue provenance
+is retained across restarts; older state files safely load as playback context.
+
+If no related, unheard candidates remain, the station stays active and waits for more
+cached metadata rather than filling with unrelated songs or replaying songs. It may queue
+fewer than 20 picks. Debug reports explain relationship evidence and exclusions; the
+cached catalog count includes all loaded sources, not just liked songs. The command-line
+report is local and deterministic:
 
 ```sh
 resonance radio-debug --seed spotify:track:TRACK_ID --rng-seed 42 --limit 20 --discovery 75

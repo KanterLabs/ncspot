@@ -172,6 +172,17 @@ pub struct QueueState {
     pub random_order: Option<Vec<usize>>,
     pub track_progress: std::time::Duration,
     pub queue: Vec<Playable>,
+    /// Per-occurrence provenance; old state files default to playback context.
+    #[serde(default)]
+    pub explicit_queued: Vec<usize>,
+    #[serde(default)]
+    pub radio_generated: Vec<usize>,
+    /// Pending playback context retained while a station owns the active lane.
+    #[serde(default)]
+    pub resume_context: Vec<usize>,
+    /// Distinguish a consumed continuation from an ordinary playback context.
+    #[serde(default)]
+    pub resume_context_valid: bool,
 }
 
 /// Runtime state that should be persisted accross sessions.
@@ -589,11 +600,19 @@ mod compatibility_tests {
     use super::*;
 
     #[derive(Clone, Deserialize, Serialize)]
+    struct LegacyQueueState {
+        current_track: Option<usize>,
+        random_order: Option<Vec<usize>>,
+        track_progress: std::time::Duration,
+        queue: Vec<Playable>,
+    }
+
+    #[derive(Clone, Deserialize, Serialize)]
     struct LegacyUserState {
         volume: u16,
         shuffle: bool,
         repeat: queue::RepeatSetting,
-        queuestate: QueueState,
+        queuestate: LegacyQueueState,
         playlist_orders: HashMap<String, SortingOrder>,
         cache_version: u16,
         playback_state: PlaybackState,
@@ -680,7 +699,7 @@ mod compatibility_tests {
             volume: 23_456,
             shuffle: true,
             repeat: queue::RepeatSetting::RepeatPlaylist,
-            queuestate: QueueState {
+            queuestate: LegacyQueueState {
                 current_track: Some(0),
                 random_order: Some(vec![0]),
                 track_progress: std::time::Duration::from_millis(4_321),
@@ -696,12 +715,29 @@ mod compatibility_tests {
         assert_eq!(state.radio_discovery, 50);
         assert_eq!(state.volume, legacy.volume);
         assert_eq!(state.queuestate.queue.len(), 1);
+        assert!(state.queuestate.explicit_queued.is_empty());
+        assert!(state.queuestate.radio_generated.is_empty());
+        assert!(state.queuestate.resume_context.is_empty());
+        assert!(!state.queuestate.resume_context_valid);
         assert_eq!(state.playlist_orders.len(), 1);
 
         state.radio_discovery = 75;
+        state.queuestate.explicit_queued = vec![0];
+        state.queuestate.resume_context = vec![0];
+        state.queuestate.resume_context_valid = true;
         let bytes = serde_cbor::to_vec(&state).unwrap();
         let restored: UserState = serde_cbor::from_slice(&bytes).unwrap();
         assert_eq!(restored.radio_discovery, 75);
+        assert_eq!(restored.queuestate.explicit_queued, vec![0]);
+        assert_eq!(restored.queuestate.resume_context, vec![0]);
+        assert!(restored.queuestate.resume_context_valid);
+        let rollback: LegacyUserState = serde_cbor::from_slice(&bytes).unwrap();
+        assert_eq!(rollback.queuestate.queue.len(), 1);
+        assert_eq!(rollback.queuestate.current_track, Some(0));
+        assert_eq!(
+            rollback.queuestate.track_progress,
+            legacy.queuestate.track_progress
+        );
         assert_eq!(restored.volume, legacy.volume);
         assert_eq!(restored.queuestate.queue.len(), 1);
         assert_eq!(restored.playlist_orders.len(), 1);
@@ -731,7 +767,7 @@ mod compatibility_tests {
             volume: 23_456,
             shuffle: true,
             repeat: queue::RepeatSetting::RepeatPlaylist,
-            queuestate: QueueState {
+            queuestate: LegacyQueueState {
                 current_track: Some(0),
                 random_order: Some(vec![0]),
                 track_progress: std::time::Duration::from_millis(4_321),

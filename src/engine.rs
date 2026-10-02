@@ -302,11 +302,24 @@ impl Engine {
         let random_order = self.queue.get_random_order();
         let current_track = self.queue.get_current_index();
         let track_progress = self.spotify.get_current_progress();
+        let (explicit_queued, radio_generated) = self.queue.queue_provenance();
+        let resume_context = self.queue.queue_resume_context();
+        let resume_context_valid = self.queue.queue_resume_context_valid();
         self.config.with_state_mut(|state| {
             state.queuestate.queue.clone_from(&queue);
             state.queuestate.random_order.clone_from(&random_order);
             state.queuestate.current_track = current_track;
             state.queuestate.track_progress = track_progress;
+            state
+                .queuestate
+                .explicit_queued
+                .clone_from(&explicit_queued);
+            state
+                .queuestate
+                .radio_generated
+                .clone_from(&radio_generated);
+            state.queuestate.resume_context.clone_from(&resume_context);
+            state.queuestate.resume_context_valid = resume_context_valid;
         });
         self.config.save_state();
         self.spotify.shutdown();

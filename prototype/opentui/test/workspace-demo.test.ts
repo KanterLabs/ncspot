@@ -88,6 +88,7 @@ test("demo radio retains its seed as playback advances and rejects podcast seeds
   const demo = new DemoApi();
   const seed = structuredClone(demo.status.playable);
   await demo.call("radio.action", { action: "start" });
+  await demo.call("queue.action", { action: "append", uri: "spotify:track:demo-2" });
   await demo.call("player.action", { action: "next" });
   expect(demo.status.playable?.uri).not.toBe(seed?.uri);
   expect(await demo.call("radio.status")).toMatchObject({ active: true, seed: seed?.uri, seed_track: seed });
@@ -95,4 +96,21 @@ test("demo radio retains its seed as playback advances and rejects podcast seeds
   expect(await demo.call("radio.status")).toMatchObject({ active: false, seed: null, seed_track: null });
   await expect(demo.call("radio.action", { action: "start", uri: "spotify:episode:demo-1" })).rejects.toMatchObject({ code: "invalid_params" });
   expect(await demo.call("radio.status")).toMatchObject({ active: false, seed_track: null });
+});
+
+
+test("offline radio parks context and attributes manual repeats without pretending to rank", async () => {
+  const demo = new DemoApi();
+  const count = (await demo.call<Page>("queue.list")).total;
+  await demo.call("radio.action", { action: "start" });
+  expect(demo.status.prototype!.up_next).toEqual([]);
+  expect(await demo.call("radio.status")).toMatchObject({ queue_mode: "station", parked_count: count - 1, radio_pending_count: 0, waiting: true });
+  await demo.call("queue.action", { action: "append", uri: "spotify:track:demo-1" });
+  expect(demo.status.prototype!.up_next.map(track => track.uri)).toEqual(["spotify:track:demo-1"]);
+  expect(demo.status.prototype!.up_next_origins).toEqual(["explicit"]);
+  expect(await demo.call("radio.status")).toMatchObject({ explicit_pending_count: 1, waiting: false });
+  await demo.call("radio.action", { action: "stop" });
+  expect(await demo.call("radio.status")).toMatchObject({ queue_mode: "context", parked_count: 0 });
+  expect((await demo.call<Page>("queue.list")).total).toBe(count + 1);
+  expect(demo.status.prototype!.up_next.length).toBe(count);
 });

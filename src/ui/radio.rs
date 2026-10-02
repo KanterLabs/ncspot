@@ -6,8 +6,7 @@ use log::debug;
 use crate::events::EventManager;
 use crate::model::playable::Playable;
 use crate::model::track::Track;
-use crate::queue::Queue;
-use crate::traits::ListItem;
+use crate::queue::{Queue, RadioFill};
 use crate::ui::osd;
 
 /// Station tracks whose art is fetched up front when a radio starts. The rest
@@ -29,7 +28,7 @@ pub(crate) fn start(
     if track.id.is_none() || track.is_local {
         return;
     }
-    queue.start_radio(&track.uri);
+    queue.start_radio_track(&track);
     osd::notify("Starting local radio…");
     spawn_fill(queue, library, events, true);
 }
@@ -41,10 +40,10 @@ pub(crate) fn maintain(
     library: Arc<crate::library::Library>,
     events: EventManager,
 ) {
-    let Some((run, _)) = queue.radio_begin_fill(false, RADIO_LOW_WATER) else {
+    let Some(claim) = queue.radio_begin_fill(false, RADIO_LOW_WATER) else {
         return;
     };
-    spawn_claimed_fill(queue, library, events, run, false);
+    spawn_claimed_fill(queue, library, events, claim, false);
 }
 
 fn spawn_fill(
@@ -53,34 +52,28 @@ fn spawn_fill(
     events: EventManager,
     force: bool,
 ) {
-    let Some((run, _)) = queue.radio_begin_fill(force, RADIO_LOW_WATER) else {
+    let Some(claim) = queue.radio_begin_fill(force, RADIO_LOW_WATER) else {
         return;
     };
-    spawn_claimed_fill(queue, library, events, run, force);
+    spawn_claimed_fill(queue, library, events, claim, force);
 }
 
 fn spawn_claimed_fill(
     queue: Arc<Queue>,
     library: Arc<crate::library::Library>,
     events: EventManager,
-    run: u64,
+    claim: RadioFill,
     after_current: bool,
 ) {
     thread::spawn(move || {
-        let Some(track) = queue.get_current().and_then(|item| item.track()) else {
-            let _ = queue.radio_finish_fill(run, 0);
-            schedule_retry(&queue, &events, run);
-            events.try_trigger();
-            return;
-        };
         let rng_seed = rand::random::<u64>();
-        let count = fill(&queue, &library, &track, run, rng_seed, after_current);
+        let count = fill(&queue, &library, &claim, rng_seed, after_current);
         if count.is_none() || count == Some(0) {
             if count == Some(0) {
-                osd::notify("Radio waiting for more local metadata…");
-                maybe_refresh(&queue, &library, &events, &track, run);
+                osd::notify("Radio waiting for fresh related songs…");
+                maybe_refresh(&queue, &library, &events, &claim.seed, claim.generation);
             }
-            schedule_retry(&queue, &events, run);
+            schedule_retry(&queue, &events, claim.generation);
         } else if count.is_some_and(|count| count > 0) {
             crate::recommendations::prewarm(queue.clone(), library.clone(), events.clone());
         }
@@ -130,21 +123,33 @@ fn schedule_retry(queue: &Arc<Queue>, events: &EventManager, run: u64) {
 fn fill(
     queue: &Queue,
     library: &crate::library::Library,
-    track: &Track,
-    run: u64,
+    claim: &RadioFill,
     rng_seed: u64,
     after_current: bool,
 ) -> Option<usize> {
-    let (mut diagnostic, replay) =
-        crate::recommendations::recommend(queue, library, track.clone(), rng_seed, RADIO_BATCH);
+    let (mut diagnostic, replay) = crate::recommendations::recommend(
+        queue,
+        library,
+        claim.seed.clone(),
+        rng_seed,
+        RADIO_BATCH,
+    );
     let tracks: Vec<_> = diagnostic
         .report
         .selected
         .iter()
         .map(|selection| selection.track.clone())
         .collect();
-    let applied = apply_radio_station(queue, run, &track.uri, &tracks, after_current);
+    let applied = apply_radio_station(queue, claim, &tracks, after_current);
     diagnostic.applied = applied.is_some_and(|count| count > 0);
+    diagnostic.applied_count = applied.unwrap_or(0);
+    diagnostic.discarded_reason = match applied {
+        None => Some("station generation or current queue occurrence changed".to_string()),
+        Some(0) if !tracks.is_empty() => {
+            Some("selected songs became queued or played before the batch was applied".to_string())
+        }
+        _ => None,
+    };
     if let Some(count) = applied {
         if count > 0 {
             osd::notify(format!("Local radio: {count} songs queued"));
@@ -153,7 +158,7 @@ fn fill(
     } else {
         debug!("radio: discarded because playback changed");
     }
-    let _ = queue.radio_finish_fill(run, applied.unwrap_or(0));
+    let _ = queue.radio_finish_fill(claim.generation, applied.unwrap_or(0));
     crate::recommendations::remember(diagnostic, replay);
     applied
 }
@@ -178,21 +183,15 @@ fn apply_station(queue: &Queue, seed: &str, tracks: &[Track]) -> Option<usize> {
 
 fn apply_radio_station(
     queue: &Queue,
-    generation: u64,
-    seed: &str,
+    claim: &RadioFill,
     tracks: &[Track],
     after_current: bool,
 ) -> Option<usize> {
-    let station: Vec<_> = tracks
-        .iter()
-        .filter(|track| track.uri != seed)
-        .cloned()
-        .map(Playable::Track)
-        .collect();
+    let station: Vec<_> = tracks.iter().cloned().map(Playable::Track).collect();
     if after_current {
-        queue.append_radio_next_if_current(generation, seed, &station)
+        queue.append_radio_next_if_claim_current(claim, &station)
     } else {
-        queue.append_radio_at_tail_if_current(generation, seed, &station)
+        queue.append_radio_at_tail_if_claim_current(claim, &station)
     }
 }
 

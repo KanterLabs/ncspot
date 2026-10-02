@@ -17,9 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::config;
 use crate::events::EventManager;
 use crate::library::Library;
-use crate::model::{
-    album::Album, artist::Artist, playable::Playable, playlist::Playlist, track::Track,
-};
+use crate::model::{album::Album, artist::Artist, playlist::Playlist, track::Track};
 use crate::queue::Queue;
 use crate::traits::ListItem;
 use engine::{Catalog, Context, Report};
@@ -50,6 +48,8 @@ pub struct Diagnostic {
     pub session_played_count: usize,
     pub total_us: u128,
     pub applied: bool,
+    pub applied_count: usize,
+    pub discarded_reason: Option<String>,
     pub history_status: String,
     pub enrichment_status: String,
     pub report: Report,
@@ -125,6 +125,7 @@ fn fingerprint(catalog: &Catalog) -> u64 {
     tracks.sort_by(|a, b| a.uri.cmp(&b.uri).then_with(|| a.title.cmp(&b.title)));
     for track in tracks {
         track.uri.hash(&mut hash);
+        engine::song_key(track).hash(&mut hash);
         track.artist_ids.hash(&mut hash);
         track.artists.hash(&mut hash);
         track.album_id.hash(&mut hash);
@@ -194,6 +195,7 @@ fn shortlist(
             seed: seed.clone(),
             queued: HashSet::new(),
             session_played: HashSet::new(),
+            session_song_keys: HashSet::new(),
             recent: Vec::new(),
             feedback: feedback.clone(),
             rng_seed: 42,
@@ -237,6 +239,7 @@ pub fn preview(queue: &Queue, library: &Library, seed: Track) -> Vec<Track> {
         seed,
         queued: HashSet::new(),
         session_played: queue.session_played(),
+        session_song_keys: queue.session_played_song_keys(),
         recent: history.recent(),
         feedback: history.snapshot(),
         rng_seed: rand::random(),
@@ -266,17 +269,14 @@ pub fn recommend(
         .collect::<HashSet<_>>()
         .len();
     let history = history::shared();
-    let queued = queue
-        .queue
-        .read()
-        .unwrap()
-        .iter()
-        .map(Playable::uri)
-        .collect();
+    // Parked playback context is still a metadata source, but only actual
+    // upcoming entries reserve songs in the active station.
+    let queued = queue.recommendation_queued();
     let context = Context {
         seed: seed.clone(),
         queued,
         session_played: queue.session_played(),
+        session_song_keys: queue.session_played_song_keys(),
         recent: history.recent(),
         feedback: history.snapshot(),
         rng_seed,
@@ -286,7 +286,7 @@ pub fn recommend(
     catalog.familiar_artists = engine::familiar_artists(&catalog, &context.feedback);
     let (short, shortlist_hit) = shortlist(&catalog, &seed, &context.feedback);
     let mut replay = Replay {
-        version: 2,
+        version: 3,
         catalog: short,
         context,
     };
@@ -307,12 +307,14 @@ pub fn recommend(
         }
     }
     let diagnostic = Diagnostic {
-        algorithm: "local-radio-v2",
+        algorithm: "local-radio-v3",
         source_count,
         shortlist_hit,
         session_played_count: replay.context.session_played.len(),
         total_us: started.elapsed().as_micros(),
         applied: false,
+        applied_count: 0,
+        discarded_reason: None,
         history_status: history.status(),
         enrichment_status: enrichment::shared().status(),
         report,
@@ -372,7 +374,7 @@ pub fn remember(diagnostic: Diagnostic, replay: Replay) {
 pub fn diagnostics(queue: &Queue) -> String {
     let station = if queue.radio_active() {
         if queue.radio_waiting() {
-            "waiting for metadata"
+            "waiting for related metadata"
         } else {
             "active"
         }
@@ -400,7 +402,10 @@ pub fn diagnostics(queue: &Queue) -> String {
 
 /// Prepare the seed's candidate cache and catalog enrichment off the UI thread.
 pub fn prewarm(queue: Arc<Queue>, library: Arc<Library>, events: EventManager) {
-    let Some(Playable::Track(seed)) = queue.get_current() else {
+    let seed = queue
+        .radio_seed_track()
+        .or_else(|| queue.get_current().and_then(|item| item.track()));
+    let Some(seed) = seed else {
         return;
     };
     if seed.is_local || seed.id.is_none() {
@@ -420,42 +425,34 @@ pub fn prewarm(queue: Arc<Queue>, library: Arc<Library>, events: EventManager) {
 }
 
 pub(crate) fn related_artists(catalog: &Catalog, seed: &Track) -> Vec<(String, String)> {
-    let index: HashMap<_, _> = catalog
-        .tracks
-        .iter()
-        .map(|track| (track.uri.as_str(), track))
-        .collect();
-    let mut affinity: HashMap<(String, String), f64> = HashMap::new();
-    for list in &catalog.playlists {
-        if !list.iter().any(|uri| {
-            uri == &seed.uri
-                || index.get(uri.as_str()).is_some_and(|track| {
-                    track
-                        .artist_ids
-                        .iter()
-                        .any(|artist| seed.artist_ids.contains(artist))
-                })
-        }) {
-            continue;
-        }
-        let weight = 1.0 / (list.len().max(2) as f64).sqrt();
-        let mut seen = HashSet::new();
-        for uri in list {
-            if let Some(track) = index.get(uri.as_str()) {
-                for (id, name) in track.artist_ids.iter().zip(&track.artists) {
-                    if !seed.artist_ids.contains(id) && seen.insert(id) {
-                        *affinity.entry((id.clone(), name.clone())).or_default() += weight;
-                    }
-                }
-            }
-        }
-    }
-    let mut artists: Vec<_> = affinity.into_iter().collect();
-    artists.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    artists
+    // Enrichment must follow the same seed evidence as selection: a mixed
+    // playlist containing one seed-artist song is not a license to search for
+    // arbitrary artists from that playlist.
+    let context = Context {
+        seed: seed.clone(),
+        queued: HashSet::new(),
+        session_played: HashSet::new(),
+        session_song_keys: HashSet::new(),
+        recent: Vec::new(),
+        feedback: HashMap::new(),
+        rng_seed: 42,
+        limit: SHORTLIST_SIZE,
+        discovery: Some(50),
+    };
+    let report = engine::rank(catalog, &context);
+    let mut seen = HashSet::new();
+    report
+        .selected
         .into_iter()
+        .flat_map(|selection| {
+            selection
+                .track
+                .artist_ids
+                .into_iter()
+                .zip(selection.track.artists)
+        })
+        .filter(|(id, _)| !seed.artist_ids.contains(id) && seen.insert(id.clone()))
         .take(2)
-        .map(|(artist, _)| artist)
         .collect()
 }
 
@@ -486,6 +483,25 @@ pub fn offline_report(
         artist_genres: HashMap::new(),
         familiar_artists: HashSet::new(),
     };
+    // The persisted queue is another cached metadata source, including songs
+    // from earlier playback contexts. Read it without creating a Config or
+    // altering provenance/history; online workers snapshot the live queue instead.
+    let state_path = config::config_path(ncspot::USER_STATE_FILE_NAME);
+    match std::fs::read(&state_path) {
+        Ok(bytes) => {
+            let state: config::UserState = serde_cbor::from_slice(&bytes)
+                .map_err(|error| format!("Can't read cached queue state: {error}"))?;
+            catalog.tracks.extend(
+                state
+                    .queuestate
+                    .queue
+                    .into_iter()
+                    .filter_map(|item| item.track()),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Can't read cached queue state: {error}")),
+    }
     for playlist in cached::<Vec<Playlist>>("playlists.db")?.unwrap_or_default() {
         if let Some(items) = playlist.tracks {
             catalog.playlists.push(
@@ -549,6 +565,7 @@ pub fn offline_report(
         seed: track,
         queued: HashSet::new(),
         session_played: HashSet::new(),
+        session_song_keys: HashSet::new(),
         recent: history.recent(),
         feedback: history.snapshot(),
         rng_seed,
@@ -565,14 +582,18 @@ pub fn replay_report(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("Can't read replay {}: {error}", path.display()))?;
     let mut replay: Replay =
         serde_json::from_slice(&bytes).map_err(|error| format!("Invalid replay: {error}"))?;
-    if replay.version != 1 && replay.version != 2 {
+    if !matches!(replay.version, 1..=3) {
         return Err("Unsupported radio replay version; file left unchanged".into());
     }
     if replay.version == 1 {
         replay.context.discovery = None;
         replay.context.session_played.clear();
+        replay.context.session_song_keys.clear();
     } else if replay.context.discovery.is_none() {
-        return Err("Version 2 replay is missing its discovery level".into());
+        return Err(format!(
+            "Version {} replay is missing its discovery level",
+            replay.version
+        ));
     }
     serde_json::to_string_pretty(&engine::rank(&replay.catalog, &replay.context))
         .map_err(|error| error.to_string())
@@ -581,6 +602,8 @@ pub fn replay_report(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::model::playable::Playable;
 
     fn track(id: &str) -> Track {
         Track {
@@ -602,6 +625,83 @@ mod tests {
             is_local: false,
             is_playable: Some(true),
         }
+    }
+
+    #[test]
+    fn restored_mixed_queue_is_metadata_without_reserving_every_candidate() {
+        let cfg = Config::new_for_test();
+        let events = EventManager::new_for_test();
+        let spotify = crate::spotify::Spotify::new_for_test(cfg.clone(), events.clone());
+        let library = Library::new_for_test(events, spotify.clone(), cfg.clone());
+        let mut seed = track("RestoredCountrySeed");
+        seed.artists = vec!["Country artist".into()];
+        seed.artist_ids = vec!["CountryArtist".into()];
+        seed.album_id = Some("CountrySeedAlbum".into());
+        let related: Vec<_> = (0..4)
+            .map(|index| {
+                let mut song = seed.clone();
+                song.id = Some(format!("RestoredRelated{index}"));
+                song.uri = format!("spotify:track:RestoredRelated{index}");
+                song.title = format!("Related Song {index}");
+                song.album_id = Some(format!("CountryAlbum{index}"));
+                song
+            })
+            .collect();
+        let mut entries: Vec<_> = related.iter().cloned().map(Playable::Track).collect();
+        entries.extend((0..1000).map(|index| {
+            let mut song = track(&format!("RestoredUnrelated{index}"));
+            song.artists = vec![format!("Other artist {index}")];
+            song.artist_ids = vec![format!("OtherArtist{index}")];
+            song.album_id = Some(format!("OtherAlbum{index}"));
+            Playable::Track(song)
+        }));
+        let current = entries.len();
+        entries.push(Playable::Track(seed.clone()));
+        // Related tracks are old cached context, not tracks played in this process.
+        let queue = Queue::new_for_test(entries, Some(current), spotify, cfg, library.clone());
+        queue.start_radio_track(&seed);
+        assert_eq!(
+            queue.recommendation_queued(),
+            HashSet::from([seed.uri.clone()])
+        );
+        for level in [0, 50, 100] {
+            library.cfg.set_discovery(level);
+            let (diagnostic, replay) = recommend(&queue, &library, seed.clone(), 42, 20);
+            assert_eq!(diagnostic.report.selected.len(), related.len());
+            assert!(
+                diagnostic
+                    .report
+                    .selected
+                    .iter()
+                    .all(|pick| pick.track.artist_ids == seed.artist_ids)
+            );
+            assert_eq!(replay.version, 3);
+            assert_eq!(replay.context.seed.uri, seed.uri);
+            assert_eq!(replay.context.queued.len(), 1);
+        }
+        assert_eq!(queue.queue.read().unwrap().len(), 1005);
+    }
+
+    #[test]
+    fn enrichment_does_not_search_artists_from_a_giant_mixed_seed_playlist() {
+        let seed = track("EnrichmentQualitySeed");
+        let mut tracks = vec![seed.clone()];
+        tracks.extend((0..500).map(|index| {
+            let mut song = track(&format!("EnrichmentUnrelated{index}"));
+            song.artist_ids = vec![format!("OtherEnrichmentArtist{index}")];
+            song.artists = vec![format!("Other enrichment artist {index}")];
+            song.album_id = Some(format!("OtherEnrichmentAlbum{index}"));
+            song
+        }));
+        let memberships = tracks.iter().map(|song| song.uri.clone()).collect();
+        let catalog = Catalog {
+            tracks,
+            playlists: vec![memberships],
+            saved: HashSet::new(),
+            artist_genres: HashMap::new(),
+            familiar_artists: HashSet::new(),
+        };
+        assert!(related_artists(&catalog, &seed).is_empty());
     }
 
     #[test]
@@ -643,6 +743,7 @@ mod tests {
                 seed,
                 queued: HashSet::new(),
                 session_played: HashSet::new(),
+                session_song_keys: HashSet::new(),
                 recent: vec![],
                 feedback: HashMap::new(),
                 rng_seed: 42,
@@ -693,6 +794,7 @@ mod tests {
                 seed: seed.clone(),
                 queued: HashSet::new(),
                 session_played: HashSet::new(),
+                session_song_keys: HashSet::new(),
                 recent: vec![],
                 feedback: feedback.clone(),
                 rng_seed: 42,
@@ -731,6 +833,7 @@ mod tests {
                 seed,
                 queued: HashSet::new(),
                 session_played: HashSet::new(),
+                session_song_keys: HashSet::new(),
                 recent: vec![],
                 feedback: HashMap::new(),
                 rng_seed: 99,
@@ -783,6 +886,7 @@ mod tests {
                 seed,
                 queued: HashSet::new(),
                 session_played: HashSet::new(),
+                session_song_keys: HashSet::new(),
                 recent: vec![],
                 feedback: HashMap::new(),
                 rng_seed: 99,
@@ -798,7 +902,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        for version in [1, 2, 99] {
+        for version in [1, 2, 3, 99] {
             replay.version = version;
             let bytes = serde_json::to_vec(&replay).unwrap();
             std::fs::write(&path, &bytes).unwrap();
@@ -861,6 +965,7 @@ mod tests {
             seed,
             queued: HashSet::new(),
             session_played: HashSet::new(),
+            session_song_keys: HashSet::new(),
             recent: vec![],
             feedback,
             rng_seed: 42,

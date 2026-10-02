@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
 import { createRadioScreen } from "../src/screens/radio/index.js";
 import type { Artwork } from "../src/screens/now-playing/index.js";
-import type { ParsedStatus, Track } from "../src/status.js";
+import type { ParsedStatus, Track, UpNextOrigin } from "../src/status.js";
 import type { Params, RpcApi, Screen, ScreenContext } from "../src/workspace/contracts.js";
 
 interface RadioStatus {
@@ -11,6 +11,11 @@ interface RadioStatus {
   discovery: number;
   played_count: number;
   cache_tracks: number;
+  queue_mode?: "station" | "context";
+  parked_count?: number;
+  catalog_tracks?: number;
+  radio_pending_count?: number;
+  explicit_pending_count?: number;
   seed_track?: Track;
   seed?: string;
 }
@@ -64,7 +69,7 @@ function track(index: number, title = `Next song ${String(index).padStart(2, "0"
   };
 }
 
-function liveStatus(current: Track, upcoming: Track[] = [], radioActive = false): ParsedStatus {
+function liveStatus(current: Track, upcoming: Track[] = [], radioActive = false, origins?: UpNextOrigin[], waiting = false): ParsedStatus {
   return {
     mode: { kind: "paused", positionMs: 12_000 },
     playable: current,
@@ -73,8 +78,9 @@ function liveStatus(current: Track, upcoming: Track[] = [], radioActive = false)
       discovery: 50,
       volume_percent: 68,
       radio_active: radioActive,
-      radio_waiting: false,
+      radio_waiting: waiting,
       up_next: upcoming,
+      ...(origins ? { up_next_origins: origins } : {}),
     },
   };
 }
@@ -185,8 +191,16 @@ test("Radio Studio natively fits 15 fixed-duration songs in wide side-by-side ca
     const f = await fixture({
       width,
       height: 34,
-      status: liveStatus(track(0), upcoming),
-      radioStatus: { active: true, discovery: 50 },
+      status: liveStatus(track(0), upcoming, true, Array.from({ length: 15 }, () => "radio" as const)),
+      radioStatus: {
+        active: true,
+        discovery: 50,
+        queue_mode: "station",
+        parked_count: 6,
+        catalog_tracks: 1136,
+        radio_pending_count: 15,
+        explicit_pending_count: 2,
+      },
     });
     try {
       await settle(f);
@@ -200,8 +214,10 @@ test("Radio Studio natively fits 15 fixed-duration songs in wide side-by-side ca
       expect(card.x + card.width).toBeLessThanOrEqual(width);
       expect(nextCard.x + nextCard.width).toBeLessThanOrEqual(width);
       expect(footer.y + footer.height).toBeLessThanOrEqual(nextCard.y + nextCard.height);
-      expect(content(footer)).toContain("∞ Continuous radio");
-      expect(content(footer)).toContain("12 session exclusions · 64 cached");
+      expect(content(footer)).toContain("15 radio · 2 queued (+)");
+      expect(content(footer)).toContain("6 parked · stop resumes");
+      expect(content(footer)).toContain("1,136 catalog · no auto repeats");
+      expect(content(node(f, "radio-next-title"))).toContain("UP NEXT · STATION");
 
       for (const [index, song] of upcoming.entries()) {
         const entry = node(f, `radio-next-${index}`);
@@ -227,6 +243,9 @@ test("Radio Studio natively fits 15 fixed-duration songs in wide side-by-side ca
         expect(text).toContain("Next song 15");
         expect(text).toContain("1:01");
         expect(text).toContain("1:15");
+        expect(text).toContain("1,136 catalog");
+        expect(text).toContain("stop resumes");
+        expect(text).toContain("queued (+)");
       }
     } finally {
       f.close();
@@ -252,6 +271,73 @@ test("compact Radio Studio keeps every main control inside the station card and 
     const text = new TextDecoder().decode(frame);
     expect(text).toContain("RADIO STUDIO");
     expect(text).not.toContain("UP NEXT");
+    expect(content(node(f, "radio-caption"))).toContain("Related songs only · Explore stays cache-bound.");
+  } finally {
+    f.close();
+  }
+});
+
+test("Radio Studio attributes explicit and related queue entries and preserves parked context", async () => {
+  const upcoming = [track(1, "Explicit request"), track(2, "Related pick")];
+  const f = await fixture({
+    width: 112,
+    height: 34,
+    status: liveStatus(track(0), upcoming, true, ["explicit", "radio"]),
+    radioStatus: {
+      active: true,
+      queue_mode: "station",
+      parked_count: 4,
+      catalog_tracks: 1136,
+      cache_tracks: 45,
+      radio_pending_count: 1,
+      explicit_pending_count: 1,
+    },
+  });
+  try {
+    await settle(f);
+    expect(content(node(f, "radio-next-origin-0"))).toBe("+");
+    expect(content(node(f, "radio-next-origin-1"))).toBe("◇");
+    expect(content(node(f, "radio-next-footer"))).toContain("1 radio · 1 queued (+)");
+    expect(content(node(f, "radio-next-footer"))).toContain("4 parked · stop resumes");
+    expect(content(node(f, "radio-next-footer"))).toContain("1,136 catalog · no auto repeats");
+  } finally {
+    f.close();
+  }
+});
+
+test("legacy radio status labels upcoming as queue and does not claim radio provenance", async () => {
+  const f = await fixture({
+    width: 112,
+    height: 34,
+    status: liveStatus(track(0), [track(1)], true),
+    radioStatus: { active: true },
+  });
+  try {
+    await settle(f);
+    expect(content(node(f, "radio-next-origin-0"))).toBe("");
+    expect(content(node(f, "radio-next-title"))).toBe("UP NEXT · QUEUE");
+    expect(content(node(f, "radio-next-footer"))).toContain("QUEUE UPCOMING · 1 upcoming");
+    expect(content(node(f, "radio-next-footer"))).not.toContain("STATION QUEUED");
+  } finally {
+    f.close();
+  }
+});
+
+test("waiting station reports related-cache exhaustion and finite metadata coverage", async () => {
+  const f = await fixture({
+    width: 112,
+    height: 34,
+    status: liveStatus(track(0), [], true, [], true),
+    radioStatus: { active: true, waiting: true, queue_mode: "station", parked_count: 3, catalog_tracks: 1136 },
+  });
+  try {
+    await settle(f);
+    expect(content(node(f, "radio-state"))).toContain("RELATED CACHE EXHAUSTED");
+    expect(content(node(f, "radio-next-empty"))).toContain("Waiting for related metadata");
+    expect(content(node(f, "radio-next-footer"))).toContain("RELATED CACHE EXHAUSTED");
+    expect(content(node(f, "radio-next-footer"))).toContain("3 parked · stop resumes");
+    expect(content(node(f, "radio-next-footer"))).toContain("1,136 catalog · no auto repeats");
+    expect(content(node(f, "radio-next-footer"))).not.toContain("Continuous");
   } finally {
     f.close();
   }

@@ -40,8 +40,16 @@ export class DemoApi implements RpcApi {
     else { this.status.prototype!.position_ms = position; this.publish(); }
   }
   private publish(): void {
-    this.status.prototype!.up_next = this.queue.filter(row => row.id !== this.currentId && row.kind === "track").map(row => this.playable(row) as Track);
+    const future = this.futureQueue();
+    const upcoming = future.filter(row => row.kind === "track" && (!this.status.prototype!.radio_active || row.meta?.origin === "explicit"));
+    this.status.prototype!.up_next = upcoming.map(row => this.playable(row) as Track);
+    this.status.prototype!.up_next_origins = upcoming.map(row => row.meta?.origin === "explicit" ? "explicit" : "context");
+    this.status.prototype!.radio_waiting = this.status.prototype!.radio_active && upcoming.length === 0;
     this.onStatus?.(clone(this.status));
+  }
+  private futureQueue(): Row[] {
+    const current = this.queue.findIndex(row => row.id === this.currentId);
+    return this.queue.slice(Math.max(0, current + 1));
   }
   private playable(row: Row): Playable {
     if (row.kind === "episode") return { type: "Episode", id: row.id, uri: row.uri, name: row.title, duration: row.duration_ms ?? 0 };
@@ -51,6 +59,12 @@ export class DemoApi implements RpcApi {
   private play(row: Row): void { this.currentId = row.id; this.status.playable = this.playable(row); this.status.mode = { kind: "playing", startedAtMs: Date.now() }; this.status.prototype!.position_ms = 0; this.played++; this.publish(); }
   private next(delta: number): void {
     const index = this.queue.findIndex(row => row.id === this.currentId);
+    if (delta > 0 && this.status.prototype!.radio_active) {
+      const next = this.futureQueue().find(row => row.meta?.origin === "explicit");
+      if (next) this.play(next);
+      else { this.status.mode = { kind: "paused", positionMs: this.status.prototype!.position_ms }; this.publish(); }
+      return;
+    }
     if (!this.queue.length) { this.status.mode = { kind: "stopped" }; this.status.playable = null; this.publish(); return; }
     this.play(this.queue[(index + delta + this.queue.length) % this.queue.length]!);
   }
@@ -111,7 +125,7 @@ export class DemoApi implements RpcApi {
         const item = items.find(row => row.id === p.id || row.uri === p.uri); if (!item) fail("not_found", "Demo item not found"); item.saved = action === "save"; return { source, saved: item.saved };
       }
       case "playlist.action": return this.playlistAction(p);
-      case "radio.status": return { source, active: this.status.prototype!.radio_active, waiting: this.status.prototype!.radio_waiting, seed: this.radioSeed?.uri ?? null, seed_track: this.radioSeed, discovery: this.status.prototype!.discovery, played_count: this.played, cache_tracks: this.tracks.length };
+      case "radio.status": return { source, active: this.status.prototype!.radio_active, waiting: this.status.prototype!.radio_waiting, seed: this.radioSeed?.uri ?? null, seed_track: this.radioSeed, discovery: this.status.prototype!.discovery, played_count: this.played, cache_tracks: this.tracks.length, catalog_tracks: this.tracks.length, queue_mode: this.status.prototype!.radio_active ? "station" : "context", parked_count: this.status.prototype!.radio_active ? this.futureQueue().filter(row => row.meta?.origin !== "explicit").length : 0, radio_pending_count: 0, explicit_pending_count: this.futureQueue().filter(row => row.meta?.origin === "explicit").length };
       case "radio.action": {
         const action = string(p, "action");
         if (p.uri !== undefined) this.byUri(string(p, "uri"));
@@ -161,7 +175,7 @@ export class DemoApi implements RpcApi {
     if (!["play", "remove", "move", "clear", "append", "play_next", "save"].includes(action)) fail("invalid_params", "Unsupported queue action");
     if ((p.revision !== undefined || ["play", "remove", "move", "clear", "save"].includes(action)) && String(p.revision) !== String(this.revision)) fail("stale_revision", "Demo queue changed; refresh before retrying");
     if (action === "append" || action === "play_next") {
-      const entries = this.entries(this.byUri(string(p, "uri"))); const at = action === "append" ? this.queue.length : Math.max(0, this.queue.findIndex(row => row.id === this.currentId) + 1); this.queue.splice(at, 0, ...entries);
+      const entries = this.entries(this.byUri(string(p, "uri"))).map(row => ({ ...row, meta: { ...row.meta, origin: "explicit" } })); const at = action === "append" ? this.queue.length : Math.max(0, this.queue.findIndex(row => row.id === this.currentId) + 1); this.queue.splice(at, 0, ...entries);
     } else if (action === "clear") { this.queue = []; this.status.playable = null; this.status.mode = { kind: "stopped" }; }
     else if (action === "save") { const name = string(p, "name"); const playlist = this.createPlaylist(name); this.playlistTracks.set(playlist.id, this.queue.map(row => ({ ...row, id: row.meta?.playable_id as string ?? row.id }))); }
     else {

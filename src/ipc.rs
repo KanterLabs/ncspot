@@ -47,6 +47,7 @@ struct PrototypeStatus {
     radio_active: bool,
     radio_waiting: bool,
     up_next: Vec<Track>,
+    up_next_origins: Vec<String>,
     audio: Option<AudioStatus>,
 }
 
@@ -61,10 +62,11 @@ struct AudioStatus {
 impl Status {
     fn from_queue(queue: &Queue) -> Self {
         let spotify = queue.get_spotify();
-        let current = queue.get_current_index();
-        let start = current
-            .and_then(|index| queue.play_position(index))
-            .map_or(0, |position| position + 1);
+        let upcoming: Vec<_> = queue
+            .upcoming(16)
+            .into_iter()
+            .filter_map(|(index, item)| item.track().map(|track| (index, track)))
+            .collect();
         Self {
             notifications: spotify.events().notifications(),
             mode: spotify.get_current_status(),
@@ -78,10 +80,10 @@ impl Status {
                 volume_percent: (f64::from(spotify.volume()) / 65535.0 * 100.0).round() as u16,
                 radio_active: queue.radio_active(),
                 radio_waiting: queue.radio_waiting() || queue.radio_natural_end(),
-                up_next: queue
-                    .in_play_order(start, 16)
-                    .into_iter()
-                    .filter_map(|(_, item)| item.track())
+                up_next: upcoming.iter().map(|(_, track)| track.clone()).collect(),
+                up_next_origins: upcoming
+                    .iter()
+                    .map(|(index, _)| queue.queue_origin(*index).to_owned())
                     .collect(),
                 audio: spotify.audio_tap().bands(32).map(|bands| {
                     let tap = spotify.audio_tap();
@@ -328,6 +330,34 @@ mod tests {
             expected.iter().map(String::as_str).collect::<Vec<_>>()
         );
         assert!(!up_next.contains(&"FixtureTrack03"));
+    }
+
+    #[test]
+    fn status_up_next_reports_only_station_lane_with_explicit_provenance() {
+        let config = Config::new_for_test();
+        let events = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(config.clone(), events.clone());
+        let library = Library::new_for_test(events, spotify.clone(), config.clone());
+        let seed = fixture_track(0);
+        let queue = Queue::new_for_test(
+            (0..100)
+                .map(|index| Playable::Track(fixture_track(index)))
+                .collect(),
+            Some(0),
+            spotify,
+            config,
+            library,
+        );
+        queue.start_radio_track(&seed);
+        queue.rpc_append_many(&[Playable::Track(fixture_track(101))]);
+        let status = Status::from_queue(&queue);
+        assert_eq!(status.prototype.up_next.len(), 1);
+        assert_eq!(
+            status.prototype.up_next[0].id.as_deref(),
+            Some("FixtureTrack101")
+        );
+        assert_eq!(status.prototype.up_next_origins, vec!["explicit"]);
+        assert_eq!(queue.queue.read().unwrap().len(), 101);
     }
 
     /// Hosts the actual IPC/RPC stack for an externally driven OpenTUI integration test.

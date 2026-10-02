@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { createTestRenderer } from "@opentui/core/testing";
 import { WorkspaceClient, RpcError } from "../src/workspace/client.js";
 import { mountWorkspace } from "../src/workspace/app.js";
+import type { ParsedStatus } from "../src/status.js";
 import { ROUTES, type Page } from "../src/workspace/contracts.js";
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -26,9 +27,10 @@ const fixture = Bun.spawn([executable, "--ignored", "--exact", "ipc::tests::open
 const stdout = new Response(fixture.stdout).text();
 const stderr = new Response(fixture.stderr).text();
 let broadcasts = 0;
+let lastStatus: ParsedStatus | undefined;
 let app: ReturnType<typeof mountWorkspace> | undefined;
 let renderer: Awaited<ReturnType<typeof createTestRenderer>>["renderer"] | undefined;
-const client = new WorkspaceClient(socket, { onStatus(status) { broadcasts++; app?.setStatus(status); } }, 5000);
+const client = new WorkspaceClient(socket, { onStatus(status) { lastStatus = status; broadcasts++; app?.setStatus(status); } }, 5000);
 try {
   const deadline = Date.now() + 15000;
   while (!existsSync(socket) && Date.now() < deadline && fixture.exitCode === null) await delay(20);
@@ -58,6 +60,23 @@ try {
   assert.equal(queue.items[2]?.meta?.current, true);
   await client.call("radio.action", { action: "discovery", value: 73 });
   const radio = await client.call<{ discovery: number }>("radio.status"); assert.equal(radio.discovery, 73);
+  await client.call("radio.action", { action: "start" });
+  const stationDeadline = Date.now() + 5000;
+  let station = await client.call<{ radio_pending_count: number; parked_count: number; queue_mode: string }>("radio.status");
+  while (!station.radio_pending_count && Date.now() < stationDeadline) {
+    await delay(20);
+    station = await client.call<typeof station>("radio.status");
+  }
+  assert.equal(station.queue_mode, "station");
+  assert.ok(station.parked_count >= 2, "previous playlist context was not retained");
+  assert.equal(station.radio_pending_count, 1, "cached related track was blocked by parked context");
+  await client.call("queue.action", { action: "append", uri: "spotify:track:FixtureTrackAlpha00001" });
+  const statusDeadline = Date.now() + 5000;
+  while (!lastStatus?.prototype?.up_next_origins?.includes("explicit") && Date.now() < statusDeadline) await delay(20);
+  assert.deepEqual(lastStatus?.prototype?.up_next_origins, ["explicit", "radio"]);
+  assert.equal(lastStatus?.prototype?.up_next[0]?.title, "Fixture Alpha");
+  assert.equal(lastStatus?.prototype?.up_next[1]?.title, "Fixture Beta");
+  await client.call("radio.action", { action: "stop" });
   await assert.rejects(client.call("player.action", { action: "volume", value: 101 }), error => error instanceof RpcError && error.code === "invalid_params");
   await assert.rejects(client.call("unknown.method"), error => error instanceof RpcError && error.code === "unknown_method");
 
@@ -79,7 +98,7 @@ try {
   await client.call("settings.action", { action: "command", command: "quit" });
   assert.equal(await fixture.exited, 0, await stderr);
   assert.ok(!existsSync(socket), "Server socket leaked after shutdown");
-  console.log("Engine contract passed: real Rust RPC, cached data, context playback, stale edits, status broadcasts, all OpenTUI routes in both themes.");
+  console.log("Engine contract passed: real Rust RPC, cached data, isolated radio, explicit priority, context playback, stale edits, status broadcasts, all OpenTUI routes in both themes.");
 } catch (error) { console.error(await Promise.race([stderr, delay(10).then(() => "")])); throw error; }
 finally {
   app?.dispose(); renderer?.destroy(); client.close();

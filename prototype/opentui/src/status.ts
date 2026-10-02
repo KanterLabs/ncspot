@@ -29,6 +29,9 @@ export interface Episode {
 
 export type Playable = Track | Episode;
 
+/** Provenance for one item in the backend's eligible up-next window. */
+export type UpNextOrigin = "explicit" | "radio" | "context";
+
 export type PlayerMode =
   | { kind: "playing"; startedAtMs: number }
   | { kind: "paused"; positionMs: number }
@@ -42,6 +45,8 @@ export interface PrototypeStatus {
   radio_active: boolean;
   radio_waiting: boolean;
   up_next: Track[];
+  /** Parallel to `up_next`; absent on older backends. */
+  up_next_origins?: UpNextOrigin[];
   audio?: { bands: number[]; level: number; pulse: number; tempo: number | null };
 }
 
@@ -68,6 +73,7 @@ const EMPTY_PROTOTYPE: PrototypeStatus = {
   radio_active: false,
   radio_waiting: false,
   up_next: [],
+  up_next_origins: [],
 };
 
 const clamp = (value: number, min: number, max: number): number =>
@@ -116,6 +122,14 @@ function parseSystemTime(value: unknown): number {
 function parseArtists(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((artist): artist is string => typeof artist === "string" && artist.length > 0);
+}
+
+function parseUpNextOrigins(value: unknown): UpNextOrigin[] {
+  if (!Array.isArray(value)) return [];
+  const origins = value.map(origin =>
+    origin === "explicit" || origin === "radio" || origin === "context" ? origin : undefined,
+  );
+  return origins.every((origin): origin is UpNextOrigin => origin !== undefined) ? origins : [];
 }
 
 /** Parse a Track as serialized by ncspot, including queue entries without `type`. */
@@ -179,6 +193,7 @@ function parsePrototype(value: unknown): PrototypeStatus | null {
     up_next: Array.isArray(raw.up_next)
       ? raw.up_next.map(parseTrack).filter((track): track is Track => track !== null)
       : [],
+    up_next_origins: parseUpNextOrigins(raw.up_next_origins),
     ...(objectRecord(raw.audio) && Array.isArray(objectRecord(raw.audio)!.bands) ? { audio: {
       bands: (objectRecord(raw.audio)!.bands as unknown[]).map(value => clamp(finiteNumber(value), 0, 1)),
       level: clamp(finiteNumber(objectRecord(raw.audio)!.level), 0, 1),
