@@ -5,6 +5,21 @@ import { DemoApi } from "../src/workspace/demo.js";
 import { ROUTES } from "../src/workspace/contracts.js";
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 10));
+test("Browse opens the selected category with native Enter and returns with Backspace", async () => {
+  const { renderer, mockInput } = await createTestRenderer({ width: 80, height: 24 });
+  const api = new DemoApi();
+  const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  const app = mountWorkspace(renderer, { api: { async call<T>(method: string, params?: Record<string, unknown>) { calls.push({ method, params }); return api.call<T>(method, params); } }, theme: "light", reducedMotion: true });
+  try {
+    app.navigate("browse"); await settle();
+    mockInput.pressArrow("down"); mockInput.pressEnter(); await settle();
+    expect(calls.some(call => call.method === "library.detail" && call.params?.id === "category-2")).toBe(true);
+    const before = calls.filter(call => call.method === "library.list" && call.params?.kind === "browse").length;
+    mockInput.pressBackspace(); await settle();
+    expect(calls.filter(call => call.method === "library.list" && call.params?.kind === "browse")).toHaveLength(before + 1);
+  } finally { app.dispose(); renderer.destroy(); }
+});
+
 test("complete workspace navigates every real screen in both themes at 80x24", async () => {
   const { renderer, renderOnce, captureCharFrame, mockInput } = await createTestRenderer({ width: 80, height: 24 });
   const api = new DemoApi();

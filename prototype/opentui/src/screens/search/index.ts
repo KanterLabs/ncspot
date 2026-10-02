@@ -34,7 +34,10 @@ export const createSearchScreen: ScreenFactory = (ctx, params = {}) => {
     handleKey(key) {
       if (surface.editing()) return surface.handleKey(key);
       if (key.ctrl || key.meta) return surface.handleKey(key);
-      const name = key.sequence?.length === 1 ? key.sequence : key.name;
+      // OpenTUI keeps printable input in `sequence`, but named keys such as
+      // Enter also carry a one-character terminal sequence ("\r"). Prefer
+      // the semantic name so a real Enter reaches the playback branch.
+      const name = key.name?.toLowerCase() || key.sequence;
       if (name === "/") { prompt(); return true; }
       if (name === "tab") {
         kind = cycleSearchKind(kind, key.shift);

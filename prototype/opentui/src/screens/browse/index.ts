@@ -31,7 +31,7 @@ export const createBrowseScreen: ScreenFactory = (ctx, params = {}) => {
     handleKey(key) {
       if (surface.editing()) return surface.handleKey(key);
       if (key.ctrl || key.meta) return surface.handleKey(key);
-      const name = key.sequence?.length === 1 ? key.sequence : key.name;
+      const name = key.name?.toLowerCase() || key.sequence;
       if (name === "backspace" && category) { ctx.navigate("browse"); return true; }
       if (name === "r") { void refresh(); return true; }
       if (name === "]" || name === "[") {

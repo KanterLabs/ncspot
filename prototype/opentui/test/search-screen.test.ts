@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
+import type { KeyEvent } from "@opentui/core";
+import { createTestRenderer } from "@opentui/core/testing";
 import type { Page, Params, Row, ScreenContext } from "../src/workspace/contracts.js";
+import { createSearchScreen } from "../src/screens/search/index.js";
 import { cycleSearchKind, openResult, PageLoader, resultAction, SEARCH_KINDS, searchKind } from "../src/screens/search/model.js";
 
 const row: Row = { id: "one", kind: "track", title: "One", subtitle: "Artist", uri: "spotify:track:one" };
@@ -109,6 +112,63 @@ test("result selection maps playback, category, library, playlists and shows", a
   expect(routes[2]?.[1]).toEqual({ kind: "artist", id: "one", uri: row.uri, title: row.title });
   expect(() => openResult(ctx, { ...row, uri: undefined })).toThrow("no playable URI");
   expect(searchKind("unknown")).toBe("tracks");
+});
+test("search handles parsed Enter after cached refresh failure and plays selected track", async () => {
+  const setup = await createTestRenderer({ width: 80, height: 24 });
+  const calls: [string, Params | undefined][] = [];
+  const first = { ...row, title: "Another Song" };
+  const second = { ...row, id: "two", title: "Say Why - Acoustic", uri: "spotify:track:two" };
+  const cached: Page = { ...page("Another Song"), items: [first, second], total: 2, source: "search_cache", refresh_available: true };
+  const context: ScreenContext = {
+    renderer: setup.renderer,
+    api: { async call<T>(method: string, params?: Params) {
+      calls.push([method, params]);
+      if (method === "search" && params?.refresh) throw new Error("Spotify request failed");
+      return (method === "search" ? cached : {}) as T;
+    } },
+    theme: () => "dark", setTheme() {}, reducedMotion: () => true, setReducedMotion() {}, status: () => null,
+    onStatus: () => () => {}, navigate() {}, notify() {},
+  };
+  const screen = createSearchScreen(context, { query: "say why" });
+  setup.renderer.root.add(screen.root);
+  const listener = (key: KeyEvent) => { if (screen.handleKey(key)) key.preventDefault(); };
+  setup.renderer.keyInput.on("keypress", listener);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    setup.mockInput.pressArrow("down");
+    setup.mockInput.pressEnter();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls.at(-1)).toEqual(["player.action", { action: "play", uri: second.uri }]);
+    expect(calls.some(([method, params]) => method === "search" && params?.refresh === true)).toBe(true);
+  } finally {
+    setup.renderer.keyInput.off("keypress", listener);
+    screen.dispose();
+    setup.renderer.destroy();
+  }
+});
+test("search cycles categories on a parsed Tab event", async () => {
+  const setup = await createTestRenderer({ width: 80, height: 24 });
+  const calls: [string, Params | undefined][] = [];
+  const context: ScreenContext = {
+    renderer: setup.renderer,
+    api: { async call<T>(method: string, params?: Params) { calls.push([method, params]); return (method === "search" ? page("Search result") : {}) as T; } },
+    theme: () => "dark", setTheme() {}, reducedMotion: () => true, setReducedMotion() {}, status: () => null,
+    onStatus: () => () => {}, navigate() {}, notify() {},
+  };
+  const screen = createSearchScreen(context, { query: "say why" });
+  setup.renderer.root.add(screen.root);
+  const listener = (key: KeyEvent) => { if (screen.handleKey(key)) key.preventDefault(); };
+  setup.renderer.keyInput.on("keypress", listener);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    setup.mockInput.pressTab();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls.some(([method, params]) => method === "search" && params?.kind === "albums")).toBe(true);
+  } finally {
+    setup.renderer.keyInput.off("keypress", listener);
+    screen.dispose();
+    setup.renderer.destroy();
+  }
 });
 test("search category cycling includes episodes and wraps in both directions", () => {
   expect(searchKind("episodes")).toBe("episodes");

@@ -93,12 +93,26 @@ try {
       if (route === "queue" || route === "library") assert.ok(frame.includes("Fixture Alpha"), `${route} failed to display Rust data`);
     }
   }
+  // A failed automatic search refresh must not prevent the native Enter key
+  // from playing the selected cached result through the actual Rust engine.
+  app.navigate("search", { query: "Fixture" });
+  await app.refresh(); await delay(20); await native.renderOnce();
+  assert.ok(native.captureCharFrame().includes("Showing cached results"));
+  native.mockInput.pressArrow("down");
+  native.mockInput.pressEnter();
+  const playedDeadline = Date.now() + 5000;
+  let played = await client.call<{ current?: { uri?: string } }>("player.status");
+  while (played.current?.uri !== "spotify:track:FixtureTrackBeta000002" && Date.now() < playedDeadline) {
+    await delay(20);
+    played = await client.call<typeof played>("player.status");
+  }
+  assert.equal(played.current?.uri, "spotify:track:FixtureTrackBeta000002", "native Enter did not play the selected cached search result");
   assert.ok(broadcasts > 1, "Status broadcasting stalled during RPC requests");
   app.dispose(); renderer.destroy(); renderer = undefined;
   await client.call("settings.action", { action: "command", command: "quit" });
   assert.equal(await fixture.exited, 0, await stderr);
   assert.ok(!existsSync(socket), "Server socket leaked after shutdown");
-  console.log("Engine contract passed: real Rust RPC, cached data, isolated radio, explicit priority, context playback, stale edits, status broadcasts, all OpenTUI routes in both themes.");
+  console.log("Engine contract passed: real Rust RPC, cached search Enter playback, isolated radio, explicit priority, context playback, stale edits, status broadcasts, all OpenTUI routes in both themes.");
 } catch (error) { console.error(await Promise.race([stderr, delay(10).then(() => "")])); throw error; }
 finally {
   app?.dispose(); renderer?.destroy(); client.close();
