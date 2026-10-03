@@ -21,26 +21,77 @@ export function glassPixels(pixels: Uint8Array, width: number, height: number, t
   const background = rgb(colors.cover);
   const tint = theme === "light" ? [225, 230, 255] : [183, 166, 231];
   const result = new Uint8Array(width * height * 4);
-  const radius = Math.min(width, height) * 0.055;
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
     const input = y * stride + x * 4, output = (y * width + x) * 4;
     const nx = (x + 0.5) / width, ny = (y + 0.5) / height;
     // A restrained diagonal reflection and edge shade; no blur of the artwork.
     const reflection = Math.max(0, 1 - Math.abs(nx + ny * 0.75 - 0.32) / 0.26) * (theme === "light" ? 0.09 : 0.055);
     const edge = Math.max(0, Math.hypot(nx - 0.5, ny - 0.5) - 0.38) * 0.13;
-    const cx = Math.max(radius - x - 0.5, x + 0.5 - (width - radius), 0);
-    const cy = Math.max(radius - y - 0.5, y + 0.5 - (height - radius), 0);
-    const mask = cx === 0 && cy === 0 ? 1 : Math.min(1, Math.max(0, radius + 0.5 - Math.hypot(cx, cy)));
-    const alpha = mask * pixels[input + 3]! / 255;
+    // Keep every source pixel, including the corners.  Rounded masking here
+    // clipped the native image before Kitty/Sixel had a chance to fit it.
+    const alpha = pixels[input + 3]! / 255;
     for (let channel = 0; channel < 3; channel++) {
       const washed = pixels[input + channel]! * 0.965 + tint[channel]! * 0.035;
       const finished = (washed * (1 - reflection) + 255 * reflection) * (1 - edge);
       result[output + channel] = Math.round(finished * alpha + background[channel]! * (1 - alpha));
     }
-    // Composite rounded edges into the theme so Sixel and Kitty look alike.
+    // Composite transparency into the theme so Sixel and Kitty look alike.
     result[output + 3] = 255;
   }
   return result;
+}
+
+type NativeArtworkRenderer = Pick<CliRenderer, "resolution" | "width" | "height">;
+
+/**
+ * Add a small theme-coloured letterbox when cell rounding would stretch the
+ * source. OpenTUI allocates whole cells and then rounds their physical pixel
+ * size independently, so a square source can otherwise become 200x208px.
+ * Returning null leaves the caller's image ownership unchanged.
+ */
+export function letterboxNativeArtwork(
+  image: NativeImage,
+  renderer: NativeArtworkRenderer,
+  targetWidth: number,
+  targetHeight: number,
+  background: readonly [number, number, number, number],
+): NativeImage | null {
+  const resolution = renderer.resolution;
+  const terminalWidth = renderer.width;
+  const terminalHeight = renderer.height;
+  if (!resolution || resolution.width <= 0 || resolution.height <= 0 || terminalWidth <= 0 || terminalHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) return null;
+
+  const pixelWidth = Math.max(1, Math.round((targetWidth * resolution.width) / terminalWidth));
+  const pixelHeight = Math.max(1, Math.round((targetHeight * resolution.height) / terminalHeight));
+  const physicalAspect = pixelWidth / pixelHeight;
+  if (!Number.isFinite(physicalAspect) || physicalAspect <= 0) return null;
+
+  // Make the complete source fit the physical viewport. ImageRenderable then
+  // fits this canvas into the same cells, leaving the added pixels as a
+  // centred letterbox instead of stretching or cropping the source.
+  let canvasWidth = image.width;
+  let canvasHeight = image.height;
+  const sourceAspect = image.width / image.height;
+  if (sourceAspect > physicalAspect) {
+    canvasHeight = Math.max(image.height, Math.ceil(image.width / physicalAspect));
+  } else if (sourceAspect < physicalAspect) {
+    canvasWidth = Math.max(image.width, Math.ceil(image.height * physicalAspect));
+  }
+  // Geometry is terminal-reported input; keep a pathological ratio from
+  // turning a 640px cover into an unbounded padding allocation.
+  const maxCanvasDimension = Math.max(image.width, image.height) * 2;
+  if (canvasWidth > maxCanvasDimension || canvasHeight > maxCanvasDimension) return null;
+  if (canvasWidth === image.width && canvasHeight === image.height) return null;
+
+  const horizontal = canvasWidth - image.width;
+  const vertical = canvasHeight - image.height;
+  return image.extend({
+    top: Math.floor(vertical / 2),
+    right: Math.floor(horizontal / 2),
+    bottom: vertical - Math.floor(vertical / 2),
+    left: horizontal - Math.floor(horizontal / 2),
+    background,
+  });
 }
 
 export function glassArtwork(value: HighResolutionArtwork, theme: ThemeName): NativeImage | null {

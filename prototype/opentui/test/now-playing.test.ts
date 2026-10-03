@@ -145,6 +145,57 @@ test("native covers retain full image detail, repaint themes locally, and preser
   } finally { f.close(); }
 });
 
+test("native covers stay centered inside the cover box after Kitty and Sixel geometry resizes", async () => {
+  for (const nativeArtwork of [true, "sixel"] as const) {
+    const f = await fixtureCtx({ width: 96, height: 34, nativeArtwork, artwork: params => ({
+      ...coloredArtwork(String(params.uri), Number(params.width), Number(params.height)),
+      image: { mime: "image/png", width: 64, height: 64, data: testPng(64, 64) },
+    }) });
+    let resolution = { width: 960, height: 707 };
+    Object.defineProperty(f.renderer, "resolution", { configurable: true, get: () => resolution });
+    try {
+      for (const size of [[96, 34], [80, 24], [120, 40]] as const) {
+        resolution = { width: size[0] * 10, height: size[1] * 20.8 };
+        f.resize(size[0], size[1]);
+        await settle(f);
+        const node = f.screen.root.findDescendantById("np-cover-image") as ImageRenderable;
+        const box = f.screen.root.findDescendantById("np-cover-box")!;
+        expect(node.visible).toBe(true);
+        expect(node.x).toBeGreaterThanOrEqual(box.x);
+        expect(node.y).toBeGreaterThanOrEqual(box.y);
+        expect(node.x + node.width).toBeLessThanOrEqual(box.x + box.width);
+        expect(node.y + node.height).toBeLessThanOrEqual(box.y + box.height);
+        expect(node.image?.width).toBeGreaterThanOrEqual(64);
+        expect(node.image?.height).toBeGreaterThanOrEqual(64);
+        expect(node.image?.height).toBeGreaterThan(node.image?.width ?? 0);
+        const fitted = node.getFittedSize(node.width, node.height);
+        const contentWidth = fitted.width * resolution.width / size[0] * 64 / (node.image?.width ?? 64);
+        const contentHeight = fitted.height * resolution.height / size[1] * 64 / (node.image?.height ?? 64);
+        expect(Math.abs(Math.round(contentWidth) - Math.round(contentHeight))).toBeLessThanOrEqual(1);
+      }
+    } finally { f.close(); }
+  }
+});
+
+test("Kitty pixel geometry arriving late refits the cached cover without a backend request", async () => {
+  const paused = trackStatus(); paused.mode = { kind: "paused", positionMs: 82_000 };
+  const f = await fixtureCtx({ nativeArtwork: true, status: paused, reducedMotion: true, artwork: params => ({
+    ...coloredArtwork(String(params.uri), Number(params.width), Number(params.height)),
+    image: { mime: "image/png", width: 64, height: 64, data: testPng(64, 64) },
+  }) });
+  try {
+    await settle(f);
+    const node = f.screen.root.findDescendantById("np-cover-image") as ImageRenderable;
+    expect(node.image?.height).toBe(64);
+    const requests = f.calls.filter(call => call.method === "player.artwork").length;
+    Object.defineProperty(f.renderer, "resolution", { get: () => ({ width: 960, height: 782 }) });
+    f.renderer.emit("frame"); await settle(f);
+    expect(node.image?.width).toBe(64);
+    expect(node.image?.height).toBe(74);
+    expect(f.calls.filter(call => call.method === "player.artwork")).toHaveLength(requests);
+  } finally { f.close(); }
+});
+
 test("Sixel geometry arriving while paused switches from cells to native artwork", async () => {
   const paused = trackStatus(); paused.mode = { kind: "paused", positionMs: 82_000 };
   const f = await fixtureCtx({ nativeArtwork: "sixel", status: paused, reducedMotion: true, artwork: params => ({

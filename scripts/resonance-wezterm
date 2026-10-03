@@ -1,0 +1,40 @@
+#!/bin/sh
+# Open Resonance in an image-capable terminal with normal tabs and window controls.
+set -eu
+
+if [ "${1-}" = "--session" ]; then
+    shift
+    "$@" || :
+    exec "${SHELL:-/bin/bash}" -l
+fi
+
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'Usage: resonance-wezterm' 'Opens Resonance; q returns to your shell.'
+    [ "$1" = "--help" ] && exit 0
+    exit 2
+fi
+
+command -v wezterm >/dev/null 2>&1 || { echo 'WezTerm is required.' >&2; exit 1; }
+engine=$(command -v resonance) || { echo 'Resonance is required.' >&2; exit 1; }
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+self="$self_dir/$(basename -- "$0")"
+socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/resonance/resonance.sock"
+
+if [ -S "$socket" ]; then
+    frontend=$(command -v resonance-opentui) || { echo 'resonance-opentui is required.' >&2; exit 1; }
+    set -- "$frontend" --socket "$socket"
+else
+    set -- "$engine"
+fi
+
+exec wezterm \
+    --config enable_kitty_graphics=true \
+    --config 'window_decorations="INTEGRATED_BUTTONS|RESIZE"' \
+    --config 'integrated_title_button_style="Gnome"' \
+    --config enable_tab_bar=true \
+    --config hide_tab_bar_if_only_one_tab=false \
+    --config use_fancy_tab_bar=true \
+    --config window_background_opacity=1.0 \
+    --config initial_cols=128 \
+    --config initial_rows=32 \
+    start --always-new-process -- "$self" --session "$@"

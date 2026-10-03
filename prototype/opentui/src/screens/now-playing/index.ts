@@ -5,7 +5,7 @@ import { paletteForTheme, type ThemePalette } from "../../theme.js";
 import { artworkTint, blendHex, blendPixels } from "./motion-colors.js";
 import { MOTION, PlayerMotion, ease, playingBars, queueKeys } from "./motion.js";
 import { createQuickSearch } from "./quick-search.js";
-import { glassArtwork, supportsImageArtwork, type HighResolutionArtwork } from "./glass-artwork.js";
+import { glassArtwork, letterboxNativeArtwork, supportsImageArtwork, type HighResolutionArtwork } from "./glass-artwork.js";
 
 export function ambientProgress(position: number, duration: number, width = 36): string {
   const fraction = duration > 0 ? Math.min(1, Math.max(0, position / duration)) : 0;
@@ -62,6 +62,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   let artWidth = 20;
   let artHeight = 10;
   let nativeUri: string | undefined;
+  let nativeArtworkKey = "";
   const texts: Array<{ node: TextRenderable; tone: keyof ThemePalette; background: keyof ThemePalette }> = [];
   const root = new BoxRenderable(ctx.renderer, { id: "np-root", width: "100%", height: "100%", minHeight: 0, flexDirection: "column", justifyContent: "center", alignItems: "center" });
   const quickSearch = createQuickSearch(ctx, root);
@@ -231,10 +232,19 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     card.borderColor = blendHex(colors.border, tint, 0.18);
   }
   function updateNativeArtwork() {
-    const source = coverValue?.image && supportsImageArtwork(ctx.renderer) ? glassArtwork(coverValue.image, theme) : null;
+    const resolution = ctx.renderer.resolution;
+    const key = `${coverValue?.uri ?? ""}:${theme}:${artWidth}x${artHeight}:${ctx.renderer.width}x${ctx.renderer.height}:${resolution?.width ?? 0}x${resolution?.height ?? 0}:${supportsImageArtwork(ctx.renderer)}`;
+    if (key === nativeArtworkKey) return;
+    nativeArtworkKey = key;
+    const decoded = coverValue?.image && supportsImageArtwork(ctx.renderer) ? glassArtwork(coverValue.image, theme) : null;
+    const background = paletteForTheme(theme).cover;
+    const rgb = (hex: string): [number, number, number, number] => [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16)).concat(255) as [number, number, number, number];
+    const inset = decoded ? letterboxNativeArtwork(decoded, ctx.renderer, artWidth, artHeight, rgb(background)) : null;
+    const source = inset ?? decoded;
     nativeUri = source ? coverValue?.uri : undefined;
     coverImage.source = source ?? undefined;
-    source?.dispose(); // ImageRenderable synchronously retains its own reference.
+    inset?.dispose();
+    decoded?.dispose(); // ImageRenderable synchronously retains its own reference.
   }
   async function loadArtwork(force = false) {
     const identity = uri(); const highResolution = supportsImageArtwork(ctx.renderer);
@@ -242,7 +252,7 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     if (!force && key === artworkKey) return;
     const now = Date.now();
     coverFrom = coverPixels(now); coverValue = null; coverAt = now;
-    nativeUri = undefined; coverImage.source = undefined;
+    nativeUri = undefined; nativeArtworkKey = ""; coverImage.source = undefined;
     tintFrom = currentTint(now); tintTo = null; tintAt = now;
     artworkKey = key; const generation = ++artworkGeneration; paintCover(now); syncTimer();
     if (!identity) return;
@@ -352,6 +362,9 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
     const upcoming = `${Math.min(15, upNext.length)}${upNext.length > 15 ? "+" : ""} upcoming · 2 open queue`;
     queueFoot.content = status?.prototype?.radio_active ? `✧ Continuous radio\n${upNext.length ? upcoming : "Finding fresh tracks…"}` : upNext.length ? upcoming : "✧ Shift+R starts radio";
     void loadArtwork();
+    // Geometry can arrive after the image response (notably Sixel), and a
+    // resize can change the physical cell ratio without changing art cells.
+    updateNativeArtwork();
     paintCover(now);
   }
   function syncTimer() {
@@ -397,9 +410,10 @@ export const createNowPlayingScreen: ScreenFactory = (ctx) => {
   const onFrame = () => {
     const ready = supportsImageArtwork(ctx.renderer);
     if (ready !== graphicsReady) { graphicsReady = ready; render(); }
+    else if (ready) updateNativeArtwork();
   };
-  // Pixel geometry arrives asynchronously without a resize event. Recheck
-  // only protocol readiness, including for paused/reduced-motion sessions.
+  // Pixel geometry can arrive asynchronously without a resize event. The
+  // native source key makes this cheap once geometry has settled.
   ctx.renderer.on("frame", onFrame);
   applyTheme(); render(); syncTimer(); void loadMetadata();
   return {
