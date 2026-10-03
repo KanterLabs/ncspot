@@ -618,7 +618,7 @@ mod tests {
     fn temp_path(name: &str) -> (PathBuf, PathBuf) {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "ncspot-radio-history-test-{}-{id}",
+            "resonance-radio-history-test-{}-{id}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();

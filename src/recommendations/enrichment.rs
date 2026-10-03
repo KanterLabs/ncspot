@@ -960,7 +960,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
-        let unique = format!("ncspot-{name}-{}-{stamp}.json", std::process::id());
+        let unique = format!("resonance-{name}-{}-{stamp}.json", std::process::id());
         std::env::temp_dir().join(unique)
     }
 
