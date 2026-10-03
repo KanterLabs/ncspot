@@ -1,7 +1,7 @@
 <div align="center" style="text-align:center">
   <img alt="Resonance logo" height="128" src="images/resonance.svg">
   <h1>Resonance</h1>
-  <h3>A KanterLabs native terminal Spotify client built on ncspot</h3>
+  <h3>A KanterLabs native terminal Spotify client built from ncspot</h3>
 
   <img alt="Resonance search tab" src="images/screenshot.png">
 </div>
@@ -14,7 +14,14 @@ as the default interface on Unix. The retained ncspot Cursive interface is avail
 This fork carries substantial code and design from [ncspot](https://github.com/hrkfdn/ncspot),
 the original project by Henrik Friedrichsen and contributors. Please see the upstream project for
 its history and the retained [BSD-2-Clause license](LICENSE). KanterLabs' changes are maintained in
-the [KanterLabs/ncspot repository](https://github.com/KanterLabs/ncspot).
+the [KanterLabs/resonance repository](https://github.com/KanterLabs/resonance).
+
+The canonical source is maintained in [KanterLabs' Gitea repository](https://gitea.home.shanekanterman.dev/KanterLabs/resonance);
+the public
+[KanterLabs/resonance GitHub repository](https://github.com/KanterLabs/resonance) is its mirror.
+Use the public mirror for source browsing and issue links when the canonical Gitea instance is not
+available. The `upstream` remote remains [hrkfdn/ncspot](https://github.com/hrkfdn/ncspot) so that
+the original project history and attribution stay clear.
 
 Resonance requires a Spotify Premium account for playback features that Spotify does not expose to
 free accounts.
@@ -51,9 +58,26 @@ Fedora release archives contain all three executables and dependency notices. Re
 after updating so the backend and frontend use the same version.
 
 Use `resonance --headless` to run only the Rust engine, or `resonance --legacy-ui` for the retained
-Cursive interface. Windows currently uses the legacy interface. The upstream
+Cursive interface. Windows currently uses the legacy interface. The updater command is
+`resonance-update`; `ncspot-update` remains a compatibility alias for existing installations.
+The upstream
 [user guide](/doc/users.md) retains ncspot's historical distribution instructions; those package
 channels are separate from KanterLabs' Resonance builds.
+
+## Updating
+
+Source [`scripts/resonance-update.sh`](scripts/resonance-update.sh) in Bash to define the
+`resonance-update` command for the Fedora build channel:
+
+```sh
+source /path/to/resonance/scripts/resonance-update.sh
+resonance-update
+```
+
+For Debian packages, source `/usr/share/resonance/resonance-update.sh`. It installs `resonance`, `resonance-opentui`, and the retained
+`ncspot` executable alias together after verifying the downloaded artifact. Existing users may
+continue invoking `ncspot-update`; it forwards to the same Resonance updater. Restart Resonance
+after an update so the backend and frontend use the same version.
 
 ## Spotify app setup
 

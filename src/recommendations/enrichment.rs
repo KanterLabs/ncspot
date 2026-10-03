@@ -3,7 +3,7 @@
 //! Radio is deliberately independent from this store.  A refresh only adds
 //! useful catalogue data to the cache; it never changes the queue or waits on
 //! a radio request.  The on-disk representation is owned by this module so a
-//! schema change here cannot invalidate any of ncspot's other caches.
+//! schema change here cannot invalidate any of Resonance's other caches.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -104,7 +104,7 @@ pub fn shared() -> Arc<Enrichment> {
 }
 
 impl Enrichment {
-    /// Open the radio catalogue in ncspot's cache directory.
+    /// Open the radio catalogue in Resonance's cache directory.
     pub fn new() -> Self {
         #[cfg(test)]
         {

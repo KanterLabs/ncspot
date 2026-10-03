@@ -11,10 +11,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Keep the public library crate name for the existing internal module imports while the
-# installed application and package take the Resonance name.
+# The public library crate follows the installed application's Resonance name.
 [lib]
-name = "ncspot"
+name = "resonance"
 path = "src/lib.rs"
 
 [[bin]]
@@ -40,7 +39,7 @@ members = [
 authors = ["KanterLabs contributors", "Henrik Friedrichsen <henrik@affekt.org>"]
 edition = "2024"
 license = "BSD-2-Clause"
-repository = "https://github.com/KanterLabs/ncspot"
+repository = "https://github.com/KanterLabs/resonance"
 
 [workspace.lints.clippy]
 enum_glob_use = "warn"
@@ -135,8 +134,17 @@ termion_backend = ["cursive/termion-backend"]
 assets = [
   ["target/release/resonance", "usr/bin/", "755"],
   ["target/release/ncspot", "usr/bin/", "755"],
+  ["prototype/opentui/dist/resonance-opentui", "usr/bin/", "755"],
+  ["scripts/resonance-wezterm", "usr/bin/", "755"],
+  ["scripts/resonance-update.sh", "usr/share/resonance/", "644"],
+  ["scripts/ncspot-update.sh", "usr/share/resonance/", "644"],
   ["misc/resonance.desktop", "usr/share/applications/", "644"],
   ["images/resonance.svg", "usr/share/icons/hicolor/scalable/apps/resonance.svg", "644"],
+  ["misc/resonance.1", "usr/share/man/man1/", "644"],
+  ["misc/resonance.bash", "usr/share/bash-completion/completions/resonance", "644"],
+  ["misc/_resonance", "usr/share/zsh/site-functions/", "644"],
+  ["misc/resonance.fish", "usr/share/fish/vendor_completions.d/", "644"],
+  ["prototype/opentui/dist/licenses/**/*", "usr/share/doc/resonance/licenses/", "644"],
   ["README.md", "usr/share/doc/resonance/README.md", "644"],
 ]
 depends = "$auto"

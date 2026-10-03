@@ -213,7 +213,7 @@ fn same_name(a: &str, b: &str) -> bool {
 }
 
 fn is_local_device(name: &str) -> bool {
-    name == ncspot::BIN_NAME || name == "ncspot"
+    name == resonance::BIN_NAME || name == "ncspot"
 }
 
 fn kind(kind: &DeviceType) -> &'static str {

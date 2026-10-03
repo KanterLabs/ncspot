@@ -8,7 +8,7 @@ export const GLOBAL_SHORTCUTS = [
 
 export function helpRows(bindings: Record<string, string>): Row[] {
   return [
-    { id: "command", kind: "action", title: "Run ncspot command", subtitle: ": or Enter · existing CLI commands and aliases" },
+    { id: "command", kind: "action", title: "Run Resonance command", subtitle: ": or Enter · existing CLI commands and aliases" },
     ...GLOBAL_SHORTCUTS.map(([key, title]) => ({ id: `global:${key}`, kind: "shortcut", title: `${key}  ${title}`, subtitle: "Workspace shortcut" })),
     { id: "quick-search", kind: "shortcut", title: "/  Quick search in Now Playing", subtitle: "Type a song · ↑/↓ select · Enter play now · Ctrl+N play next · Ctrl+E queue · Esc close" },
     ...Object.entries(bindings).sort(([a], [b]) => a.localeCompare(b)).map(([key, command]) => ({ id: `binding:${key}`, kind: "binding", title: key, subtitle: command })),

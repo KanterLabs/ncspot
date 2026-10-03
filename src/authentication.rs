@@ -30,7 +30,7 @@ struct AuthConfig {
 
 static AUTH_CONFIG: OnceLock<AuthConfig> = OnceLock::new();
 
-/// OAuth scopes used by ncspot's streaming, library, playlist, and playback features.
+/// OAuth scopes used by Resonance's streaming, library, playlist, and playback features.
 ///
 /// Keep this list to scopes supported by Spotify's public authorization flow. In particular,
 /// avoid the old aggregate scopes (`playlist-read`, `playlist-modify`, and `user-modify`) which
@@ -65,7 +65,7 @@ fn validate_client_id(value: &str) -> Result<String, String> {
     if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!(
             "{} Spotify app client ID must be exactly 32 hexadecimal characters",
-            ncspot::BIN_NAME
+            resonance::BIN_NAME
         ));
     }
     Ok(value.to_string())
@@ -75,7 +75,7 @@ fn validate_redirect_uri(value: &str) -> Result<String, String> {
     let parsed = Url::parse(value).map_err(|error| {
         format!(
             "{} Spotify redirect URI is invalid: {error}",
-            ncspot::BIN_NAME
+            resonance::BIN_NAME
         )
     })?;
     let valid = parsed.scheme() == "http"
@@ -88,7 +88,7 @@ fn validate_redirect_uri(value: &str) -> Result<String, String> {
     if !valid {
         return Err(format!(
             "{} Spotify redirect URI must use http://127.0.0.1[:port]/login",
-            ncspot::BIN_NAME
+            resonance::BIN_NAME
         ));
     }
     Ok(value.to_string())
@@ -129,12 +129,12 @@ pub fn configure(client_id: Option<&str>, redirect_uri: Option<&str>) -> Result<
         Some(existing) if existing == &resolved => Ok(()),
         Some(_) => Err(format!(
             "{} Spotify authentication is already configured with a different app identity",
-            ncspot::BIN_NAME
+            resonance::BIN_NAME
         )),
         None => AUTH_CONFIG.set(resolved).map_err(|_| {
             format!(
                 "{} Spotify authentication configuration raced",
-                ncspot::BIN_NAME
+                resonance::BIN_NAME
             )
         }),
     }
@@ -346,7 +346,7 @@ pub fn get_rspotify_token() -> Result<rspotify::Token, String> {
 
     Err(format!(
         "no usable API token; restart {} to authorize again",
-        ncspot::BIN_NAME
+        resonance::BIN_NAME
     ))
 }
 

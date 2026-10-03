@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Rename the maintained application to Resonance. New Unix installs use the `resonance` backend,
+  standalone `resonance-opentui` frontend, generated Resonance man/completion assets, and the
+  `resonance-update` updater.
+- Keep the `ncspot` executable, legacy Cursive interface, existing ncspot configuration/cache
+  paths, and `ncspot-update` as compatibility paths so populated installations can upgrade without
+  losing settings, credentials, library data, queue state, or listening history.
+- Document the source import rename from `ncspot::` to `resonance::` for Rust consumers and the
+  distinction between the canonical KanterLabs Gitea source and its public GitHub mirror.
+
 ## [1.4.0]
 
 ### Added

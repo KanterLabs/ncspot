@@ -160,31 +160,19 @@ jobs:
             prototype/opentui/dist/resonance-opentui \
             "target/${PROFILE}/resonance-opentui"
 
-      - name: Packaging assets
-        working-directory: target/${{ env.PROFILE }}
+      - name: Generate package assets
         run: |
-          asset="${{ steps.name.outputs.asset }}"
-          strip resonance ncspot
-          mkdir -p licenses/resonance licenses/opentui
-          install -m 0644 "$GITHUB_WORKSPACE/LICENSE" licenses/resonance/LICENSE
-          node_modules_dir="$GITHUB_WORKSPACE/prototype/opentui/node_modules"
-          if [ -d "$node_modules_dir" ]; then
-            while IFS= read -r notice; do
-              relative="${notice#${node_modules_dir}/}"
-              install -D -m 0644 "$notice" "licenses/opentui/$relative"
-            done < <(
-              find "$node_modules_dir" -type f \
-                \( -iname 'license*' -o -iname 'copying*' -o -iname 'notice*' -o -iname 'patents*' \) \
-                -print | sort
-            )
-          fi
-          for notice in LICENSES.md THIRD_PARTY_LICENSES.md THIRD_PARTY_NOTICES.md; do
-            if [ -f "$GITHUB_WORKSPACE/prototype/opentui/$notice" ]; then
-              install -m 0644 "$GITHUB_WORKSPACE/prototype/opentui/$notice" "licenses/opentui/$notice"
-            fi
-          done
-          tar czvf "${asset}.tar.gz" resonance ncspot resonance-opentui licenses
-          sha256sum "${asset}.tar.gz" > "${asset}.sha256"
+          cargo xtask generate-manpage
+          cargo xtask generate-shell-completion --shells bash,zsh,fish,elvish,powershell
+
+      - name: Package and verify complete installation
+        run: |
+          python3 scripts/package-release.py --profile "$PROFILE" \
+            --platform "fedora${{ inputs.fedora_version || '43' }}-x86_64" \
+            --version "${{ steps.name.outputs.version }}" --output "target/${PROFILE}"
+          python3 scripts/verify-release.py \
+            "target/${PROFILE}/${{ steps.name.outputs.asset }}.tar.gz" \
+            --report "target/${PROFILE}/verification.json"
 
       - uses: actions/upload-artifact@v7
         with:

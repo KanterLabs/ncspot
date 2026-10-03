@@ -24,8 +24,11 @@ bun run build
 ```
 
 `dist/resonance-opentui` is standalone. Install it beside the Rust `resonance` executable for the
-default launcher; Bun is needed for development/building only. Fedora archives include both
-executables, the legacy `ncspot` alias, and dependency notices. Restart Resonance after updates.
+default launcher; Bun is needed for development/building only. Fedora archives include all three
+executables (`resonance`, `resonance-opentui`, and the legacy `ncspot` alias) plus dependency
+notices. Restart Resonance after updates.
+The primary updater is `resonance-update`; `ncspot-update` remains a forwarding compatibility
+alias for existing installations and installs the same three executables.
 
 ```sh
 resonance                          # engine plus workspace

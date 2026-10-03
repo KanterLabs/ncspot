@@ -19,7 +19,7 @@ export function appearanceRows(context: Pick<ScreenContext, "theme" | "reducedMo
   return [
     { id: "theme", kind: "action", title: "Appearance", subtitle: `${context.theme()} · Enter to switch theme` },
     { id: "motion", kind: "action", title: "Reduced motion", subtitle: `${context.reducedMotion() ? "on" : "off"} · Enter to toggle` },
-    { id: "reload", kind: "action", title: "Reload configuration", subtitle: "Read updated settings from your ncspot config" },
+    { id: "reload", kind: "action", title: "Reload configuration", subtitle: "Reload the config path shown by `resonance info`" },
     { id: "reconnect", kind: "action", title: "Reconnect", subtitle: "Reconnect the Spotify session" },
     { id: "logout", kind: "action", title: "Log out", subtitle: "Confirmation required" },
   ];
@@ -34,7 +34,7 @@ export function toggleAppearance(context: Pick<ScreenContext, "theme" | "setThem
 export async function settingsAction(api: RpcApi, action: "reload" | "reconnect" | "logout" | "command", command?: string): Promise<unknown> {
   if (action === "command") {
     const input = command?.trim();
-    if (!input) throw new Error("Enter an ncspot command");
+    if (!input) throw new Error("Enter a Resonance command");
     if (/[\r\n\x00]/.test(input)) throw new Error("Enter a single command");
     return api.call("settings.action", { action, command: input });
   } else {

@@ -6,8 +6,8 @@ use std::{fs, process};
 
 use cursive::theme::Theme;
 use log::{debug, error};
-use ncspot::{CONFIGURATION_FILE_NAME, USER_STATE_FILE_NAME};
 use platform_dirs::AppDirs;
+use resonance::{CONFIGURATION_FILE_NAME, USER_STATE_FILE_NAME};
 use std::io::Write;
 
 use crate::command::{SortDirection, SortKey};
@@ -29,7 +29,7 @@ fn clamp_radio_discovery(value: u8) -> u8 {
     value.min(100)
 }
 
-/// The playback state when ncspot is started.
+/// The playback state when Resonance is started.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum PlaybackState {
     Playing,
@@ -38,7 +38,7 @@ pub enum PlaybackState {
     Default,
 }
 
-/// The focussed library tab when ncspot is started.
+/// The focussed library tab when Resonance is started.
 #[derive(Clone, Serialize, Deserialize, Debug, Hash, strum_macros::EnumIter)]
 #[serde(rename_all = "lowercase")]
 pub enum LibraryTab {
@@ -84,7 +84,7 @@ impl NotificationFormat {
     }
 }
 
-/// The configuration of ncspot.
+/// The configuration of Resonance.
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct ConfigValues {
     /// Independent Spotify application identity. No shared upstream fallback.
@@ -134,7 +134,7 @@ pub struct ConfigValues {
     pub radio_discovery: Option<u8>,
 }
 
-/// The ncspot theme.
+/// The Resonance theme.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct ConfigTheme {
     pub background: Option<String>,
@@ -217,7 +217,7 @@ impl Default for UserState {
 /// Configuration files are read/written relative to this directory.
 static BASE_PATH: RwLock<Option<PathBuf>> = RwLock::new(None);
 
-/// The complete configuration (state + user configuration) of ncspot.
+/// The complete configuration (state + user configuration) of Resonance.
 pub struct Config {
     /// The configuration file path.
     filename: String,
@@ -505,7 +505,7 @@ fn load(filename: &str) -> Result<ConfigValues, String> {
     TOML.load_or_generate_default(path, || Ok(ConfigValues::default()), false)
 }
 
-/// Returns the plaform app directories for ncspot if they could be determined,
+/// Returns the platform app directories for Resonance if they could be determined,
 /// or an error otherwise.
 pub fn try_proj_dirs() -> Result<AppDirs, String> {
     match *BASE_PATH
@@ -519,7 +519,7 @@ pub fn try_proj_dirs() -> Result<AppDirs, String> {
             state_dir: basepath.join(".local/state"),
         }),
         None => {
-            let primary = AppDirs::new(Some(ncspot::BIN_NAME), true)
+            let primary = AppDirs::new(Some(resonance::BIN_NAME), true)
                 .ok_or_else(|| String::from("Couldn't determine platform standard directories"))?;
             // Keep an installed fork's populated library and playback state in
             // place. New installs use Resonance directories; existing ncspot

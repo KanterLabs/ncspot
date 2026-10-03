@@ -26,7 +26,7 @@ use cursive::event::{Event, Key};
 use cursive::traits::{Resizable, Scrollable, View};
 use cursive::views::{Dialog, SelectView, TextView};
 use log::{debug, error, info};
-use ncspot::CONFIGURATION_FILE_NAME;
+use resonance::CONFIGURATION_FILE_NAME;
 use std::cell::RefCell;
 
 pub enum CommandResult {

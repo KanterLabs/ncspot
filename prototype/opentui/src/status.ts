@@ -1,9 +1,9 @@
 /**
- * The small part of ncspot's IPC status that the Resonance view needs.
+ * The small part of Resonance's IPC status that the Resonance view needs.
  *
  * The Rust side deliberately serializes its existing model without an
  * adapter, so this parser accepts the exact serde shape while keeping the UI
- * independent from the rest of ncspot's data model.
+ * independent from the rest of Resonance's data model.
  */
 
 export interface Track {
@@ -132,7 +132,7 @@ function parseUpNextOrigins(value: unknown): UpNextOrigin[] {
   return origins.every((origin): origin is UpNextOrigin => origin !== undefined) ? origins : [];
 }
 
-/** Parse a Track as serialized by ncspot, including queue entries without `type`. */
+/** Parse a Track as serialized by Resonance, including queue entries without `type`. */
 export function parseTrack(value: unknown): Track | null {
   const raw = objectRecord(value);
   if (!raw || (raw.type !== undefined && raw.type !== "Track")) return null;

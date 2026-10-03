@@ -1,5 +1,5 @@
 use cursive::{Cursive, CursiveRunner};
-use ncspot::BIN_NAME;
+use resonance::BIN_NAME;
 
 pub mod accent;
 pub mod album;

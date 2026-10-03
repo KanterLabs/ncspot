@@ -396,7 +396,7 @@ pub fn diagnostics(queue: &Queue) -> String {
         enrichment::shared().status(),
         config::cache_path("radio-debug.json").display(),
         config::cache_path("radio-replay.json").display(),
-        ncspot::BIN_NAME
+        resonance::BIN_NAME
     )
 }
 
@@ -486,7 +486,7 @@ pub fn offline_report(
     // The persisted queue is another cached metadata source, including songs
     // from earlier playback contexts. Read it without creating a Config or
     // altering provenance/history; online workers snapshot the live queue instead.
-    let state_path = config::config_path(ncspot::USER_STATE_FILE_NAME);
+    let state_path = config::config_path(resonance::USER_STATE_FILE_NAME);
     match std::fs::read(&state_path) {
         Ok(bytes) => {
             let state: config::UserState = serde_cbor::from_slice(&bytes)

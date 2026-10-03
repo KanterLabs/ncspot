@@ -5,7 +5,7 @@ export interface KeyLike {
   meta?: boolean;
 }
 
-/** Translate OpenTUI key events to the ncspot command strings accepted by IPC. */
+/** Translate OpenTUI key events to the Resonance command strings accepted by IPC. */
 export function commandForKey(key: KeyLike, discovery = 50): string | "quit" | null {
   if (key.ctrl || key.meta) return null;
   const name = (key.name ?? key.sequence ?? "").toLowerCase();
@@ -38,7 +38,7 @@ export function commandForKey(key: KeyLike, discovery = 50): string | "quit" | n
       return "voldown";
     case "l":
       // Theme is frontend-local; the key handler consumes it before command
-      // dispatch so it can never become an ncspot IPC command.
+      // dispatch so it can never become a Resonance IPC command.
       return null;
     default:
       return null;

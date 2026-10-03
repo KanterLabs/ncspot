@@ -287,7 +287,7 @@ impl History {
             let (sender, receiver) = mpsc::channel();
             let worker_inner = Arc::clone(&history.inner);
             match thread::Builder::new()
-                .name("ncspot-radio-history".to_owned())
+                .name("resonance-radio-history".to_owned())
                 .spawn(move || writer_loop(worker_inner, receiver))
             {
                 Ok(_) => history.inner.control.lock().unwrap().sender = Some(sender),

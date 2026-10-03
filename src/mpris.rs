@@ -29,7 +29,7 @@ use crate::{
     queue::Queue,
     spotify::{PlayerEvent, Spotify, VOLUME_PERCENT},
 };
-use ncspot::{BIN_NAME, DISPLAY_NAME};
+use resonance::{BIN_NAME, DISPLAY_NAME};
 
 struct MprisRoot {}
 
@@ -152,7 +152,7 @@ impl MprisPlayer {
         hm.insert(
             "mpris:trackid".to_string(),
             Value::ObjectPath(ObjectPath::from_string_unchecked(format!(
-                "/org/ncspot/{}",
+                "/org/resonance/{}",
                 playable
                     .filter(|t| t.id().is_some())
                     .map(|t| t.uri().replace(':', "/"))

@@ -7,7 +7,7 @@ import {
   positionAt,
 } from "../src/status.js";
 
-test("parses ncspot's serde status and prototype metadata", () => {
+test("parses Resonance's serde status and prototype metadata", () => {
   const status = parseStatus(
     JSON.stringify({
       mode: { Paused: { secs: 25, nanos: 575_000_000 } },
@@ -63,7 +63,7 @@ test("playing status advances from SystemTime and malformed lines are ignored", 
   expect(parseStatus(JSON.stringify({ playable: null }))).toBeNull();
 });
 
-test("keyboard transport maps to existing ncspot command strings", () => {
+test("keyboard transport maps to existing Resonance command strings", () => {
   expect(commandForKey({ name: "space" })).toBe("playpause");
   expect(commandForKey({ name: "left" })).toBe("previous");
   expect(commandForKey({ name: "right" })).toBe("next");

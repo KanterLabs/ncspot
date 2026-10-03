@@ -8,7 +8,7 @@ use std::{path::PathBuf, process::exit};
 use application::{Application, begin_startup_clock, setup_logging};
 use config::set_configuration_base_path;
 use log::error;
-use ncspot::program_arguments;
+use resonance::program_arguments;
 
 mod application;
 mod audio_tap;

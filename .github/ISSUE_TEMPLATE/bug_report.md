@@ -30,15 +30,18 @@ If applicable, add screenshots to help explain your problem.
  - Installed from: [e.g. AUR, brew, cargo]
 
 **Backtrace/Debug log**
-Please attach a debug log and backtrace if ncspot has crashed.
+Please attach a Resonance debug log and backtrace if Resonance has crashed. Run
+`resonance info` first and include its `USER_CONFIGURATION_PATH`, `USER_CACHE_PATH`, and
+`USER_RUNTIME_PATH` output so paths can be reproduced.
 
 Instructions on how to capture debug logs can be found in the [developers
-manual](https://github.com/hrkfdn/ncspot/blob/main/doc/developers.md#debugging).
+manual](https://github.com/KanterLabs/resonance/blob/main/doc/developers.md#debugging).
 
-For backtraces, make sure you run a debug build of ncspot, e.g. by running the
+For backtraces, make sure you run a debug build of Resonance, e.g. by running the
 command mentioned in the [compilation
-instructions](https://github.com/hrkfdn/ncspot/blob/main/doc/developers.md#compiling).  You can find the
-latest backtrace at `~/.cache/ncspot/backtrace.log`.
+instructions](https://github.com/KanterLabs/resonance/blob/main/doc/developers.md#compiling). The
+latest backtrace is at `<USER_CACHE_PATH>/backtrace.log`, where `USER_CACHE_PATH` is the value
+reported by `resonance info`; do not assume the old `~/.cache/ncspot` path.
 
 **Additional context**
 Add any other context about the problem here.

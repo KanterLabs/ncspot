@@ -21,7 +21,7 @@ export const createSettingsScreen: ScreenFactory = ctx => {
         values = data.values ?? {};
         refreshFailed = false;
         draw();
-        surface.setMessage("Config values are read-only · edit your ncspot config, then reload");
+        surface.setMessage("Read-only config · run `resonance info` to find it, then reload");
       } catch (error) {
         refreshFailed = true;
         if (!disposed) surface.setMessage(`Settings unavailable: ${errorText(error)}`, true);

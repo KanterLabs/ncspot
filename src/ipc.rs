@@ -21,7 +21,7 @@ use crate::queue::Queue;
 use crate::rpc::RpcService;
 use crate::spotify::PlayerEvent;
 use crate::traits::ListItem;
-use ncspot::BIN_NAME;
+use resonance::BIN_NAME;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 pub struct IpcSocket {

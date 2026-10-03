@@ -30,7 +30,7 @@ const SETTLE_FOR: Duration = Duration::from_millis(900);
 
 /// Drives the visualizer while it is on screen.
 ///
-/// The rest of ncspot only redraws every few hundred milliseconds, which is far too
+/// The rest of Resonance only redraws every few hundred milliseconds, which is far too
 /// coarse for an animation, so this asks the event loop for extra frames — but only
 /// while the view is actually being drawn and something is playing, so a background
 /// tab never costs anything.

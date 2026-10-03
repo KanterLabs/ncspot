@@ -83,7 +83,7 @@ impl Engine {
         let ipc = match crate::utils::create_runtime_directory() {
             Ok(directory) => Some(IpcSocket::new(
                 ASYNC_RUNTIME.get().expect("runtime initialized").handle(),
-                directory.join(format!("{}.sock", ncspot::BIN_NAME)),
+                directory.join(format!("{}.sock", resonance::BIN_NAME)),
                 events.clone(),
                 queue.clone(),
             )?),

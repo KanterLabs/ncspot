@@ -822,7 +822,7 @@ impl NowPlayingView {
 
     /// Target bar heights for the spectrum, in eighths of a cell.
     ///
-    /// Nothing in ncspot can see the audio, so the band is synthesised: layered slow
+    /// Nothing in Resonance can see the audio, so the band is synthesised: layered slow
     /// waves keep neighbouring columns correlated, so it moves like a spectrum rather
     /// than like static; a centred envelope puts the tallest bars in the middle; and a
     /// beat pulse makes the whole band pump. Playback time drives it, so pausing

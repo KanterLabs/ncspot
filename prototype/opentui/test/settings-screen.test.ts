@@ -29,7 +29,7 @@ test("commands map to one settings action and reject blank or multiline input", 
   const api = { call: async (method: string, params: Params) => { calls.push([method, params]); } } as RpcApi;
   await settingsAction(api, "command", "  volup  ");
   expect(calls).toEqual([["settings.action", { action: "command", command: "volup" }]]);
-  await expect(settingsAction(api, "command", "")).rejects.toThrow("Enter an ncspot command");
+  await expect(settingsAction(api, "command", "")).rejects.toThrow("Enter a Resonance command");
   await expect(settingsAction(api, "command", "play\nlogout")).rejects.toThrow("single command");
   expect(calls).toHaveLength(1);
 });

@@ -10,9 +10,9 @@ export interface IpcClientEvents {
 type BunUnixSocket = Bun.Socket<unknown>;
 
 /**
- * One-shot newline JSON client for ncspot's Unix IPC socket.
+ * One-shot newline JSON client for Resonance's Unix IPC socket.
  *
- * It intentionally never reconnects. A path can be reused by a new ncspot
+ * It intentionally never reconnects. A path can be reused by a new Resonance
  * process after a disconnect, and silently reconnecting would make the
  * prototype control the wrong instance.
  */
@@ -85,7 +85,7 @@ export class IpcClient {
     }
   }
 
-  /** Write exactly one ncspot command line. Returns false when disconnected. */
+  /** Write exactly one Resonance command line. Returns false when disconnected. */
   send(command: string): boolean {
     if (!this.isOpen || !command.trim()) return false;
     const data = new TextEncoder().encode(`${command.trim()}\n`);

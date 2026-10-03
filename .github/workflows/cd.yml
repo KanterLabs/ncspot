@@ -2,95 +2,168 @@ name: CD
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
   TERM: xterm
 
 jobs:
-  publish:
-    name: Publishing ${{ matrix.build_target }}
-    runs-on: ${{ matrix.os }}
+  linux:
+    name: Publish linux-x86_64
+    runs-on: homelab-heavy
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential ca-certificates curl git unzip python3 pkg-config \
+            libpulse-dev libdbus-1-dev libncursesw5-dev libssl-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: actions/checkout@v7
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Build backend and generated assets
+        run: |
+          cargo build --release --locked
+          cargo xtask generate-manpage
+          cargo xtask generate-shell-completion --shells bash,zsh,fish,elvish,powershell
+      - name: Build frontend
+        working-directory: prototype/opentui
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun test
+          bun run build
+          ./dist/resonance-opentui --smoke
+      - name: Assemble and verify release
+        shell: bash
+        run: |
+          version="${GITHUB_REF#refs/tags/}"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then version="$(git rev-parse --short HEAD)"; fi
+          python3 scripts/package-release.py --platform linux-x86_64 --version "$version"
+          python3 scripts/verify-release.py "dist/resonance-${version}-linux-x86_64.tar.gz" \
+            --report dist/linux-x86_64-verification.json
+      - name: Build and verify Debian package
+        run: |
+          cargo install --locked --version 3.8.0 cargo-deb
+          python3 scripts/package-release.py --platform linux-x86_64 --version deb \
+            --notices-only prototype/opentui/dist/licenses
+          cargo deb --no-build --no-strip --output dist/resonance-amd64.deb
+          sha256sum dist/resonance-amd64.deb | sed 's@dist/@@' > dist/resonance-amd64.deb.sha256
+          python3 scripts/verify-release.py dist/resonance-amd64.deb \
+            --report dist/debian-verification.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: resonance-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.deb
+
+  native:
+    name: Publish ${{ matrix.platform }}
+    # Native ARM, macOS, and Windows require an architecture/OS unavailable in
+    # the x86_64 Linux homelab pool. Only these targets use hosted runners.
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - build_target: linux-x86_64
-            os: homelab-heavy
-            target: x86_64-unknown-linux-gnu
-            features: ''
-            dependencies: 'libpulse-dev libdbus-1-dev libncursesw5-dev libxcb-shape0-dev libxcb-xfixes0-dev'
-          # The homelab runner pool is x86_64; retain a native hosted ARM runner for this target.
-          - build_target: linux-arm64
-            os: ubuntu-24.04-arm
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             features: ''
-            dependencies: 'libpulse-dev libdbus-1-dev libncursesw5-dev libxcb-shape0-dev libxcb-xfixes0-dev'
-          - build_target: macos-x86_64
-            os: macos-latest
+          - platform: macos-x86_64
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             features: '--no-default-features --features rodio_backend,pancurses_backend'
-          - build_target: macos-aarch64
-            os: macos-14
+          - platform: macos-aarch64
+            runner: macos-14
             target: aarch64-apple-darwin
-            artifact_suffix: macos-aarch64
-            features: '--no-default-features --features rodio_backend,cursive/pancurses-backend'
-          - build_target: windows-x86_64
-            os: windows-latest
+            features: '--no-default-features --features rodio_backend,pancurses_backend'
+          - platform: windows-x86_64
+            runner: windows-latest
             target: x86_64-pc-windows-msvc
             features: '--no-default-features --features rodio_backend,pancurses_backend,share_clipboard,notify'
     steps:
       - uses: actions/checkout@v7
-        name: Checkout src
-      - name: Install rustup
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          if ! command -v rustup &>/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> $GITHUB_PATH
-          fi
-      - name: Add cross-compilation target
-        run: rustup target add ${{ matrix.target }}
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        run: brew install portaudio pkg-config
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt update
-          sudo apt install -y ${{ matrix.dependencies }}
-      - uses: actions/cache@v6
+          sudo apt-get update
+          sudo apt-get install -y libpulse-dev libdbus-1-dev libncursesw5-dev \
+            libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install portaudio pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        if: runner.os != 'Windows'
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Running cargo build
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
-      - name: Extract git tag
-        shell: bash
-        run: echo "tag=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
-        id: extract_tag
-      - name: Packaging assets
+          bun-version: 1.4.2
+      - name: Build backend
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features }}
+      - name: Generate Unix assets
+        if: runner.os != 'Windows'
+        run: |
+          cargo xtask generate-manpage
+          cargo xtask generate-shell-completion --shells bash,zsh,fish,elvish,powershell
+      - name: Build native Unix frontend
+        if: runner.os != 'Windows'
+        working-directory: prototype/opentui
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun test
+          bun run build
+          ./dist/resonance-opentui --smoke
+      - name: Smoke test CLI and assemble release
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          case ${{ matrix.target }} in
-          *-pc-windows-*)
-            7z -y a resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.zip resonance.exe ncspot.exe
-            sha256sum resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.zip > resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.sha256
-            ;;
-          *)
-            tar czvf resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.tar.gz resonance ncspot
-            shasum -a 256 resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.tar.gz > resonance-${{ steps.extract_tag.outputs.tag }}-${{ matrix.build_target }}.sha256
-            ;;
-          esac;
-      - name: Releasing assets
-        uses: softprops/action-gh-release@v3
+          suffix=""
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          "target/${{ matrix.target }}/release/resonance${suffix}" --version
+          "target/${{ matrix.target }}/release/ncspot${suffix}" --help
+          version="${GITHUB_REF#refs/tags/}"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then version="$(git rev-parse --short HEAD)"; fi
+          python3 scripts/package-release.py --target "${{ matrix.target }}" \
+            --platform "${{ matrix.platform }}" --version "$version"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            python3 scripts/verify-release.py "dist/resonance-${version}-${{ matrix.platform }}.tar.gz" \
+              --report "dist/${{ matrix.platform }}-verification.json"
+          fi
+      - uses: actions/upload-artifact@v7
         with:
-          files: target/${{ matrix.target }}/release/resonance-*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: resonance-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256

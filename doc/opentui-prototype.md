@@ -168,8 +168,9 @@ install -m 0755 resonance ncspot resonance-opentui "$HOME/.local/bin/"
 ```
 
 Keep the archive's license notices with the installation. If the repository updater is installed,
-`ncspot-update` installs the three executables together. Restart the running Resonance process
-after updating; replacing executable files does not update an existing session.
+`resonance-update` installs the three executables together. The old `ncspot-update` command remains
+a forwarding compatibility alias. Restart the running Resonance process after updating; replacing
+executable files does not update an existing session.
 Before installation, the updater verifies a rollback snapshot of existing binaries, configuration,
 queue state, and cached metadata in `~/.local/share/resonance/rollback`. Re-downloadable cover and
 streaming audio files are excluded. Restore data only when deliberately needed; keeping the old

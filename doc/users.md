@@ -1,7 +1,47 @@
-# User Documentation
+# Resonance user documentation
 
-## Installation Instructions
-[![Packaging status](https://repology.org/badge/vertical-allrepos/ncspot.svg)](https://repology.org/project/ncspot/versions)
+Resonance is the maintained KanterLabs product. On Unix, `resonance` starts the Rust playback
+engine and the standalone OpenTUI workspace; Windows currently uses the retained Cursive
+interface. Use `resonance --legacy-ui` when you need that Cursive interface on Unix. The detailed
+key bindings and configuration reference below describes that retained interface; see the
+[OpenTUI workspace guide](opentui-prototype.md) for the current default workspace.
+
+The canonical source is maintained in [KanterLabs' Gitea](https://gitea.home.shanekanterman.dev).
+The public
+[KanterLabs/resonance GitHub mirror](https://github.com/KanterLabs/resonance) is the public source
+and issue link. Existing installations may use the legacy `ncspot` executable and data directories;
+Resonance reuses populated legacy paths according to the documented selection rules.
+
+## Installation
+
+### Current Resonance source build
+
+Clone the public mirror (or the canonical KanterLabs Gitea source when available), then build the
+Rust backend and standalone OpenTUI executable together:
+
+```sh
+git clone https://github.com/KanterLabs/resonance
+cd resonance
+cargo build --release
+cd prototype/opentui
+bun install --frozen-lockfile
+bun run build
+cd ../..
+install -m 0755 prototype/opentui/dist/resonance-opentui target/release/resonance-opentui
+./target/release/resonance
+```
+
+Keep `resonance`, `resonance-opentui`, and the retained `ncspot` executable alias together when
+installing release artifacts. `resonance-update` is the primary updater; `ncspot-update` remains a
+forwarding compatibility alias. See [package maintainer instructions](package_maintainers.md) for
+generated man pages, completions, notices, and the optional `resonance-wezterm` helper.
+
+### Upstream ncspot distribution instructions
+
+The package channels in this subsection belong to the original upstream **ncspot** project. They
+are retained for users of an existing upstream installation and are not Resonance packages.
+
+[![Upstream ncspot packaging status](https://repology.org/badge/vertical-allrepos/ncspot.svg)](https://repology.org/project/ncspot/versions)
 
 ### On macOS
 `ncspot` is available via [Homebrew](https://brew.sh/):
@@ -59,9 +99,16 @@ recent version is available for your OS, you can use the following command to in
 cargo install --locked ncspot
 ```
 
-## Key Bindings
+## Retained Cursive interface
+
+The following reference covers the retained Cursive interface. Start it explicitly with
+`resonance --legacy-ui`; the `ncspot` executable alias invokes the same interface for scripts and
+existing desktop integrations. Current Unix installations should use the OpenTUI workspace guide
+linked above.
+
+### Key Bindings
 The keybindings listed below are configured by default. Additionally, if you
-built `ncspot` with MPRIS support, you may be able to use media keys to control
+built Resonance with MPRIS support, you may be able to use media keys to control
 playback depending on your desktop environment settings. Have a look at the
 [configuration section](#configuration) if you want to set custom bindings.
 
@@ -78,7 +125,7 @@ playback depending on your desktop environment settings. Have a look at the
 | <kbd>/</kbd>      | Open a Vim-like search bar (See [specific commands](#vim-like-search-bar)).   |
 | <kbd>:</kbd>      | Open a Vim-like command prompt (See [specific commands](#vim-like-commands)). |
 | <kbd>Escape</kbd> | Close Vim-like search bar, command prompt, or Search screen.                  |
-| <kbd>Q</kbd>      | Quit `ncspot`.                                                                |
+| <kbd>Q</kbd>      | Quit Resonance.                                                               |
 | <kbd>g</kbd>      | Go to the top of the current view (Vim motion).                               |
 | <kbd>G</kbd>      | Go to the bottom of the current view (Vim motion).                            |
 
@@ -182,7 +229,7 @@ album's colour to the next rather than snapping.
 The card is clickable: the transport buttons, the progress bar, the repeat and
 shuffle toggles and the volume meter all respond to a click, and scrolling over
 the volume meter or progress bar adjusts them. Cover art is drawn beside the
-metadata when the terminal is wide enough and `ncspot` was built with the
+metadata when the terminal is wide enough and Resonance was built with the
 `album_art` feature (on by default). It is drawn with quadrant block glyphs, so
 a font that carries them (most monospace fonts do) gives the most detail.
 
@@ -308,7 +355,7 @@ stops that if you would rather it stayed still.
 
 ### Casting
 <kbd>Shift</kbd>+<kbd>C</kbd> (or `:cast`) moves playback to another device:
-a Roku TV, a speaker, a console, or anything else signed in to Spotify. ncspot
+a Roku TV, a speaker, a console, or anything else signed in to Spotify. Resonance
 stays the remote. The queue, shuffle, repeat, the transport keys, seeking and
 the volume all work as before, and the Now Playing screen and statusbar follow
 what the device is playing.
@@ -331,13 +378,13 @@ roku_hosts = ["10.0.0.41"]
 While casting, the statusbar shows the device's name. Click it to pick another
 device. `:cast stop`, or the first entry in the picker, brings playback back to
 this machine, carrying on from the same point. If the device goes away (it is
-turned off, or someone else starts playing on it), ncspot waits a few seconds
+turned off, or someone else starts playing on it), Resonance waits a few seconds
 and then brings playback home, paused.
 
-The device plays one track at a time, with ncspot's queue choosing what comes
+The device plays one track at a time, with Resonance's queue choosing what comes
 next, so there can be a second of silence between tracks. The visualizer has no
 audio to analyse while casting, so it falls back to its animated band. Casting
-needs Spotify Premium, like ncspot itself.
+needs Spotify Premium, like Resonance itself.
 
 ### Lists
 The playing row of any list — library, queue, search results — fills with the
@@ -372,8 +419,8 @@ Note: \<FOO\> - mandatory arg; [BAR] - optional arg
 | Command                                                          | Action                                                                                                                                                                                                                                                          |
 |------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `help`                                                           | Show current key bindings.                                                                                                                                                                                                                                      |
-| `quit`<br/>Aliases: `q`, `x`                                     | Quit `ncspot`.                                                                                                                                                                                                                                                  |
-| `logout`                                                         | Remove any cached credentials from disk and quit `ncspot`.                                                                                                                                                                                                      |
+| `quit`<br/>Aliases: `q`, `x`                                     | Quit Resonance.                                                                                                                                                                                                                                                  |
+| `logout`                                                         | Remove any cached credentials from disk and quit Resonance.                                                                                                                                                                                                      |
 | `playpause`<br/>Aliases: `pause`, `toggleplay`, `toggleplayback` | Toggle playback.                                                                                                                                                                                                                                                |
 | `stop`                                                           | Stop playback.                                                                                                                                                                                                                                                  |
 | `seek` [`+`\|`-`]\<TIME\>                                        | Seek to the specified position, or seek relative to current position by prepending `+`/`-`.<br/>\* TIME is anything accepted by [parse_duration](https://docs.rs/parse_duration/latest/parse_duration/)<br/>\* Default unit is `ms` for backward compatibility. |
@@ -399,13 +446,16 @@ Note: \<FOO\> - mandatory arg; [BAR] - optional arg
 | `save [current]`                                                 | Save selected item, if `current` is passed the currently playing item will be saved                                                                                                                                                                             |
 
 ## Remote control (IPC)
-Apart from MPRIS, ncspot will also create a domain socket on UNIX platforms (Linux, macOS, *BSD).
-The socket will be created in the platform's runtime directory. Run `ncspot info` to show the
-location of this directory on your platform. Applications or scripts can connect to this socket to
-send commands or be notified of the currently playing track, i.e. with `netcat`:
+Apart from MPRIS, Resonance creates a domain socket on UNIX platforms (Linux, macOS, *BSD). The
+socket is created at `USER_RUNTIME_PATH/resonance.sock`; the runtime directory is selected by the
+platform and can vary between sessions. Run `resonance info` and use its `USER_RUNTIME_PATH`
+value rather than assuming a cache directory or a legacy `ncspot.sock` path. Applications or
+scripts can connect to this socket to send commands or be notified of the currently playing track,
+for example with `netcat`:
 
 ```
-% nc -U $NCSPOT_CACHE_DIRECTORY/ncspot.sock
+% USER_RUNTIME_PATH="$(resonance info | sed -n 's/^USER_RUNTIME_PATH //p')"
+% nc -U "$USER_RUNTIME_PATH/resonance.sock"
 play
 {"mode":{"Playing":{"secs_since_epoch":1672249086,"nanos_since_epoch":547517730}},"playable":{"type":"Track","id":"2wcrQZ7ZJolYEfIaPP9yL4","uri":"spotify:track:2wcrQZ7ZJolYEfIaPP9yL4","title":"Hit Me Where It Hurts","track_number":4,"disc_number":1,"duration":184132,"artists":["Caroline Polachek"],"artist_ids":["4Ge8xMJNwt6EEXOzVXju9a"],"album":"Pang","album_id":"4ClyeVlAKJJViIyfVW0yQD","album_artists":["Caroline Polachek"],"cover_url":"https://i.scdn.co/image/ab67616d0000b2737d983e7bf67c2806218c2759","url":"https://open.spotify.com/track/2wcrQZ7ZJolYEfIaPP9yL4","added_at":"2022-12-19T22:41:05Z","list_index":0}}
 playpause
@@ -417,9 +467,9 @@ command or simply by playing the queue), the current status will be published as
 a JSON structure.
 
 Possible use cases for this could be:
-- Controlling a detached ncspot session (in `tmux` for example)
+- Controlling a detached Resonance session (in `tmux` for example)
 - Displaying the currently playing track in your favorite application/status bar (see below)
-- Setting up routines, i.e. to play specific songs/playlists when ncspot starts
+- Setting up routines, i.e. to play specific songs/playlists when Resonance starts
 
 ### Extracting info on currently playing song
 Using `netcat` and the domain socket, you can query the currently playing track
@@ -429,7 +479,8 @@ as they typically tend to keep the connection to the socket open. OpenBSD's
 specific number of packets have been received.
 
 ```
-% nc -W 1 -U $NCSPOT_CACHE_DIRECTORY/ncspot.sock
+% USER_RUNTIME_PATH="$(resonance info | sed -n 's/^USER_RUNTIME_PATH //p')"
+% nc -W 1 -U "$USER_RUNTIME_PATH/resonance.sock"
 {"mode":{"Playing":{"secs_since_epoch":1675188934,"nanos_since_epoch":50913345}},"playable":{"type":"Track","id":"5Cp6a1h2VnuOtsh1Nqxfv6","uri":"spotify:track:5Cp6a1h2VnuOtsh1Nqxfv6","title":"New Track","track_number":1,"disc_number":1,"duration":498358,"artists":["Francis Bebey"],"artist_ids":["0mdmrbu5UZ32uRcRp2z6mr"],"album":"African Electronic Music (1975-1982)","album_id":"7w99Aae1tYSTSb1OiDnxYY","album_artists":["Francis Bebey"],"cover_url":"https://i.scdn.co/image/ab67616d0000b2736ab57cedf27177fae1eaed87","url":"https://open.spotify.com/track/5Cp6a1h2VnuOtsh1Nqxfv6","added_at":"2020-12-22T09:57:17Z","list_index":0}}
 ```
 
@@ -438,16 +489,16 @@ For example, you can get the currently playing artist and title in your
 terminal as follows:
 
 ```
-% nc -W 1 -U $NCSPOT_CACHE_DIRECTORY/ncspot.sock | jq '.playable.title'
+% nc -W 1 -U "$USER_RUNTIME_PATH/resonance.sock" | jq '.playable.title'
 "PUMPIN' JUMPIN'"
 
-% nc -W 1 -U $NCSPOT_CACHE_DIRECTORY/ncspot.sock | jq '.playable.artists[0]'
+% nc -W 1 -U "$USER_RUNTIME_PATH/resonance.sock" | jq '.playable.artists[0]'
 "Hideki Naganuma"
 ```
 
 ## Configuration
 Configuration is saved to the `config.toml` file in the platform's standard configuration directory.
-Run `ncspot info` to show the location of this directory on your platform. To reload the
+Run `resonance info` to show the location of this directory on your platform. To reload the
 configuration during runtime use the `reload` command.
 
 Possible configuration values are:
@@ -492,7 +543,7 @@ Possible configuration values are:
 2. By default the statusbar's play button shows a pause icon while a track is
    playing and a play icon while it is not, naming what a click will do. If this
    setting is enabled, it shows the current state instead.
-3. Run `ncspot -h` for a list of devices.
+3. Run `resonance -h` for a list of devices.
 4. If built with the `notify` feature.
 
 ### Custom Keybindings
@@ -537,19 +588,19 @@ To disable a default keybinding, set its command to `noop`:
 </details>
 
 ### Proxy
-`ncspot` will respect system proxy settings defined via the `http_proxy`
+Resonance will respect system proxy settings defined via the `http_proxy`
 environment variable.
 
 ```sh
 # In sh-like shells
-http_proxy="http://foo.bar:4444" ncspot
+http_proxy="http://foo.bar:4444" resonance --legacy-ui
 ```
 
 ### Theming
 [Theme generator](https://ncspot-theme-generator.vaa.red/) by [@vaarad](https://github.com/vaared).
 
 The color palette can be modified in the configuration. For instance, to have
-`ncspot` match Spotify's official client, you can add the following entries to
+Resonance match Spotify's official client, you can add the following entries to
 the configuration file:
 
 ```toml
@@ -641,7 +692,7 @@ right = "%album"
 </details>
 
 ### Notification Formatting
-`ncspot` also supports customizing the way notifications are displayed
+Resonance also supports customizing the way notifications are displayed
 (which appear when compiled with the `notify` feature and `notify = true`).
 The title and body of the notification can be set, with `title` and `body`, or the default will be used.
 The formatting options are the same as those for [track formatting](#track-formatting) (`%artists`, `%title`, etc)
@@ -655,10 +706,10 @@ body = "%artists"
 ```
 
 ### Cover Drawing
-When compiled with the `cover` feature, `ncspot` can draw the album art of the
+When compiled with the `cover` feature, Resonance can draw the album art of the
 current track in a dedicated view (`:focus cover` or <kbd>F8</kbd> by default)
 using terminal image protocols supported by your terminal, such as Kitty,
-iTerm2, or Sixel. If no supported graphics protocol is detected, `ncspot`
+iTerm2, or Sixel. If no supported graphics protocol is detected, Resonance
 falls back to colored terminal blocks.
 
 By default, cover art scales to fit the available terminal view. To limit
@@ -670,13 +721,13 @@ cover_max_scale = 2
 ```
 
 ## Authentication
-`ncspot` uses OAuth2 for authentication. When launched for the first time, a link will be generated
+Resonance uses OAuth2 for authentication. When launched for the first time, a link will be generated
 that can be opened in any browser. After logging in on the displayed page, you can start to use
-`ncspot`. The OAuth2 flow is the only supported one, as username/password authentication has been
+Resonance. The OAuth2 flow is the only supported one, as username/password authentication has been
 removed by Spotify.
 
 The credentials are stored in `librespot/credentials.json` in the user's cache directory. Run
-`ncspot info` to show the location of this directory.
+`resonance info` to show the location of this directory.
 
 The `logout` command can be used to remove cached credentials. See
 [Vim-Like Commands](#vim-like-commands).

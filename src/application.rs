@@ -44,7 +44,7 @@ pub fn setup_logging(filename: &Path) -> Result<(), fern::InitError> {
         // Add blanket level filter -
         .level(log::LevelFilter::Debug)
         // Set runtime log level for modules
-        .level_for(ncspot::BIN_NAME, log::LevelFilter::Trace)
+        .level_for(resonance::BIN_NAME, log::LevelFilter::Trace)
         // Output to stdout, files, and other Dispatch configurations
         .chain(fern::log_file(filename)?)
         // Apply globally
@@ -137,7 +137,7 @@ pub(crate) fn initialize_session(
     Ok((configuration, event_manager, spotify))
 }
 
-/// The representation of an ncspot application.
+/// The representation of a Resonance application.
 pub struct Application {
     /// The music queue which controls playback order.
     queue: Arc<Queue>,
@@ -145,7 +145,7 @@ pub struct Application {
     spotify: Spotify,
     /// Internally shared
     event_manager: EventManager,
-    /// An IPC implementation using the D-Bus MPRIS protocol, used to control and inspect ncspot.
+    /// An IPC implementation using the D-Bus MPRIS protocol, used to control and inspect Resonance.
     #[cfg(unix)]
     ipc: Option<IpcSocket>,
     /// The object to render to the terminal.
@@ -153,7 +153,7 @@ pub struct Application {
 }
 
 impl Application {
-    /// Create a new ncspot application.
+    /// Create a new Resonance application.
     ///
     /// # Arguments
     ///
@@ -235,7 +235,7 @@ impl Application {
             Some(
                 ipc::IpcSocket::new(
                     ASYNC_RUNTIME.get().unwrap().handle(),
-                    runtime_directory.join(format!("{}.sock", ncspot::BIN_NAME)),
+                    runtime_directory.join(format!("{}.sock", resonance::BIN_NAME)),
                     event_manager.clone(),
                     queue.clone(),
                 )

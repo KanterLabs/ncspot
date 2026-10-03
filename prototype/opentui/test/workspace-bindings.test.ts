@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { keyBindingName, routeForCommand } from "../src/workspace/bindings.js";
-test("custom ncspot bindings preserve modifiers and map UI commands locally", () => {
+test("custom Resonance bindings preserve modifiers and map UI commands locally", () => {
   expect(keyBindingName({ name: "r", shift: true })).toBe("Shift+r");
   expect(keyBindingName({ name: "up", ctrl: true })).toBe("Ctrl+Up");
   expect(keyBindingName({ name: "space" })).toBe("Space");

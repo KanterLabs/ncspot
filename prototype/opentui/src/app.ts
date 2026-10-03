@@ -653,7 +653,7 @@ export function mountResonance(renderer: CliRenderer, options: ResonanceAppOptio
       ...next,
       receivedAtMs,
       positionMs: positionAt(next, receivedAtMs),
-      notice: "Status synchronized  /  ncspot IPC",
+      notice: "Status synchronized  /  Resonance IPC",
     };
     refresh();
   };

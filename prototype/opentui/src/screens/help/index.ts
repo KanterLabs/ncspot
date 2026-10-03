@@ -10,7 +10,7 @@ export const createHelpScreen: ScreenFactory = (ctx, params) => {
   let pending: Promise<void> | undefined;
   function prompt() {
     if (busy || disposed) return;
-    surface.prompt("ncspot command", "", command => { void run(command); });
+    surface.prompt("Resonance command", "", command => { void run(command); });
   }
   async function run(command: string) {
     if (busy || disposed) return;
@@ -35,7 +35,7 @@ export const createHelpScreen: ScreenFactory = (ctx, params) => {
           const data = await ctx.api.call<SettingsData>("settings.get");
           if (!disposed) {
             surface.setRows(helpRows(data.bindings ?? {}), undefined, row => { if (row.id === "command") prompt(); });
-            surface.setMessage("Workspace shortcuts above · ncspot bindings below · commands validated by backend");
+            surface.setMessage("Workspace shortcuts above · Resonance bindings below · commands validated by backend");
           }
         } catch (error) {
           if (!disposed) surface.setMessage(`Bindings unavailable: ${errorText(error)}`, true);

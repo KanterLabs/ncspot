@@ -130,12 +130,12 @@ pub fn user_runtime_directory() -> Option<PathBuf> {
     let unix_runtime_directory = PathBuf::from("/tmp/");
 
     if let Some(xdg_runtime_directory) = xdg_runtime_directory() {
-        Some(xdg_runtime_directory.join(ncspot::BIN_NAME))
+        Some(xdg_runtime_directory.join(resonance::BIN_NAME))
     } else if cfg!(target_os = "linux") && linux_runtime_directory.exists() {
-        Some(linux_runtime_directory.join(ncspot::BIN_NAME))
+        Some(linux_runtime_directory.join(resonance::BIN_NAME))
     } else if unix_runtime_directory.exists() {
         Some(
-            unix_runtime_directory.join(format!("{}-{}", ncspot::BIN_NAME, unsafe {
+            unix_runtime_directory.join(format!("{}-{}", resonance::BIN_NAME, unsafe {
                 libc::getuid()
             })),
         )

@@ -45,7 +45,7 @@ enum Attempt {
     Failed,
 }
 
-/// Tracks in a row that may fail to play before ncspot stops trying the next one.
+/// Tracks in a row that may fail to play before Resonance stops trying the next one.
 /// One bad track is skipped; a run of them means Spotify isn't streaming to this
 /// session at all, and skipping through the rest of the queue would only hide it.
 const MAX_FAILURES: u32 = 3;
