@@ -235,10 +235,13 @@ def files_under(directory, cache=False):
     return files
 
 sources = []
+executable_sources = set()
 for name in ("resonance", "ncspot", "resonance-opentui"):
     source = bin_dir / name
     if source.is_file():
-        sources.append(source.resolve())
+        resolved = source.resolve()
+        sources.append(resolved)
+        executable_sources.add(resolved)
 for kind, directories in roots.items():
     for directory in set(directories):
         sources.extend(files_under(directory, cache=kind == "cache"))
@@ -263,14 +266,14 @@ try:
         for attempt in range(3):
             expected = hashlib.sha256(source.read_bytes()).hexdigest()
             shutil.copy2(source, target)
-            os.chmod(target, 0o600)
+            os.chmod(target, 0o700 if source in executable_sources else 0o600)
             actual = hashlib.sha256(target.read_bytes()).hexdigest()
             current = hashlib.sha256(source.read_bytes()).hexdigest()
             if actual == expected == current:
                 break
         else:
             raise RuntimeError(f"a file changed during backup: {source}")
-        manifest.append({"path": str(relative), "source": str(source), "sha256": actual, "bytes": target.stat().st_size, "mode": source.stat().st_mode & 0o777})
+        manifest.append({"path": str(relative), "source": str(source), "sha256": actual, "bytes": target.stat().st_size, "mode": source.stat().st_mode & 0o777, "kind": "binary" if source in executable_sources else "data"})
     record = root / "manifest.json"
     record.write_text(json.dumps({"version": 1, "files": manifest}, indent=2) + "\n")
     os.chmod(record, 0o600)

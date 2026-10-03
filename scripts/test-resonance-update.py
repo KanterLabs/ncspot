@@ -206,6 +206,7 @@ def seed_home(
     ncspot_sha: str = OLD_SHA,
     info_failure: bool = False,
     symlink_config_state: bool = False,
+    symlink_primary_binary: bool = False,
 ) -> dict[str, bytes]:
     bin_dir = home / ".local/bin"
     fake_binary(bin_dir / "resonance", "resonance", resonance_sha, info_failure=info_failure)
@@ -253,6 +254,13 @@ def seed_home(
         cache_link.unlink()
         cache_link.symlink_to(cache_target, target_is_directory=True)
         paths["cache"] = cache_file
+    if symlink_primary_binary:
+        primary_link = bin_dir / "resonance"
+        primary_target = home / "external-resonance-binary"
+        primary_target.write_bytes(primary_link.read_bytes())
+        primary_target.chmod(primary_target.stat().st_mode | stat.S_IXUSR)
+        primary_link.unlink()
+        primary_link.symlink_to(primary_target)
     return {str(path): payloads[key] for key, path in paths.items()}
 
 
@@ -276,7 +284,8 @@ def assert_snapshot(home: Path, seeded: dict[str, bytes]) -> Path:
         entry = entries[source]
         copied = root / entry["path"]
         check(copied.read_bytes() == payload, f"snapshot payload mismatch for {source}")
-        check(copied.stat().st_mode & 0o777 == 0o600, f"snapshot mode is too broad for {source}")
+        expected_mode = 0o700 if "/.local/bin/" in source else 0o600
+        check(copied.stat().st_mode & 0o777 == expected_mode, f"snapshot mode is wrong for {source}")
         for parent in copied.relative_to(root).parents:
             if parent != Path("."):
                 check((root / parent).stat().st_mode & 0o777 == 0o700, f"snapshot directory mode is broad for {source}")
@@ -324,17 +333,58 @@ def main() -> int:
         for name in ("resonance", "ncspot", "resonance-opentui"):
             installed = home / ".local/bin" / name
             check(installed.is_file() and os.access(installed, os.X_OK), f"required binary is not executable: {name}")
-        old_resonance = next(
-            snapshot / entry["path"]
+        rollback_entries = {
+            Path(entry["source"]).name: snapshot / entry["path"]
             for entry in json.loads((snapshot / "manifest.json").read_text())["files"]
-            if entry["source"] == str(home / ".local/bin/resonance")
-        )
-        rollback_probe = subprocess.run(["bash", str(old_resonance), "--version"], text=True, capture_output=True, check=False)
-        check(rollback_probe.returncode == 0 and OLD_SHA in rollback_probe.stdout, "rollback executable is not usable")
+            if "/.local/bin/" in entry["source"]
+        }
+        for name in ("resonance", "ncspot", "resonance-opentui"):
+            check(name in rollback_entries, f"rollback snapshot omitted {name}")
+            rollback_probe = subprocess.run(
+                [str(rollback_entries[name]), "--version"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            check(rollback_probe.returncode == 0, f"rollback executable is not directly usable: {name}")
+            if name != "resonance-opentui":
+                check(OLD_SHA in rollback_probe.stdout, f"rollback version content is wrong: {name}")
         check((home / "custom-data").read_bytes() == seeded[str(home / "custom-data")], "data was modified")
         check((home / "custom-state").read_bytes() == seeded[str(home / "custom-state")], "state was modified")
         check((snapshot / "manifest.json").stat().st_mode & 0o777 == 0o600, "manifest permissions are broad")
         report["cases"].append("full-install-and-verified-snapshot")
+
+        # An installed executable may itself be a symlink into custom storage.
+        # The resolved retained copy must still be directly executable after
+        # the update, while mutable data keeps the stricter file mode.
+        binary_symlink_home = root / "binary-symlink-home"
+        binary_symlink_home.mkdir()
+        seed_home(binary_symlink_home, symlink_primary_binary=True)
+        binary_symlink_fixture = root / "binary-symlink-artifact"
+        binary_symlink_fixture.mkdir()
+        make_archive(binary_symlink_fixture, include_frontend=True, checksum_ok=True)
+        result = run_update(
+            repo,
+            binary_symlink_home,
+            fake_bin,
+            source=str(repo / "scripts/resonance-update.sh"),
+            fixture=binary_symlink_fixture,
+        )
+        check(result.returncode == 0, f"symlinked executable update failed:\n{result.stdout}\n{result.stderr}")
+        binary_snapshot = sorted((binary_symlink_home / "xdg-data/resonance/rollback").glob("pre-update-*"))[0]
+        binary_manifest = json.loads((binary_snapshot / "manifest.json").read_text())["files"]
+        binary_target = binary_symlink_home / "external-resonance-binary"
+        binary_entry = next((entry for entry in binary_manifest if entry["source"] == str(binary_target)), None)
+        check(binary_entry is not None, "resolved symlinked executable was omitted from snapshot")
+        binary_probe = subprocess.run(
+            [str(binary_snapshot / binary_entry["path"]), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        check(binary_probe.returncode == 0 and OLD_SHA in binary_probe.stdout, "resolved symlinked executable is not directly usable")
+        check((binary_snapshot / binary_entry["path"]).stat().st_mode & 0o777 == 0o700, "resolved executable snapshot mode is not 0700")
+        report["cases"].append("symlinked-executable-rollback")
 
         # A primary binary that cannot report its effective paths must fail
         # closed.  Falling back to guessed roots could omit a custom config or
