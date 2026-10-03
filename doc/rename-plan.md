@@ -31,7 +31,7 @@ Keep `ncspot` only where it has a specific purpose: original authorship and lice
 
 ## Implementation work units
 
-Implementation and repository cutover are published; release verification is active. No matching Helm project existed, and the configured agent token rejected project creation because it lacks `projects:write`; this document carries the checkpoints until the matching project can be created with authorized access.
+Implementation, repository cutover, and release verification are published and verified. Two administrative checks remain below. No matching Helm project existed, and the configured agent token rejected project creation because it lacks `projects:write`; this document carries the checkpoints until the matching project can be created with authorized access.
 
 ### 1. Complete internal and runtime naming
 
@@ -80,8 +80,30 @@ The rename is complete when a new user can find, install, launch, configure, upd
 - Internal crate/runtime names, frontend copy, documentation, and update command are implemented. The old executable/update commands and populated legacy directory lookup remain supported.
 - The Rust workspace suite passed: 323 tests, with three existing opt-in fixtures excluded. All 160 frontend tests and the real Rust/OpenTUI engine contract passed. The compiled standalone frontend launched the Settings demo in an 80-column terminal; its configuration guidance was shortened to fit.
 - The updater passed nine isolated E2E fixtures covering primary/legacy commands, checksums, incomplete archives, populated snapshots, private snapshot permissions, symlink-backed data and executables, directly executable rollback copies, failed path discovery, and the up-to-date shortcut.
-- A native release archive and actual Debian package passed eight installation checks each, including fresh/legacy/both-directory/custom-base cases and retained rollback executable checks. Existing Rust tests also verified populated legacy CBOR decoding and rollback compatibility. Reports are retained under `/tmp/resonance-rename-verification` and `/tmp/resonance-update-e2e-report.json` on the development machine.
+- The final downloaded Linux and Fedora archives and actual Debian package passed eight installation checks each, including fresh/legacy/both-directory/custom-base cases and retained rollback executable checks. Existing Rust tests also verified populated legacy CBOR decoding and rollback compatibility. Reports are retained under `/tmp/resonance-rename-verification` and `/tmp/resonance-update-e2e-report.json` on the development machine.
 - GitHub was renamed in place to `KanterLabs/resonance`; its repository ID and history were retained, and the old API URL resolves to the renamed repository. Gitea now hosts the canonical `KanterLabs/resonance` repository, with a push-on-commit GitHub mirror. The implementation was published through [PR #1](https://github.com/KanterLabs/resonance/pull/1), which is merged. Canonical and public main commits were verified equal, and the push mirror reported no error.
 - CI uses `homelab-heavy` for Linux Rust/frontend builds and `homelab` for updater checks. Native ARM, macOS, and Windows retain hosted runners because the homelab pool is Linux x86_64. Release workflows package the frontend on Unix and build Windows with the legacy interface.
-- T3 displays the project as Resonance at `/home/shane/projects/resonance`. The old workspace path remains a compatibility symlink. PR CI and main CI passed all seven jobs; the Fedora package build passed. Native release verification remains active.
+- T3 displays the project as Resonance at `/home/shane/projects/resonance`. The old workspace path remains a compatibility symlink. PR CI and final main CI passed all seven jobs. Final Fedora and CD builds passed for Linux x86_64/ARM, Intel/Apple Silicon macOS, and Windows. Every downloaded archive passed its checksum, portable manifest path, file-hash, and required-asset audit; Unix archives contain the current updater.
 - Helm project creation is blocked by the current agent token's missing project-write scope. Hark lifecycle publishing timed out. Spotify dashboard display branding awaits confirmation because no connected browser is available; the established client ID and callback were preserved.
+
+## Final verification record
+
+The verified code commit is `5c19ecbbb25f10effbbd6cfa707e21d107601697`. This status-only document update follows it without changing runtime code or package inputs. The workflows published commit-based build artifacts; the existing `1.4.0` package version was retained and no new stable release tag was created.
+
+| Gate | Result |
+| --- | --- |
+| [Final CI](https://github.com/KanterLabs/resonance/actions/runs/37131878140) | Seven jobs passed, including Rust, frontend/engine integration, updater E2E, format, and clippy |
+| [Final Fedora build](https://github.com/KanterLabs/resonance/actions/runs/37131878136) | Complete package passed hosted and downloaded installation verification |
+| [Final native release build](https://github.com/KanterLabs/resonance/actions/runs/37131905941) | All five platform jobs passed, including the actual Debian package |
+| Data preservation | Populated path/CBOR fixtures, byte-preservation checks, verified snapshots, and retained rollback executables passed |
+| Repository identity | In-place GitHub rename, canonical Gitea publication, synchronized main, merged/linked PR, and migrated workspace verified |
+| Runner policy | Linux x86_64 builds used `homelab-heavy`; short checks used `homelab`; ARM/macOS/Windows used native hosted runners for the documented OS/architecture exceptions |
+
+The GitHub runner API confirmed the homelab assignments and an empty runner registration list after the final jobs. Direct K3s controller/pod cleanup was not inspected because this workspace has no kubectl and read-only SSH was unavailable. Sanitized runner records and package reports remain under `/tmp/resonance-rename-verification`; obsolete duplicate candidate archives were removed after verification, while the pre-cutover Git bundle and reports were retained.
+
+## Remaining administrative checks
+
+- **Spotify dashboard display name:** confirm or change the existing developer app's display branding to Resonance. The connected browser is unavailable, so this could not be inspected. The established client ID and callback are unchanged.
+- **Matching Helm project:** create the Resonance project and record these verified checkpoints once authorized project-write access is available. The current agent token returned HTTP 403 because it lacks `projects:write`; no unrelated project was used.
+
+Hark lifecycle reporting also timed out. These access/reporting limits do not invalidate the code or package checks, but the two administrative checks above remain open.
