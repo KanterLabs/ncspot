@@ -82,7 +82,7 @@ def main():
         (stage / 'release.json').write_text(json.dumps({
             'product': 'Resonance', 'version': args.version, 'platform': args.platform,
             'interface': 'legacy Cursive' if windows else 'OpenTUI',
-            'files': {str(p.relative_to(stage)): hashlib.sha256(p.read_bytes()).hexdigest()
+            'files': {p.relative_to(stage).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                       for p in sorted(stage.rglob('*')) if p.is_file()},
         }, indent=2) + '\n')
         if windows:
